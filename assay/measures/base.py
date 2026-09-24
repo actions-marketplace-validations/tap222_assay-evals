@@ -42,11 +42,11 @@ class Measure:
 
     Subclasses set the metadata and implement compute(). Every measure reports
     an overall row plus one row per value of each dimension, so a failure in
-    one county can't hide inside a healthy aggregate.
+    one segment can't hide inside a healthy aggregate.
     """
 
     id: str = ""
-    roadmap_ref: str = ""  # e.g. "Measure 2" or "DEV-NEW-3"
+    tag: str = ""  # short category shown on the dashboard, e.g. "Errors"
     name: str = ""
     question: str = ""
     unit: str = "ratio"  # ratio | usd | seconds | ms | count | psi
@@ -60,7 +60,7 @@ class Measure:
 
     def describe(self) -> dict:
         return {
-            "id": self.id, "roadmap_ref": self.roadmap_ref, "name": self.name,
+            "id": self.id, "tag": self.tag, "name": self.name,
             "question": self.question, "unit": self.unit,
             "higher_is_better": self.higher_is_better, "dimensions": list(self.dimensions),
         }

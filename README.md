@@ -1,25 +1,84 @@
 # Assay
 
-Evaluation and observability for document-AI pipelines. It is the product form of the
-DocAI Core Evaluation Roadmap: named measures, reported per slice, with alerting,
-per-document tracing, and release gates that decide on real signal instead of
-infrastructure health.
+Evaluation and observability for document-intelligence pipelines: OCR, classification,
+splitting and field extraction, with or without LLMs.
 
-It runs as a separate service. It **reads** a pipeline's data and never writes to it.
+Assay answers what a pipeline's own logs can't:
 
-## Quick start (demo data, no database needed)
+- Is anything broken right now?
+- Which customer, document type, stage or model is it broken for?
+- Which documents are behind the number?
+- Is this release safe to ship?
+
+It reports named measures per slice, with alerting, per-document tracing, and release gates
+that decide on real signal instead of infrastructure health.
+
+It runs as a separate service. It **reads** your pipeline's data and never writes to it.
+
+## Quick start (demo data, nothing to connect)
 
 ```bash
 pip install -e ".[dev]"
 python -m assay demo      # synthetic tenant, 7 weeks of daily runs, staged incidents
 python -m assay serve     # http://127.0.0.1:8400  (API docs at /docs)
-pytest                    # 50 tests
+pytest
 ```
 
-The demo tenant is generated data shaped after the roadmap's findings. It includes four
-staged incidents: an indexing failure spike that resolves, slow classification calls, a new
-county flooding the input mix, and Cook IL documents going missing downstream. It is not
-real pipeline data.
+The demo is a generated pipeline serving four customers. It has four staged incidents:
+- a field-extraction failure spike that resolves
+- slow classification calls
+- a new customer shifting the input mix
+- one customer's documents going missing downstream
+
+None of it is real data.
+
+## Connect your pipeline
+
+There are two ways to connect. Both feed the same measures.
+
+### 1. Point Assay at your database (read-only)
+
+Assay needs four kinds of records. Most pipelines already have them:
+
+| Record | What it is | Key fields |
+|---|---|---|
+| **documents** | one row per document or file | `document_id`, `received_at`, `completed_at`, `segment`, `document_type`, `processing_mode`, `file_hash` |
+| **stage_runs** | one row per pipeline stage per document | `document_id`, `stage`, `status`, `started_at`, `finished_at`, `did_work` |
+| **calls** | one row per model call | `call_id`, `stage`, `ts`, `model_declared`, `model_served`, `latency_ms`, `cost_usd`, `status`, `resolving_layer`, `gate_reason`, `code_revision` |
+| **indexed** | one row per extracted value | `document_id`, `has_positions` |
+
+`segment` is whatever you want failures broken out by, such as customer, region, business
+unit or jurisdiction. `document_type` is your own taxonomy.
+
+Write a mapping that says where each field lives in your schema. The mapping has a `FROM`
+clause per record type and a SQL expression per field. See `mappings/example.json`. Fields
+you don't record can be set to `"NULL"`. The measures that need them then say *unmeasured*
+instead of guessing.
+
+```bash
+pip install -e ".[postgres]"
+export ASSAY_SOURCE_URL=postgresql+psycopg://readonly:***@your-db:5432/pipeline
+export ASSAY_SOURCE_MAPPING=./mappings/mine.json
+python -m assay check-source                  # tests every mapped field against the live DB
+python -m assay serve --every 60 --source sql # hourly runs over a 1-day window
+```
+
+If your tables already follow the reference schema in `assay/sources/sql.py`
+(`documents`, `stage_runs`, `model_calls`, `extractions`), you don't need a mapping.
+Any database SQLAlchemy supports works. Use a read-only role; Postgres sessions are also
+opened `READ ONLY`.
+
+### 2. Push events
+
+If you can't expose a database, send the same records over HTTP:
+
+```
+POST /v1/events/documents | /v1/events/stage-runs | /v1/events/calls | /v1/events/indexed
+X-Tenant: acme
+```
+
+Then run or schedule the source `events:acme`. Each tenant's data is isolated. Set
+`ASSAY_API_KEY` to require an `X-API-Key` header.
 
 ## What you get
 
@@ -31,25 +90,27 @@ real pipeline data.
 | **Alerts** | Pending, open and resolved alerts, with how long each lasted. |
 | **Release gates** | Every advance, hold or rollback decision, with its lineage. |
 
-The overview and measure pages link to each other. Every alert has an **Investigate** link to
-its slice, and handoff or latency measures link to the documents behind the number.
-`#measures/<id>` and `#trace/<document_id>` are shareable links.
+Every alert has an **Investigate** link to its slice. `#measures/<id>` and
+`#trace/<document_id>` are shareable links.
 
 ## Measures
 
-| Group | id | Roadmap |
-|---|---|---|
-| Operational health | `document_volume`, `stage_failure_rate`, `call_error_rate`, `call_latency_p95`, `time_to_complete_p90`, `input_mix_drift` | Rate / errors / duration, Measure 13, V2-4 |
-| Pipeline integrity | `fallback_attribution`, `model_mismatch`, `cost_coverage`, `revision_coverage`, `noop_stage_rate`, `source_positions`, `handoff_loss` | Measures 2, 5, 7, 8, 9, 12 |
-| Accuracy | `split_stp`, `field_accuracy`, `superseded_value_rate`, `escape_rate` | DEV-NEW-2/1/7/8; *unmeasured* with the reason until ground truth exists |
+| Group | Measures |
+|---|---|
+| **Operational health** | `document_volume`, `stage_failure_rate`, `call_error_rate`, `call_latency_p95`, `time_to_complete_p90`, `input_mix_drift` |
+| **Pipeline integrity** | `fallback_attribution` (does each call record which model tier answered, and why), `model_mismatch` (served ≠ declared), `cost_coverage`, `revision_coverage`, `noop_stage_rate` (stages that report success without doing work), `source_positions` (values a reviewer can click through to), `handoff_loss` (finished documents missing downstream) |
+| **Accuracy** | `split_stp`, `field_accuracy`, `superseded_value_rate`, `escape_rate`: listed as *unmeasured* until labelled ground truth can be ingested |
 
-Every measure reports an overall row plus one row per slice value (county, instrument type,
-stage, model, mode). A missing dimension is kept as an `(unrecorded)` slice. A source that
-can't provide the data makes a measure *unmeasured*, never 0.
+Every measure reports an overall row plus one row per slice value. A missing dimension is
+kept as an `(unrecorded)` slice. A source that can't provide the data makes a measure
+*unmeasured*, never 0.
 
 `input_mix_drift` is the population stability index against the previous window of equal
-length, split into each category's contribution. It exists so a moving accuracy number can
-be told apart from a moving population.
+length, split into each category's contribution. It tells a moving accuracy number apart
+from a moving population.
+
+Adding a measure means writing a class in `assay/measures/` with a `compute(source, window)`
+and registering it in `assay/measures/__init__.py`.
 
 ## Alerting
 
@@ -61,64 +122,16 @@ After every run, each measured slice is checked two ways:
   slices get wide bands and a flat history never produces a zero-width band.
   Measures with a direction alert only when they get worse. Volume and drift alert either way.
 - **SLO:** the value is on the wrong side of a target. Targets can apply to the overall
-  value, to one slice, or to *every* slice of a dimension, for example "no county loses more
-  than 5% at the handoff". The most specific target wins.
+  value, to one slice, or to *every* slice of a dimension, for example "no customer loses
+  more than 5% at the handoff". The most specific target wins.
 
 A condition seen once is **pending** and notifies nobody. It **opens** after 2 consecutive
 runs (`ASSAY_ALERT_AFTER_RUNS`) and **resolves** on the first run where it no longer holds.
-Slices under 30 (`ASSAY_ALERT_MIN_N`) are never judged. On the demo's 7 weeks, this produced
-20 anomaly alerts and caught all four staged incidents. Before persistence and sampling error
-were added, the same data produced 118.
+Slices under 30 (`ASSAY_ALERT_MIN_N`) are never judged.
 
 Notifications go to `ASSAY_WEBHOOK_URL`: Slack format by default, or structured JSON with
 `ASSAY_WEBHOOK_FORMAT=json`. Messages link straight to the measure when `ASSAY_PUBLIC_URL`
 is set.
-
-## Point it at DocAI Core
-
-```bash
-export ASSAY_DOCAI_URL=postgresql+psycopg://assay_ro:***@host:5432/docai
-pip install -e ".[postgres]"
-python -m assay check-source                      # which mapped columns exist
-python -m assay serve --every 60 --source docai_core   # hourly runs over a 1-day window
-```
-
-Table names come from the architecture reference (`documents`, `document_stage_executions`,
-`ai_api_calls`, `indexed_data` in the `docai` schema). **Several column names are guesses**
-(`model_requested`, `estimated_cost`, `duration_ms`, `status`, `completed_at`, `county`,
-`file_hash`, …). `check-source` lists every one it can't find. Fix them in a JSON override
-(`ASSAY_DOCAI_MAPPING`, see `mapping.example.json`), or set them to `"NULL"` so the measure
-reports *unmeasured*. Use a read-only role; the adapter also opens every transaction
-`READ ONLY`.
-
-Scheduling: the built-in scheduler suits a single instance. With several replicas, run it on
-one only, or schedule `python -m assay run --source docai_core --days 1` from Celery Beat or
-cron. Keep the window and the interval steady, because the baseline compares like with like.
-
-## Deploy on Vercel
-
-The repo is ready to import at **vercel.com/new**. There are no build settings to change:
-Vercel detects the FastAPI `app` in the root `app.py`, which serves the API and dashboard.
-
-- **With no environment variables**, results go to SQLite in `/tmp`. Each fresh instance
-  loads the demo tenant on its first request (about 3–6 s), and the data is lost when the
-  instance is recycled. That's fine for showing the product, but it isn't a real store.
-- **For real use**, set `ASSAY_STORE_URL` to a Postgres URL, for example
-  `postgresql+psycopg://…` from Neon in the Vercel marketplace. Then load the demo once
-  from your machine (`ASSAY_STORE_URL=… python -m assay demo`), or point it at DocAI Core
-  with `ASSAY_DOCAI_URL`.
-- **Scheduled runs:** serverless has no background process. Set `CRON_SECRET` and
-  `ASSAY_SCHEDULE_SOURCES`, then add a `vercel.json` with a cron:
-  `"crons": [{"path": "/v1/cron", "schedule": "0 6 * * *"}]`. The Hobby plan allows daily
-  crons only.
-- Set `ASSAY_API_KEY` before sharing the URL outside the team.
-
-## Other teams (multi-tenant path)
-
-Teams without a DocAI-shaped database push events instead:
-`POST /v1/events/{calls,documents,stage-runs,indexed}` with an `X-Tenant` header, then
-schedule `events:<tenant>`. Set `ASSAY_API_KEY` to require `X-API-Key`. The dashboard asks
-for the key once.
 
 ## Release gates
 
@@ -132,10 +145,28 @@ if even the optimistic end of the confidence interval is worse than max(toleranc
 floor). It holds if the interval straddles that limit, and advances otherwise.
 `severity: "high"` halves the tolerance. The worst slice decides.
 
+## Deploy
+
+**Docker:** `docker build -t assay . && docker run -p 8400:8400 -v assay-data:/data assay`
+
+**Vercel:** import the repo at vercel.com/new. There are no build settings to change,
+because Vercel detects the FastAPI `app` in the root `app.py`.
+- **With no environment variables**, results go to SQLite in `/tmp`. Each fresh instance
+  loads the demo on its first request, and the data is lost when the instance is recycled.
+  That's fine for a showcase.
+- **For real use**, set `ASSAY_STORE_URL` to a Postgres URL, for example from Neon in the
+  Vercel marketplace. Also set `ASSAY_SOURCE_URL` and `ASSAY_SOURCE_MAPPING`, or use events.
+- **Scheduled runs:** serverless has no background process. Set `CRON_SECRET` and
+  `ASSAY_SCHEDULE_SOURCES`, then add a `vercel.json` with
+  `"crons": [{"path": "/v1/cron", "schedule": "0 6 * * *"}]`.
+- Set `ASSAY_API_KEY` before sharing the URL.
+
+All settings are listed in `.env.example`.
+
 ## Layout
 
 ```
-sources/      adapters → canonical records; docai_core.py (read-only SQL), events.py (ingest)
+sources/      sql.py (any database, via a mapping), events.py (pushed events)
 measures/     operations.py, pipeline.py, ground_truth.py; each a class with compute()
 alerts.py     bands, SLO matching, pending → open → resolved, webhook
 trace.py      per-document trace and flags; slowest / stuck / lost finders
@@ -147,13 +178,12 @@ api.py        FastAPI; dashboard in static/index.html
 
 ## Not built yet
 
+- **Ground-truth ingest:** the accuracy measures need a way to load labelled values.
 - **Auth:** there is one shared API key, with no per-tenant keys, users or roles.
 - **Alert routing:** there is no per-team routing, silencing, acknowledgement or on-call
-  paging (PagerDuty). Everything goes to one webhook.
+  paging (PagerDuty).
 - **Scale:** measures compute in Python over fetched rows. That is fine for tens of thousands
-  of calls per window. Push aggregation into SQL before running hourly at production volume.
-- **Timing noise:** p90 time-to-complete on small county slices is still the noisiest alert
-  in the demo. It needs a proper error estimate for quantiles, such as a bootstrap.
+  of calls per window. Push aggregation into SQL before running at production volume.
+- **Timing noise:** p90 completion time on small slices is the noisiest alert. It needs a
+  bootstrap error estimate.
 - **Migrations:** tables are created on startup. Add Alembic before changing the schema.
-- **Ground truth:** accuracy measures stay *unmeasured* until DEV-NEW-1 and DEV-NEW-2
-  deliver labels.

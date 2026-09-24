@@ -83,7 +83,7 @@ alerts = Table(
     Column("message", String(512), nullable=False),
 )
 
-# --- Generic event ingest, so a team without a DocAI-shaped DB can push data ---
+# --- Event ingest, for pipelines that push records instead of exposing a database ---
 
 event_calls = Table(
     "event_calls", metadata,
@@ -98,8 +98,8 @@ event_calls = Table(
     Column("gate_reason", String(128)),
     Column("cost_usd", Float),
     Column("code_revision", String(64)),
-    Column("county", String(128)),
-    Column("instrument_type", String(128)),
+    Column("segment", String(128)),
+    Column("document_type", String(128)),
     Column("latency_ms", Float),
     Column("status", String(32)),
 )
@@ -113,8 +113,8 @@ event_documents = Table(
     Column("status", String(64)),
     Column("processing_mode", String(32)),
     Column("file_hash", String(128)),
-    Column("county", String(128)),
-    Column("instrument_type", String(128)),
+    Column("segment", String(128)),
+    Column("document_type", String(128)),
     Column("delivered_downstream", Boolean),
 )
 
@@ -136,8 +136,8 @@ event_indexed = Table(
     Column("tenant", String(64), nullable=False, index=True),
     Column("document_id", String(128), nullable=False),
     Column("has_positions", Boolean, nullable=False),
-    Column("county", String(128)),
-    Column("instrument_type", String(128)),
+    Column("segment", String(128)),
+    Column("document_type", String(128)),
 )
 
 

@@ -1,6 +1,9 @@
-"""Measures computable today from pipeline telemetry alone (no ground truth).
+"""Pipeline integrity: measures computable from pipeline telemetry alone.
 
-Each maps to a measure or epic in the DocAI Core evaluation roadmap.
+None of these need labelled data. They catch the failures that make every
+other number untrustworthy: work that silently didn't happen, spend that
+isn't recorded, models that aren't the ones declared, documents that never
+reach the system downstream.
 """
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ from assay.units import fmt
 
 class FallbackAttribution(Measure):
     id = "fallback_attribution"
-    roadmap_ref = "Measure 2 · DEV-NEW-3"
+    tag = "Lineage"
     name = "Fallback attribution"
     question = "What share of AI calls record which tier answered and why?"
     dimensions = ("stage", "model_served")
@@ -31,7 +34,7 @@ class FallbackAttribution(Measure):
 
 class ModelMismatch(Measure):
     id = "model_mismatch"
-    roadmap_ref = "Measure 2 caveat"
+    tag = "Lineage"
     name = "Declared vs served model"
     question = "How often is a call served by a different model than it declared?"
     higher_is_better = False
@@ -49,7 +52,7 @@ class ModelMismatch(Measure):
 
 class CostCoverage(Measure):
     id = "cost_coverage"
-    roadmap_ref = "Measure 9"
+    tag = "Cost"
     name = "Cost coverage"
     question = "What share of AI calls carry a recorded cost?"
 
@@ -68,7 +71,7 @@ class CostCoverage(Measure):
 
 class RevisionCoverage(Measure):
     id = "revision_coverage"
-    roadmap_ref = "Measure 5 prerequisite"
+    tag = "Lineage"
     name = "Code revision coverage"
     question = "What share of AI calls record the code revision that made them?"
 
@@ -91,7 +94,7 @@ class RevisionCoverage(Measure):
 
 class NoOpStages(Measure):
     id = "noop_stage_rate"
-    roadmap_ref = "Measure 8"
+    tag = "Integrity"
     name = "Success without work"
     question = "What share of successful stage runs did no work at all?"
     higher_is_better = False
@@ -107,10 +110,10 @@ class NoOpStages(Measure):
 
 class SourcePositions(Measure):
     id = "source_positions"
-    roadmap_ref = "Measure 7 · DEV-NEW-1"
+    tag = "Traceability"
     name = "Machine-traceable values"
-    question = "What share of indexed rows carry a clickable source position?"
-    dimensions = ("county", "instrument_type")
+    question = "What share of extracted values carry a source position a reviewer can click through to?"
+    dimensions = ("segment", "document_type")
 
     def compute(self, source, window: Window) -> MeasureOutput:
         rows = source.indexed(window)
@@ -121,11 +124,11 @@ class SourcePositions(Measure):
 
 class HandoffLoss(Measure):
     id = "handoff_loss"
-    roadmap_ref = "Measure 12 · DEV-NEW-6"
+    tag = "Delivery"
     name = "Lost at the handoff"
     question = "What share of finished documents never reached the downstream system?"
     higher_is_better = False
-    dimensions = ("county", "processing_mode")
+    dimensions = ("segment", "processing_mode")
 
     def compute(self, source, window: Window) -> MeasureOutput:
         downstream = source.downstream_hashes()
@@ -141,12 +144,12 @@ class HandoffLoss(Measure):
 
 class TimeToComplete(Measure):
     id = "time_to_complete_p90"
-    roadmap_ref = "Measure 13"
+    tag = "Latency"
     name = "Time to complete (p90)"
     question = "How long does the slowest tenth of documents take from arrival to done?"
     unit = "seconds"
     higher_is_better = False
-    dimensions = ("processing_mode", "county")
+    dimensions = ("processing_mode", "segment")
 
     def compute(self, source, window: Window) -> MeasureOutput:
         docs = source.documents(window)

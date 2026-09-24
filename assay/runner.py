@@ -13,20 +13,20 @@ from assay.config import Settings
 from assay.measures import REGISTRY
 from assay.measures.base import MeasureOutput, unmeasured
 from assay.models import Window
-from assay.sources.docai_core import DocAICoreSource
+from assay.sources.sql import SQLSource
 from assay.sources.events import EventsSource
 
 log = logging.getLogger(__name__)
 
 
 def resolve_source(name: str, engine: Engine, settings: Settings):
-    if name == "docai_core":
-        if not settings.docai_url:
-            raise ValueError("ASSAY_DOCAI_URL is not set, so the docai_core source is unavailable.")
-        return DocAICoreSource(settings.docai_url, settings.downstream_url, settings.downstream_hash_sql)
+    if name == "sql":
+        if not settings.source_url:
+            raise ValueError("ASSAY_SOURCE_URL is not set, so the sql source is unavailable.")
+        return SQLSource(settings.source_url, settings.downstream_url, settings.downstream_hash_sql)
     if name.startswith("events:"):
         return EventsSource(engine, name.split(":", 1)[1])
-    raise ValueError(f"Unknown source '{name}'. Use 'docai_core' or 'events:<tenant>'.")
+    raise ValueError(f"Unknown source '{name}'. Use 'sql' or 'events:<tenant>'.")
 
 
 class CachedSource:
@@ -147,7 +147,7 @@ def changes(engine: Engine, source_name: str, min_n: int = 30, limit: int = 12) 
     """Slices whose change between the previous run and the latest is bigger than
     noise, worst first.
 
-    Rates and counts must move by more than 3 standard errors (so a county
+    Rates and counts must move by more than 3 standard errors (so a segment
     going from 54 to 41 documents doesn't make the list); timings and other
     units, which have no simple error formula, must move by more than 15% and
     by more than the unit's minimum meaningful step (e.g. 0.05 PSI).

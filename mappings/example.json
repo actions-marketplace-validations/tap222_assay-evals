@@ -1,0 +1,48 @@
+{
+  "documents": {
+    "from": "pipeline.documents d",
+    "columns": {
+      "document_id": "d.id",
+      "received_at": "d.created_at",
+      "completed_at": "(SELECT max(e.finished_at) FROM pipeline.stage_executions e WHERE e.document_id = d.id AND e.stage = 'publish')",
+      "document_type": "d.document_type",
+      "segment": "d.jurisdiction",
+      "file_hash": "d.sha256"
+    }
+  },
+  "stage_runs": {
+    "from": "pipeline.stage_executions e",
+    "columns": {
+      "document_id": "e.document_id",
+      "stage": "e.stage",
+      "status": "e.state",
+      "started_at": "e.started_at",
+      "finished_at": "e.finished_at",
+      "did_work": "NULL"
+    }
+  },
+  "calls": {
+    "from": "pipeline.llm_calls c LEFT JOIN pipeline.documents d ON d.id = c.document_id",
+    "columns": {
+      "call_id": "c.id",
+      "ts": "c.created_at",
+      "model_declared": "c.model_requested",
+      "model_served": "c.model",
+      "cost_usd": "c.cost",
+      "latency_ms": "c.duration_ms",
+      "resolving_layer": "NULL",
+      "gate_reason": "NULL",
+      "segment": "d.jurisdiction",
+      "document_type": "d.document_type"
+    }
+  },
+  "indexed": {
+    "from": "pipeline.extracted_fields x LEFT JOIN pipeline.documents d ON d.id = x.document_id",
+    "columns": {
+      "has_positions": "(x.bbox IS NOT NULL)",
+      "segment": "d.jurisdiction",
+      "document_type": "d.document_type"
+    }
+  },
+  "noop_stages": ["redaction_placeholder"]
+}

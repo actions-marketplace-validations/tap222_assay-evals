@@ -112,10 +112,10 @@ def slo(measure, dim=None, val=None, target=0.9, source="*"):
 
 
 def test_most_specific_slo_wins():
-    slos = [slo("m", target=0.9), slo("m", "county", None, 0.8), slo("m", "county", "Cook IL", 0.7)]
+    slos = [slo("m", target=0.9), slo("m", "segment", None, 0.8), slo("m", "segment", "acme", 0.7)]
     assert slo_for(slos, "m", None, None)["target"] == 0.9
-    assert slo_for(slos, "m", "county", "Harris TX")["target"] == 0.8
-    assert slo_for(slos, "m", "county", "Cook IL")["target"] == 0.7
+    assert slo_for(slos, "m", "segment", "globex")["target"] == 0.8
+    assert slo_for(slos, "m", "segment", "acme")["target"] == 0.7
     assert slo_for(slos, "m", "stage", "x") is None
 
 
@@ -151,8 +151,8 @@ def test_webhook_posts_slack_payload():
     srv = HTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.handle_request, daemon=True).start()
     send = alerts.webhook_notifier(f"http://127.0.0.1:{srv.server_port}/hook", public_url="https://assay.internal")
-    send("opened", dict(id=1, kind="anomaly", source="docai_core", measure_id="handoff_loss",
-                        dimension="county", slice_value="Cook IL", value=0.9, message="Lost at the handoff is 90%."))
+    send("opened", dict(id=1, kind="anomaly", source="sql", measure_id="handoff_loss",
+                        dimension="segment", slice_value="acme", value=0.9, message="Lost at the handoff is 90%."))
     srv.server_close()
     assert "Lost at the handoff is 90%." in received[0]["text"]
     assert "https://assay.internal/#measures/handoff_loss" in received[0]["text"]
@@ -168,11 +168,11 @@ def test_scheduler_runs_each_source_and_records_failures(tmp_path):
     from assay.config import Settings
     from assay.scheduler import Scheduler
     settings = Settings(store_url=f"sqlite:///{tmp_path / 's.db'}", schedule_minutes=5,
-                        schedule_sources=["events:x", "docai_core"])  # docai_core isn't configured
+                        schedule_sources=["events:x", "sql"])  # no ASSAY_SOURCE_URL configured
     eng = store.make_engine(settings.store_url)
     sched = Scheduler(eng, settings)
     sched.run_once()
     assert sched.last["events:x"]["ok"] is True
-    assert sched.last["docai_core"]["ok"] is False and "ASSAY_DOCAI_URL" in sched.last["docai_core"]["error"]
+    assert sched.last["sql"]["ok"] is False and "ASSAY_SOURCE_URL" in sched.last["sql"]["error"]
     with eng.connect() as c:
         assert len(c.execute(select(store.measure_runs)).all()) == 1

@@ -35,8 +35,8 @@ class CallEvent(BaseModel):
     gate_reason: Optional[str] = None
     cost_usd: Optional[float] = None
     code_revision: Optional[str] = None
-    county: Optional[str] = None
-    instrument_type: Optional[str] = None
+    segment: Optional[str] = None
+    document_type: Optional[str] = None
     latency_ms: Optional[float] = None
     status: Optional[str] = None
 
@@ -48,8 +48,8 @@ class DocumentEvent(BaseModel):
     status: Optional[str] = None
     processing_mode: Optional[str] = None
     file_hash: Optional[str] = None
-    county: Optional[str] = None
-    instrument_type: Optional[str] = None
+    segment: Optional[str] = None
+    document_type: Optional[str] = None
     delivered_downstream: Optional[bool] = None
 
 
@@ -65,12 +65,12 @@ class StageRunEvent(BaseModel):
 class IndexedEvent(BaseModel):
     document_id: str
     has_positions: bool
-    county: Optional[str] = None
-    instrument_type: Optional[str] = None
+    segment: Optional[str] = None
+    document_type: Optional[str] = None
 
 
 class RunRequest(BaseModel):
-    source: str = Field(..., examples=["docai_core", "events:acme"])
+    source: str = Field(..., examples=["sql", "events:acme"])
     days: int = Field(7, ge=1, le=365)
     measures: Optional[List[str]] = None
 
@@ -117,7 +117,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         scheduler.stop()
 
     app = FastAPI(title="Assay", version="0.2.0", lifespan=lifespan,
-                  description="Evaluation and observability for document-AI pipelines.")
+                  description="Evaluation and observability for document-intelligence pipelines.")
 
     if settings.auto_demo:
         demo_lock, demo_state = threading.Lock(), {"ready": False}
@@ -174,7 +174,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def list_sources():
         with engine.connect() as conn:
             seen = [r[0] for r in conn.execute(select(store.measure_runs.c.source).distinct())]
-        available = (["docai_core"] if settings.docai_url else [])
+        available = (["sql"] if settings.source_url else [])
         return {"configured": available, "with_results": sorted(seen)}
 
     @app.post("/v1/runs", dependencies=[Depends(auth)])
@@ -297,7 +297,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # ---------- tracing ----------
 
     @app.get("/v1/documents", dependencies=[Depends(auth)])
-    def list_documents(source: str, view: str = "slowest", days: float = 7, county: Optional[str] = None,
+    def list_documents(source: str, view: str = "slowest", days: float = 7, segment: Optional[str] = None,
                        limit: int = 25):
         if view not in trace.VIEWS:
             raise HTTPException(422, f"view must be one of {', '.join(trace.VIEWS)}")
@@ -305,7 +305,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             src = runner.resolve_source(source, engine, settings)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
-        return trace.find_documents(src, runner.window_for_days(days), view, limit, county)
+        return trace.find_documents(src, runner.window_for_days(days), view, limit, segment)
 
     @app.get("/v1/trace/{document_id}", dependencies=[Depends(auth)])
     def get_trace(document_id: str, source: str):

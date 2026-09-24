@@ -46,9 +46,9 @@ def test_fallback_attribution_needs_both_fields_and_slices_by_stage():
 
 
 def test_missing_dimension_is_a_visible_slice_not_dropped():
-    src = FakeSource(indexed=[IndexedRecord("a", True, county="Cook IL"), IndexedRecord("b", False)])
+    src = FakeSource(indexed=[IndexedRecord("a", True, segment="acme"), IndexedRecord("b", False)])
     out = REGISTRY["source_positions"].compute(src, WIN)
-    unrec = slice_of(out, "county", UNRECORDED)
+    unrec = slice_of(out, "segment", UNRECORDED)
     assert unrec.n == 1 and unrec.value == 0.0
 
 
@@ -106,16 +106,16 @@ def test_source_without_data_is_unmeasured():
 
 def test_ground_truth_measures_say_what_they_wait_for():
     out = REGISTRY["split_stp"].compute(FakeSource(), WIN)
-    assert out.status == "unmeasured" and "DEV-NEW-2" in out.reason
+    assert out.status == "unmeasured" and "ground truth" in out.reason
 
 
 # ---------- operational measures ----------
 
 def test_volume_counts_slices_and_zero_is_measured():
-    docs = [DocumentRecord("a", T0, county="Cook IL"), DocumentRecord("b", T0, county="Cook IL"),
+    docs = [DocumentRecord("a", T0, segment="acme"), DocumentRecord("b", T0, segment="acme"),
             DocumentRecord("c", T0)]
     out = REGISTRY["document_volume"].compute(FakeSource(documents=docs), WIN)
-    assert overall(out) == 3 and slice_of(out, "county", "Cook IL").value == 2
+    assert overall(out) == 3 and slice_of(out, "segment", "acme").value == 2
     empty = REGISTRY["document_volume"].compute(FakeSource(documents=[]), WIN)
     assert empty.status == "measured" and overall(empty) == 0
 
@@ -143,20 +143,20 @@ class TwoWindowSource(FakeSource):
         return self.cur if w == WIN else self.prev
 
 
-def test_drift_is_zero_for_same_mix_and_flags_new_county():
-    mix = [DocumentRecord(str(i), T0, county=c) for i, c in enumerate(["A", "B"] * 50)]
+def test_drift_is_zero_for_same_mix_and_flags_new_segment():
+    mix = [DocumentRecord(str(i), T0, segment=c) for i, c in enumerate(["A", "B"] * 50)]
     same = REGISTRY["input_mix_drift"].compute(TwoWindowSource(mix, mix), WIN)
     assert overall(same) < 1e-9
 
-    shifted = mix + [DocumentRecord(f"n{i}", T0, county="New") for i in range(60)]
+    shifted = mix + [DocumentRecord(f"n{i}", T0, segment="New") for i in range(60)]
     out = REGISTRY["input_mix_drift"].compute(TwoWindowSource(shifted, mix), WIN)
     assert overall(out) > 0.2
-    new = slice_of(out, "county", "New")
-    assert new.value == max(r.value for r in out.results if r.dimension == "county")
+    new = slice_of(out, "segment", "New")
+    assert new.value == max(r.value for r in out.results if r.dimension == "segment")
 
 
 def test_drift_needs_both_windows():
-    mix = [DocumentRecord("a", T0, county="A")]
+    mix = [DocumentRecord("a", T0, segment="A")]
     assert REGISTRY["input_mix_drift"].compute(TwoWindowSource(mix, []), WIN).status == "unmeasured"
 
 

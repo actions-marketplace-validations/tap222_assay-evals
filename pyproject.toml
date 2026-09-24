@@ -1,7 +1,7 @@
 [project]
 name = "assay"
 version = "0.1.0"
-description = "Evaluation and observability for document-AI pipelines"
+description = "Evaluation and observability for document-intelligence pipelines"
 requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.110",

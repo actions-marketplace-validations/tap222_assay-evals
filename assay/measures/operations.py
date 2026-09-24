@@ -1,8 +1,8 @@
 """Operational health: rate, errors, duration, and input drift.
 
 These are the signals an on-call engineer checks first. They also tell a
-model problem apart from a traffic problem (roadmap V2-4): if accuracy moves
-at the same time as the county mix, the model may be fine.
+model problem apart from a traffic problem: if accuracy moves
+at the same time as the segment mix, the model may be fine.
 """
 from __future__ import annotations
 
@@ -17,12 +17,12 @@ from assay.models import FAILED_STATUSES, Window
 
 class DocumentVolume(Measure):
     id = "document_volume"
-    roadmap_ref = "Throughput"
+    tag = "Throughput"
     name = "Documents received"
     question = "How many documents arrived in the window?"
     unit = "count"
     higher_is_better = None
-    dimensions = ("county", "instrument_type", "processing_mode")
+    dimensions = ("segment", "document_type", "processing_mode")
 
     def compute(self, source, window: Window) -> MeasureOutput:
         docs = source.documents(window)
@@ -33,7 +33,7 @@ class DocumentVolume(Measure):
 
 class StageFailureRate(Measure):
     id = "stage_failure_rate"
-    roadmap_ref = "Errors"
+    tag = "Errors"
     name = "Stage failure rate"
     question = "What share of stage runs failed?"
     higher_is_better = False
@@ -48,7 +48,7 @@ class StageFailureRate(Measure):
 
 class CallErrorRate(Measure):
     id = "call_error_rate"
-    roadmap_ref = "Errors"
+    tag = "Errors"
     name = "AI call error rate"
     question = "What share of AI calls returned an error or timed out?"
     higher_is_better = False
@@ -64,7 +64,7 @@ class CallErrorRate(Measure):
 
 class CallLatencyP95(Measure):
     id = "call_latency_p95"
-    roadmap_ref = "Duration"
+    tag = "Latency"
     name = "AI call latency (p95)"
     question = "How long do the slowest 5% of AI calls take?"
     unit = "ms"
@@ -95,12 +95,12 @@ def psi_terms(current: Counter, previous: Counter) -> Dict[str, float]:
 
 class InputMixDrift(Measure):
     id = "input_mix_drift"
-    roadmap_ref = "V2-4 drift"
+    tag = "Drift"
     name = "Input mix drift"
-    question = "Has the mix of counties, instruments or modes shifted since the previous window?"
+    question = "Has the mix of segments, document types or modes shifted since the previous window?"
     unit = "psi"
     higher_is_better = False
-    dimensions = ("county", "instrument_type", "processing_mode")
+    dimensions = ("segment", "document_type", "processing_mode")
 
     def compute(self, source, window: Window) -> MeasureOutput:
         cur, prev = source.documents(window), source.documents(window.previous())

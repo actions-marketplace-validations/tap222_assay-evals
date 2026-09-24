@@ -1,6 +1,6 @@
 """Release gates: advance, hold or roll back on real signal.
 
-Implements the roadmap's release decision rule:
+The decision rule:
 - the noise floor between identical runs is known before a threshold means anything;
 - a change only counts when it exceeds that noise, with a confidence interval;
 - the sample must be big enough for the slice being gated;

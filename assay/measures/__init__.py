@@ -9,7 +9,7 @@ REGISTRY = {m.id: m for m in [
     # operational health
     DocumentVolume(), StageFailureRate(), CallErrorRate(), CallLatencyP95(), TimeToComplete(),
     InputMixDrift(),
-    # pipeline integrity (roadmap live findings)
+    # pipeline integrity
     FallbackAttribution(), ModelMismatch(), CostCoverage(), RevisionCoverage(),
     NoOpStages(), SourcePositions(), HandoffLoss(),
     # needs ground truth

@@ -56,8 +56,8 @@ def build_trace(source, document_id: str) -> Optional[dict]:
         "document": {
             "document_id": doc.document_id, "received_at": _iso(doc.received_at),
             "completed_at": _iso(doc.completed_at), "duration_s": _duration(doc), "status": doc.status,
-            "processing_mode": doc.processing_mode, "county": doc.county,
-            "instrument_type": doc.instrument_type, "file_hash": doc.file_hash,
+            "processing_mode": doc.processing_mode, "segment": doc.segment,
+            "document_type": doc.document_type, "file_hash": doc.file_hash,
             "delivered_downstream": None if downstream is None or not doc.file_hash else doc.file_hash in downstream,
         },
         "stages": [{"stage": r.stage, "status": r.status, "started_at": _iso(r.started_at),
@@ -73,10 +73,10 @@ def build_trace(source, document_id: str) -> Optional[dict]:
 
 
 def find_documents(source, window: Window, view: str, limit: int = 25,
-                   county: Optional[str] = None) -> List[dict]:
+                   segment: Optional[str] = None) -> List[dict]:
     docs = source.documents(window) or []
-    if county:
-        docs = [d for d in docs if (d.county or "(unrecorded)") == county]
+    if segment:
+        docs = [d for d in docs if (d.segment or "(unrecorded)") == segment]
     if view == "slowest":
         picked = sorted((d for d in docs if d.completed_at), key=_duration, reverse=True)
     elif view == "incomplete":
@@ -90,5 +90,5 @@ def find_documents(source, window: Window, view: str, limit: int = 25,
         picked = sorted(docs, key=lambda d: d.received_at, reverse=True)
     return [{"document_id": d.document_id, "received_at": _iso(d.received_at),
              "completed_at": _iso(d.completed_at), "duration_s": _duration(d),
-             "county": d.county, "instrument_type": d.instrument_type,
+             "segment": d.segment, "document_type": d.document_type,
              "processing_mode": d.processing_mode} for d in picked[:limit]]

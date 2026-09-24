@@ -1,13 +1,14 @@
-"""Synthetic demo tenant so the dashboard works without a DocAI Core database.
+"""Synthetic demo tenant so the dashboard works without connecting a pipeline.
 
-Rates are shaped after the roadmap's live findings (fallback attribution near
-zero, a third of calls unpriced, stub stages, most documents lost at the
-handoff), plus a few staged incidents so alerting has something to catch:
+A document-intelligence pipeline serving a handful of customers (the
+segments), with some everyday gaps (one stage's calls aren't priced, a few
+placeholder stages report success without doing anything) and four staged
+incidents so alerting has something to catch:
 
-- 6 to 4 days ago: indexing stage failures spike, then recover (alert resolves)
+- 6 to 4 days ago: field-extraction failures spike, then recover (alert resolves)
 - last 3 days: classification calls get slow (alert stays open)
-- last 4 days: a new county starts sending a large share of traffic (drift)
-- last 5 days: Cook IL documents stop reaching the downstream system
+- last 4 days: a new customer starts sending a large share of traffic (drift)
+- last 5 days: Globex Logistics documents stop reaching the downstream system
 
 All of it is generated. Nothing here is real pipeline data.
 """
@@ -27,23 +28,24 @@ from assay.sources.events import EventsSource
 
 TENANT = "demo"
 SOURCE = f"events:{TENANT}"
-COUNTIES = ["Maricopa AZ", "Harris TX", "Cook IL", "King WA", None]
-TYPES = ["deed", "mortgage", "lien", "lien_release", "deed_of_trust", None]
-STAGES = ["record_splitting", "text_extraction", "classification", "indexing"]
-MODELS = {"record_splitting": "gemini-3-flash-preview", "text_extraction": "gemini-3-flash-preview",
-          "classification": "claude-haiku-4-5", "indexing": "claude-sonnet-5"}
-LATENCY_MS = {"record_splitting": 4000, "text_extraction": 6000, "classification": 1500, "indexing": 9000}
-PIPELINE = ["file_prep", "pre_processing", "text_extraction", "classification", "indexing",
-            "recordability_checks", "highlighting", "redaction"]
-STUBS = {"recordability_checks", "highlighting", "redaction"}
+SEGMENTS = ["Northwind Bank", "Contoso Insurance", "Globex Logistics", "Initech Health", None]
+TYPES = ["invoice", "bank_statement", "contract", "id_document", "insurance_claim", None]
+STAGES = ["document_splitting", "text_extraction", "classification", "field_extraction"]
+MODELS = {"document_splitting": "gemini-3-flash-preview", "text_extraction": "gemini-3-flash-preview",
+          "classification": "claude-haiku-4-5", "field_extraction": "claude-sonnet-5"}
+LATENCY_MS = {"document_splitting": 4000, "text_extraction": 6000, "classification": 1500,
+              "field_extraction": 9000}
+PIPELINE = ["file_prep", "pre_processing", "text_extraction", "classification", "field_extraction",
+            "validation", "highlighting", "redaction"]
+STUBS = {"highlighting", "redaction"}  # placeholder stages: report success, do nothing
 
 EXAMPLE_SLOS = [
     ("fallback_attribution", None, None, 0.95, "Example target: every call says which tier answered"),
     ("cost_coverage", None, None, 0.99, "Example target: spend is a total, not a floor"),
-    ("handoff_loss", "county", None, 0.05, "Example target: no county loses more than 5%"),
+    ("handoff_loss", "segment", None, 0.05, "Example target: no segment loses more than 5%"),
     ("stage_failure_rate", None, None, 0.02, "Example target"),
     ("call_error_rate", None, None, 0.02, "Example target"),
-    ("call_latency_p95", "stage", "indexing", 20000, "Example target"),
+    ("call_latency_p95", "stage", "field_extraction", 20000, "Example target"),
     ("time_to_complete_p90", "processing_mode", "realtime", 4 * 3600, "Example target: realtime p90 under 4 h"),
 ]
 
@@ -53,7 +55,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
     rng = random.Random(seed_value)
     now = datetime.utcnow().replace(microsecond=0)
     ago = lambda ts: (now - ts).total_seconds() / 86400  # age in days
-    rollout = 14  # pretend DEV-NEW-3 shipped two weeks ago
+    rollout = 14  # pretend tier attribution for splitting shipped two weeks ago
 
     with engine.begin() as conn:
         for t in (store.event_calls, store.event_documents, store.event_stage_runs, store.event_indexed):
@@ -75,7 +77,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
             received = now - timedelta(days=days - day) + timedelta(minutes=rng.randint(0, 1439))
             age = ago(received)
             did = f"demo-{day:03d}-{k:03d}"
-            county = "Travis TX" if age < 4 and rng.random() < 0.3 else rng.choice(COUNTIES)
+            segment = "Umbrella Legal" if age < 4 and rng.random() < 0.3 else rng.choice(SEGMENTS)
             itype = rng.choice(TYPES)
             mode = "batch" if rng.random() < 0.35 else "realtime"
             if mode == "realtime":
@@ -85,15 +87,15 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                 completed = received + timedelta(hours=rng.uniform(2, 30)) if rng.random() < 0.32 else None
             if completed and completed > now:
                 completed = None
-            lost_rate = 0.95 if (county == "Cook IL" and age < 5) else 0.62
+            lost_rate = 0.45 if (segment == "Globex Logistics" and age < 5) else 0.02
             fh = f"sha256:{rng.getrandbits(64):016x}"
             docs.append(dict(tenant=TENANT, document_id=did, received_at=received, completed_at=completed,
                              status="completed" if completed else "processing", processing_mode=mode,
-                             file_hash=fh, county=county, instrument_type=itype,
+                             file_hash=fh, segment=segment, document_type=itype,
                              delivered_downstream=(rng.random() >= lost_rate) if completed else None))
             for s, stage in enumerate(PIPELINE):
                 start = received + timedelta(seconds=30 * s)
-                fail_p = 0.12 if (stage == "indexing" and 4 <= age < 6) else 0.004
+                fail_p = 0.12 if (stage == "field_extraction" and 4 <= age < 6) else 0.004
                 failed = stage not in STUBS and rng.random() < fail_p
                 runs.append(dict(tenant=TENANT, document_id=did, stage=stage,
                                  status="failed" if failed else "success", started_at=start,
@@ -101,9 +103,9 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                                  did_work=stage not in STUBS))
             for stage in STAGES:
                 ts = received + timedelta(seconds=rng.randint(10, 600))
-                attributed = rng.random() < (0.9 if (stage == "record_splitting" and ago(ts) < rollout) else 0.002)
+                attributed = rng.random() < (0.97 if (stage == "document_splitting" and ago(ts) < rollout) else 0.6)
                 served = MODELS[stage]
-                if stage == "record_splitting" and rng.random() < 0.05:
+                if stage == "document_splitting" and rng.random() < 0.05:
                     served = "gemini-3.5-flash-lite"
                 slow = 3.5 if (stage == "classification" and ago(ts) < 3) else 1.0
                 calls.append(dict(
@@ -113,12 +115,12 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                     gate_reason=("ok" if served == MODELS[stage] else "low_confidence") if attributed else None,
                     cost_usd=None if (stage == "text_extraction" or served != MODELS[stage] or rng.random() < 0.05)
                     else round(rng.uniform(0.002, 0.03), 4),
-                    code_revision=None if rng.random() < 0.995 else "a1b2c3d",
-                    county=county, instrument_type=itype,
+                    code_revision=None if rng.random() < 0.03 else "a1b2c3d",
+                    segment=segment, document_type=itype,
                     latency_ms=round(LATENCY_MS[stage] * slow * rng.lognormvariate(0, 0.35)),
                     status="error" if rng.random() < 0.008 else "success"))
-            indexed.append(dict(tenant=TENANT, document_id=did, has_positions=False,
-                                county=county, instrument_type=itype))
+            indexed.append(dict(tenant=TENANT, document_id=did, has_positions=rng.random() < 0.85,
+                                segment=segment, document_type=itype))
 
     with engine.begin() as conn:
         conn.execute(store.event_documents.insert(), docs)

@@ -5,7 +5,7 @@ Two independent conditions are checked for every measured slice after a run:
 - anomaly: the value leaves the band learned from the previous runs of the same
   slice (median ± 3 robust deviations, with a minimum width). The minimum width
   matters: a zero-width band would make every ordinary week look like a
-  regression, which is the roadmap's Measure 5 caveat.
+  regression.
 - slo: the value is on the wrong side of a target someone set.
 
 A condition seen once makes the alert *pending*; it only *opens* (and

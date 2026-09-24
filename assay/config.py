@@ -12,7 +12,7 @@ def _list(v: Optional[str]) -> List[str]:
 @dataclass
 class Settings:
     store_url: str = "sqlite:///./assay.db"
-    docai_url: Optional[str] = None
+    source_url: Optional[str] = None  # the pipeline database, read-only
     downstream_url: Optional[str] = None
     downstream_hash_sql: Optional[str] = None
     api_key: Optional[str] = None
@@ -40,7 +40,7 @@ class Settings:
         e = os.environ.get
         return cls(
             store_url=e("ASSAY_STORE_URL", cls.store_url),
-            docai_url=e("ASSAY_DOCAI_URL"),
+            source_url=e("ASSAY_SOURCE_URL"),
             downstream_url=e("ASSAY_DOWNSTREAM_URL"),
             downstream_hash_sql=e("ASSAY_DOWNSTREAM_HASH_SQL"),
             api_key=e("ASSAY_API_KEY"),

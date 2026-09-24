@@ -28,7 +28,7 @@ def test_no_change_advances():
 
 
 def test_small_sample_holds_even_if_it_looks_fine():
-    d = gates.evaluate_slice(GateRule("acc", min_n=30), "Cook IL", [1.0] * 10, [1.0] * 10, floor=0.0)
+    d = gates.evaluate_slice(GateRule("acc", min_n=30), "acme", [1.0] * 10, [1.0] * 10, floor=0.0)
     assert d.outcome == HOLD and "below the minimum" in d.reason
 
 
@@ -50,11 +50,11 @@ def test_high_severity_tightens_tolerance():
 
 def test_missing_required_slice_holds_whole_release():
     base = outcomes(0.9, 200, 6)
-    samples = {"acc": {"Harris TX": {"baseline": base, "candidate": list(base)}}}
-    d = gates.evaluate([GateRule("acc")], samples, {"acc": 0.01}, required_slices={"acc": ["Harris TX", "Cook IL"]})
+    samples = {"acc": {"globex": {"baseline": base, "candidate": list(base)}}}
+    d = gates.evaluate([GateRule("acc")], samples, {"acc": 0.01}, required_slices={"acc": ["globex", "acme"]})
     assert d.outcome == HOLD
-    cook = next(s for s in d.slices if s.slice == "Cook IL")
-    assert "unmeasured" in cook.reason
+    missing = next(s for s in d.slices if s.slice == "acme")
+    assert "unmeasured" in missing.reason
 
 
 def test_worst_slice_decides():

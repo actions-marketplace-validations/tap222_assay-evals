@@ -12,7 +12,7 @@ from assay.config import Settings
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="assay", description="Evaluation and observability for document-AI pipelines.")
+    p = argparse.ArgumentParser(prog="assay", description="Evaluation and observability for document-intelligence pipelines.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="Run the API and dashboard")
@@ -25,10 +25,10 @@ def main(argv=None) -> int:
     s.add_argument("--window-days", type=float, help="Window each scheduled run covers (default 1)")
 
     r = sub.add_parser("run", help="Compute all measures once and store the results")
-    r.add_argument("--source", default="docai_core", help="docai_core or events:<tenant>")
+    r.add_argument("--source", default="sql", help="sql (your pipeline database) or events:<tenant>")
     r.add_argument("--days", type=int, default=7)
 
-    sub.add_parser("check-source", help="Show which mapped DocAI Core columns exist")
+    sub.add_parser("check-source", help="Test every mapped field against your pipeline database")
     sub.add_parser("demo", help="Load a synthetic demo tenant and backfill 7 weeks of daily runs")
 
     args = p.parse_args(argv)
@@ -71,19 +71,21 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "check-source":
-        if not settings.docai_url:
-            print("Set ASSAY_DOCAI_URL first.", file=sys.stderr)
+        if not settings.source_url:
+            print("Set ASSAY_SOURCE_URL first.", file=sys.stderr)
             return 2
-        from assay.sources.docai_core import DocAICoreSource
-        report = DocAICoreSource(settings.docai_url).check()
-        missing = {t: [c for c, ok in cols.items() if not ok] for t, cols in report.items()}
-        print(json.dumps(report, indent=2))
-        if any(missing.values()):
-            print("\nNot found (override in ASSAY_DOCAI_MAPPING, or set to \"NULL\"):", file=sys.stderr)
-            for t, cols in missing.items():
-                for c in cols:
-                    print(f"  {t}.{c}", file=sys.stderr)
+        from assay.sources.sql import SQLSource
+        report = SQLSource(settings.source_url).check()
+        bad = 0
+        for table, fields in report.items():
+            for field, err in fields.items():
+                print(f"{'ok ' if err is None else 'ERR'} {table}.{field}{'' if err is None else '  ' + err}")
+                bad += err is not None
+        if bad:
+            print(f"\n{bad} field(s) failed. Fix them in your mapping file (ASSAY_SOURCE_MAPPING), "
+                  "or set them to \"NULL\" if your schema doesn't record them.", file=sys.stderr)
             return 1
+        print("\nAll mapped fields work.")
         return 0
 
     if args.cmd == "demo":

@@ -131,7 +131,7 @@ svg.timeline text{fill:var(--ink-2);font:11px var(--mono)}
 </head>
 <body>
 <header>
-  <div class="brand"><b>Assay</b><span>Evaluation &amp; observability for document AI</span></div>
+  <div class="brand"><b>Assay</b><span>Evaluation &amp; observability for document intelligence</span></div>
   <div class="controls">
     <select id="source" aria-label="Source"></select>
     <select id="days" aria-label="Window for manual runs"><option value="1" selected>Last 24 h</option><option value="3">Last 3 days</option><option value="7">Last 7 days</option></select>
@@ -162,7 +162,7 @@ svg.timeline text{fill:var(--ink-2);font:11px var(--mono)}
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
-const S={catalog:{},groups:{},overview:null,latest:null,measure:null,dim:"",val:"",trace:{view:"slowest",county:"",doc:null}};
+const S={catalog:{},groups:{},overview:null,latest:null,measure:null,dim:"",val:"",trace:{view:"slowest",segment:"",doc:null}};
 
 async function api(path,opts={}){
   const key=store.get("assay-key");
@@ -245,7 +245,7 @@ async function refresh(){
   render();
 }
 function renderEmpty(msg){
-  const html=`<div class="empty">${msg?esc(msg)+"<br><br>":""}No data yet. Load the demo with <code>python -m assay demo</code>, or set <code>ASSAY_DOCAI_URL</code> and press “Run now”.</div>`;
+  const html=`<div class="empty">${msg?esc(msg)+"<br><br>":""}No data yet. Load the demo with <code>python -m assay demo</code>, or set <code>ASSAY_SOURCE_URL</code> and press “Run now”.</div>`;
   ["overview","measures","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
 }
 
@@ -320,7 +320,7 @@ async function renderMeasureGrid(){
       slo.some(s=>s.state==="breached")?`<span class="chip warn">SLO breached</span>`:slo.some(s=>s.state==="met")?`<span class="chip good">SLO met</span>`:"",
       on?"":`<span class="chip neutral">unmeasured</span>`].join(" ");
     return `<button class="card ${al.some(a=>a.kind==="anomaly")?"alerting":""}" type="button" data-open="${id}">
-      <div class="top"><span class="ref">${esc(m.roadmap_ref)}</span><span>${chips}</span></div>
+      <div class="top"><span class="ref">${esc(m.tag)}</span><span>${chips}</span></div>
       <h3>${esc(m.name)}</h3>
       ${on?`<div class="val"><b>${esc(fmt(r.overall.value,m.unit))}</b><small>n = ${r.overall.n.toLocaleString()}</small></div>${tr}${spark(hist[id])}`:`<p class="reason">${esc(r.reason)}</p>`}
     </button>`};
@@ -350,7 +350,7 @@ async function renderMeasureDetail(){
   <div><button class="link" type="button" id="back">← All measures</button></div>
   <div class="panel stack">
     <div class="detail-head">
-      <div><span class="ref">${esc(m.roadmap_ref)} · ${m.higher_is_better==null?"no good direction; alerts on moves either way":m.higher_is_better?"higher is better":"lower is better"}</span>
+      <div><span class="ref">${esc(m.tag)} · ${m.higher_is_better==null?"no good direction; alerts on moves either way":m.higher_is_better?"higher is better":"lower is better"}</span>
         <h2>${esc(m.name)}</h2><p class="sub">${esc(m.question)}</p></div>
       <div class="picker">
         <select id="dim" aria-label="Slice by"><option value="">Overall</option>${dimOpts.map(d=>`<option value="${esc(d)}" ${d===S.dim?"selected":""}>By ${esc(d.replace(/_/g," "))}</option>`).join("")}</select>
@@ -369,7 +369,7 @@ async function renderMeasureDetail(){
       <button type="button" id="slo-save">Save target</button>
       ${sloHere?`<button type="button" id="slo-del" data-id="${sloHere.id}">Remove</button>`:""}
       <span class="note" id="slo-msg"></span></div>`:""}
-    ${["handoff_loss","time_to_complete_p90"].includes(id)?`<p class="note">See the documents behind this number: <button class="link" type="button" id="to-trace">open ${id==="handoff_loss"?"lost":"slowest"} documents${S.dim==="county"?" in "+esc(S.val):""}</button></p>`:""}
+    ${["handoff_loss","time_to_complete_p90"].includes(id)?`<p class="note">See the documents behind this number: <button class="link" type="button" id="to-trace">open ${id==="handoff_loss"?"lost":"slowest"} documents${S.dim==="segment"?" in "+esc(S.val):""}</button></p>`:""}
   </div>
   ${bars?`<div class="panel stack"><div class="panel-head"><h3>Latest run by slice</h3><span class="note">Click a slice to chart it. Faded rows are below 30 and never alert. Red rows breach an SLO or have an open alert.</span></div><div class="dims">${bars}</div>
     ${Object.values(dims).flat().some(x=>x.slice==="(unrecorded)")?`<p class="note">“(unrecorded)” means the source doesn't record that dimension for those rows. It's kept visible on purpose.</p>`:""}</div>`:""}`;
@@ -377,7 +377,7 @@ async function renderMeasureDetail(){
   $("#dim").onchange=e=>{S.dim=e.target.value;S.val=S.dim?(dims[S.dim]?.[0]?.slice||""):"";renderMeasureDetail()};
   $("#val")&&($("#val").onchange=e=>{S.val=e.target.value;renderMeasureDetail()});
   document.querySelectorAll(".bar-row").forEach(b=>b.onclick=()=>{S.dim=b.dataset.dim;S.val=b.dataset.val;renderMeasureDetail();window.scrollTo({top:0,behavior:"smooth"})});
-  $("#to-trace")&&($("#to-trace").onclick=()=>{S.trace={view:id==="handoff_loss"?"lost":"slowest",county:S.dim==="county"?S.val:"",doc:null};location.hash="trace"});
+  $("#to-trace")&&($("#to-trace").onclick=()=>{S.trace={view:id==="handoff_loss"?"lost":"slowest",segment:S.dim==="segment"?S.val:"",doc:null};location.hash="trace"});
   const save=$("#slo-save");if(save)save.onclick=async()=>{
     const raw=parseFloat($("#slo-target").value);if(isNaN(raw)){$("#slo-msg").textContent="Enter a number first.";return}
     const all=$("#slo-all")?.checked;
@@ -392,21 +392,21 @@ async function renderTrace(){
   const T=S.trace;
   const views=[["slowest","Slowest"],["incomplete","Never finished"],["lost","Lost at handoff"],["recent","Most recent"]];
   let list=[],err="";
-  try{list=await api(`/v1/documents?${q({source:src(),view:T.view,days:7,county:T.county,limit:30})}`)}catch(e){err=e.message}
+  try{list=await api(`/v1/documents?${q({source:src(),view:T.view,days:7,segment:T.segment,limit:30})}`)}catch(e){err=e.message}
   $("#tab-trace").innerHTML=`
   <div class="panel stack">
     <div class="panel-head"><div><h2>Trace a document</h2><p class="sub">Follow one document through every stage and model call, with what went wrong flagged.</p></div>
       <form id="find" class="picker"><input id="docid" placeholder="Document ID" aria-label="Document ID" value="${esc(T.doc||"")}"><button type="submit">Trace</button></form></div>
     <div class="picker">${views.map(([k,l])=>`<button type="button" class="${T.view===k?"primary":""}" data-view="${k}">${l}</button>`).join("")}
-      ${T.county?`<span class="chip neutral">county = ${esc(T.county)}</span> <button class="link" type="button" id="clear-county">clear</button>`:""}<span class="ref">last 7 days</span></div>
-    ${err?`<p class="reason">${esc(err)}</p>`:list.length?`<div class="scroll"><table><tr><th>Document</th><th>Received</th><th class="num">Took</th><th>County</th><th>Type</th><th>Mode</th></tr>
+      ${T.segment?`<span class="chip neutral">segment = ${esc(T.segment)}</span> <button class="link" type="button" id="clear-segment">clear</button>`:""}<span class="ref">last 7 days</span></div>
+    ${err?`<p class="reason">${esc(err)}</p>`:list.length?`<div class="scroll"><table><tr><th>Document</th><th>Received</th><th class="num">Took</th><th>Segment</th><th>Type</th><th>Mode</th></tr>
       ${list.map(d=>`<tr class="click" data-doc="${esc(d.document_id)}"><td class="mono">${esc(d.document_id)}</td><td class="ref">${esc(d.received_at.slice(0,16).replace("T"," "))}</td>
-        <td class="num">${d.duration_s!=null?esc(fmt(d.duration_s,"seconds")):`<span class="warn">${esc(dur(d.received_at))} so far</span>`}</td><td>${esc(d.county||"(unrecorded)")}</td><td>${esc(d.instrument_type||"—")}</td><td>${esc(d.processing_mode||"—")}</td></tr>`).join("")}</table></div>`
+        <td class="num">${d.duration_s!=null?esc(fmt(d.duration_s,"seconds")):`<span class="warn">${esc(dur(d.received_at))} so far</span>`}</td><td>${esc(d.segment||"(unrecorded)")}</td><td>${esc(d.document_type||"—")}</td><td>${esc(d.processing_mode||"—")}</td></tr>`).join("")}</table></div>`
       :`<p class="note">${T.view==="lost"?"No lost documents, or no downstream system is configured to check against.":"No documents in this view."}</p>`}
   </div>
   <div id="trace-out"></div>`;
   document.querySelectorAll("[data-view]").forEach(b=>b.onclick=()=>{T.view=b.dataset.view;renderTrace()});
-  $("#clear-county")&&($("#clear-county").onclick=()=>{T.county="";renderTrace()});
+  $("#clear-segment")&&($("#clear-segment").onclick=()=>{T.segment="";renderTrace()});
   document.querySelectorAll("[data-doc]").forEach(r=>r.onclick=()=>showTrace(r.dataset.doc));
   $("#find").onsubmit=e=>{e.preventDefault();const v=$("#docid").value.trim();if(v)showTrace(v)};
   if(T.doc)showTrace(T.doc,false);
@@ -433,7 +433,7 @@ async function showTrace(id,scroll=true){
       <span class="chip ${d.completed_at?"good":"warn"}">${d.completed_at?"completed":"not completed"}</span></div>
     <dl class="facts">
       <div><dt>Took</dt><dd>${d.duration_s!=null?esc(fmt(d.duration_s,"seconds")):esc(dur(d.received_at))+" so far"}</dd></div>
-      <div><dt>County</dt><dd>${esc(d.county||"(unrecorded)")}</dd></div><div><dt>Type</dt><dd>${esc(d.instrument_type||"—")}</dd></div>
+      <div><dt>Segment</dt><dd>${esc(d.segment||"(unrecorded)")}</dd></div><div><dt>Type</dt><dd>${esc(d.document_type||"—")}</dd></div>
       <div><dt>Mode</dt><dd>${esc(d.processing_mode||"—")}</dd></div><div><dt>AI spend</dt><dd>${esc(fmt(t.cost_usd,"usd"))}${t.calls.some(c=>c.cost_usd==null)?" (floor)":""}</dd></div>
       <div><dt>Downstream</dt><dd>${d.delivered_downstream==null?"not checked":d.delivered_downstream?"delivered":"missing"}</dd></div>
     </dl>
@@ -469,7 +469,7 @@ async function renderGates(){
     ${g.map(d=>`<tr><td class="ref">${esc(d.created_at.slice(0,16).replace("T"," "))}</td><td><span class="chip ${d.outcome==="advance"?"good":d.outcome==="hold"?"warn":"bad"}">${d.outcome}</span></td>
       <td class="ref">${Object.entries(d.lineage).map(([k,v])=>`${esc(k)}=${esc(v)}`).join("<br>")}</td>
       <td>${d.slices.filter(s=>s.outcome!=="advance").map(s=>`<div><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}: ${esc(s.reason)}</div>`).join("")||"All slices within limits."}</td></tr>`).join("")}</table></div>`
-    :`<div class="empty">No gate decisions yet. Wire <code>POST /v1/gates/evaluate</code> into CI after the smoke gate (DEV-NEW-5).</div>`}</div>`;
+    :`<div class="empty">No gate decisions yet. Wire <code>POST /v1/gates/evaluate</code> into CI so every prompt, model or pipeline change is judged before it ships.</div>`}</div>`;
 }
 
 /* ---------- routing ---------- */

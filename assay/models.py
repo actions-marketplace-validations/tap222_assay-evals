@@ -1,7 +1,7 @@
 """Canonical records every source adapter produces.
 
 Measures only ever see these types, never a source's own tables. That is what
-lets the same measure run against DocAI Core's Postgres schema today and a
+lets the same measure run against a pipeline's own database or a
 customer's pushed events tomorrow.
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 # Slice value used when a source does not record a dimension. Kept as a real
-# slice so "we don't know the county" is visible instead of silently dropped.
+# slice so "we don't know the segment" is visible instead of silently dropped.
 UNRECORDED = "(unrecorded)"
 
 
@@ -28,8 +28,8 @@ class CallRecord:
     gate_reason: Optional[str] = None
     cost_usd: Optional[float] = None
     code_revision: Optional[str] = None
-    county: Optional[str] = None
-    instrument_type: Optional[str] = None
+    segment: Optional[str] = None
+    document_type: Optional[str] = None
     latency_ms: Optional[float] = None
     status: Optional[str] = None  # e.g. success / error / timeout
 
@@ -43,8 +43,8 @@ class DocumentRecord:
     status: Optional[str] = None
     processing_mode: Optional[str] = None  # e.g. realtime / batch
     file_hash: Optional[str] = None
-    county: Optional[str] = None
-    instrument_type: Optional[str] = None
+    segment: Optional[str] = None
+    document_type: Optional[str] = None
 
 
 @dataclass
@@ -65,8 +65,8 @@ class IndexedRecord:
     """One indexed (structured-field) output row."""
     document_id: str
     has_positions: bool
-    county: Optional[str] = None
-    instrument_type: Optional[str] = None
+    segment: Optional[str] = None
+    document_type: Optional[str] = None
 
 
 @dataclass(frozen=True)

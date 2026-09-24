@@ -2,7 +2,7 @@
 
 Registered now so they appear in the catalog and on the dashboard as
 "unmeasured" with the reason, rather than being absent. Each one gets a real
-compute() once its ground truth lands (see the roadmap epic in roadmap_ref).
+compute() once the labels it needs can be ingested.
 """
 from __future__ import annotations
 
@@ -11,44 +11,41 @@ from assay.models import Window
 
 
 class _AwaitingTruth(Measure):
+    tag = "Accuracy"
     waiting_on: str = ""
 
     def compute(self, source, window: Window) -> MeasureOutput:
-        return unmeasured(self.id, f"Waiting on ground truth: {self.waiting_on}")
+        return unmeasured(self.id, f"Needs ground truth: {self.waiting_on}")
 
 
 class SplitStraightThrough(_AwaitingTruth):
     id = "split_stp"
-    roadmap_ref = "Measure 1 · DEV-NEW-2"
-    name = "Record-split straight-through"
-    question = "What share of multi-record streams split correctly with no human touch?"
-    waiting_on = "labelled stream corpus with confirmed split boundaries (DEV-NEW-2)."
+    name = "Document splitting straight-through"
+    question = "What share of multi-document files split correctly with no human touch?"
+    waiting_on = "files with human-confirmed document boundaries."
 
 
 class FieldAccuracy(_AwaitingTruth):
     id = "field_accuracy"
-    roadmap_ref = "Measure 6 · DEV-NEW-1"
     name = "Severity-weighted field accuracy"
-    question = "How often is each indexed field right, weighted by what an error costs?"
-    dimensions = ("county", "instrument_type")
-    waiting_on = "indexing_gt.v1 schema and a certification split (DEV-NEW-1)."
+    question = "How often is each extracted field right, weighted by what an error costs?"
+    dimensions = ("segment", "document_type")
+    waiting_on = "a labelled evaluation set with correct values per field."
 
 
 class SupersededValues(_AwaitingTruth):
     id = "superseded_value_rate"
-    roadmap_ref = "DEV-NEW-7"
     name = "Superseded values reaching output"
-    question = "How often does a value a later instrument superseded reach output unflagged?"
+    question = "How often does a value that a later document replaced reach output unflagged?"
     higher_is_better = False
-    dimensions = ("county",)
-    waiting_on = "instrument-chain join logic (DEV-NEW-6/7)."
+    dimensions = ("segment",)
+    waiting_on = "links between documents that amend or replace each other."
 
 
 class EscapeRate(_AwaitingTruth):
     id = "escape_rate"
-    roadmap_ref = "DEV-NEW-8"
     name = "Escape rate"
     question = "How often does a wrong value clear both automation and human review?"
     higher_is_better = False
-    dimensions = ("county",)
-    waiting_on = "retained spot-check sample of published records (DEV-NEW-8)."
+    dimensions = ("segment",)
+    waiting_on = "a re-verified spot-check sample of published output."
