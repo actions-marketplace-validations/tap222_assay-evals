@@ -147,6 +147,7 @@ class TrajectoryEvent(Event):
     answer: Optional[str] = Field(None, max_length=16384)
     status: Optional[str] = Field(None, description="completed, failed, max_steps, …")
     lineage: Optional[Dict[str, str]] = None
+    input: Optional[Any] = Field(None, description="What the agent was asked, so a failure can become a test case")
     steps: List[StepEvent] = Field(..., max_length=500)
 
     @model_validator(mode="after")
@@ -154,6 +155,30 @@ class TrajectoryEvent(Event):
         if len(json.dumps([s.model_dump() for s in self.steps], default=str)) > 512 * 1024:
             raise ValueError("steps are larger than 512 KB; trim long tool results")
         return self
+
+
+class InputEvent(Event):
+    """What a trace (document or trajectory) was given, so its failures can be replayed as tests."""
+    trace_id: str = Field(..., max_length=128)
+    input: Optional[Any] = Field(None, description="The request itself: text or structured")
+    input_ref: Optional[str] = Field(None, max_length=1024, description="Or where to fetch it, e.g. s3://inbox/a.pdf")
+
+    @model_validator(mode="after")
+    def _one(self):
+        if self.input is None and not self.input_ref:
+            raise ValueError("Send input or input_ref.")
+        if self.input is not None and len(json.dumps(self.input, default=str)) > 64 * 1024:
+            raise ValueError("input is larger than 64 KB; send input_ref instead")
+        return self
+
+
+class FeedbackEvent(Event):
+    """What a user did about a trace: the strongest label-free signal that it went wrong."""
+    feedback_id: Optional[str] = Field(None, max_length=128, description="Omit to derive one")
+    trace_id: str = Field(..., max_length=128)
+    kind: str = Field(..., pattern="^(thumbs_down|thumbs_up|retry|escalation|complaint)$")
+    ts: Optional[datetime] = None
+    note: Optional[str] = Field(None, max_length=1024)
 
 
 class ReferenceEvent(Event):
@@ -245,6 +270,8 @@ class EventBatch(Event):
     errors: List[ErrorEvent] = []
     eval_results: List[EvalResultEvent] = []
     trajectories: List[TrajectoryEvent] = []
+    inputs: List[InputEvent] = []
+    feedback: List[FeedbackEvent] = []
     prompts: List[PromptEvent] = []
 
 
@@ -260,6 +287,8 @@ TABLES = {
     "extractions": (store.event_indexed, "extraction_id"),
     "errors": (store.event_errors, "error_id"),
     "eval_results": (store.eval_results, "result_id"),
+    "inputs": (store.trace_inputs, "trace_id"),
+    "feedback": (store.trace_feedback, "feedback_id"),
 }
 
 
@@ -280,6 +309,12 @@ def _rows(kind: str, events: List[Event], tenant: str) -> List[dict]:
             r["ts"] = r.get("ts") or datetime.utcnow()
             if not r.get("result_id"):
                 r["result_id"] = _derive(r["run_id"], r["case_id"], r.get("field"), r.get("evaluator"), r.get("attempt"))
+        if kind == "inputs":
+            r["captured_at"] = datetime.utcnow()
+        if kind == "feedback":
+            r["ts"] = r.get("ts") or datetime.utcnow()
+            if not r.get("feedback_id"):
+                r["feedback_id"] = _derive(r["trace_id"], r["kind"], r["ts"])
         if kind == "extractions" and not r.get("extraction_id"):
             r["extraction_id"] = _derive(r["document_id"], r["field"]) if r.get("field") else uuid.uuid4().hex
         out.append(r | {"tenant": tenant})
@@ -319,13 +354,15 @@ def write_trajectories(engine: Engine, events: List["TrajectoryEvent"], tenant: 
     if not events:
         return 0
     t, st = store.agent_trajectories, store.agent_steps
-    heads, steps, docs = [], [], []
+    heads, steps, docs, inputs = [], [], [], []
     for e in events:
         heads.append({"tenant": tenant, "trajectory_id": e.trajectory_id, "run_id": e.run_id, "case_id": e.case_id,
                       "attempt": e.attempt, "task": e.task, "started_at": e.started_at, "finished_at": e.finished_at,
                       "answer": e.answer, "status": e.status, "lineage": e.lineage})
         for i, s in enumerate(e.steps):
             steps.append({"tenant": tenant, "trajectory_id": e.trajectory_id, "seq": i, **s.model_dump()})
+        if e.input is not None:
+            inputs.append(InputEvent(trace_id=e.trajectory_id, input=e.input))
         docs.append(DocumentEvent(document_id=e.trajectory_id, received_at=e.started_at,
                                   completed_at=e.finished_at if (e.status or "completed") == "completed" else None,
                                   status=e.status or "completed", document_type=e.task, segment=e.segment))
@@ -338,6 +375,7 @@ def write_trajectories(engine: Engine, events: List["TrajectoryEvent"], tenant: 
             conn.execute(st.insert(), steps)
     upsert(engine, t, heads, "trajectory_id")
     write(engine, "documents", docs, tenant)
+    write(engine, "inputs", inputs, tenant)
     return len(events)
 
 

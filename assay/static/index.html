@@ -186,6 +186,15 @@ table.lineage th.hl,table.lineage td.hl{box-shadow:inset 2px 0 0 var(--accent),i
 .stp .res{font:11.5px var(--mono);color:var(--muted);overflow-wrap:anywhere;margin-top:2px}
 .stp .flag{margin-top:4px;font-size:12.5px}
 .okx{font:600 13px var(--mono)}.okx.y{color:var(--good)}.okx.n{color:var(--bad)}
+/* learn */
+.loopbar{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.loopbar div{flex:1 1 120px;padding:10px 12px;border-right:1px solid var(--line);background:var(--surface)}
+.loopbar div:last-child{border-right:0}
+.loopbar b{display:block;font:600 22px var(--display);font-variant-numeric:tabular-nums}
+.loopbar span{font-size:12px;color:var(--muted)}
+.loopbar .arrow{flex:0 0 auto;padding:10px 4px;color:var(--muted);align-self:center;border:0;background:none}
+.prov{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;font-size:13px;align-items:baseline}
+textarea.ref{width:100%;min-height:120px;font:12px/1.45 var(--mono);background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:8px;color:var(--ink)}
 .suggest{background:var(--sunk);border-radius:8px;padding:10px 12px;display:grid;gap:4px}
 pre.code{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font:12.5px/1.55 var(--mono);overflow-x:auto;white-space:pre}
 details summary{cursor:pointer}
@@ -219,6 +228,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
     <a href="#errors" data-tab="errors">Errors</a>
     <a href="#failures" data-tab="failures">Failures</a>
     <a href="#agents" data-tab="agents">Agents</a>
+    <a href="#learn" data-tab="learn">Learn</a>
     <a href="#prompts" data-tab="prompts">Prompts</a>
     <a href="#trace" data-tab="trace">Trace</a>
     <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
@@ -237,6 +247,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
   <section id="tab-errors" class="stack" hidden></section>
   <section id="tab-failures" class="stack" hidden></section>
   <section id="tab-agents" class="stack" hidden></section>
+  <section id="tab-learn" class="stack" hidden></section>
   <section id="tab-prompts" class="stack" hidden></section>
   <section id="tab-trace" class="stack" hidden></section>
   <section id="tab-alerts" class="stack" hidden></section>
@@ -336,7 +347,7 @@ function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
   ["overview","workflow","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
-  if(["failures","agents","trace"].includes(tab()))render();
+  if(["failures","agents","learn","trace"].includes(tab()))render();
 }
 
 /* ---------- overview ---------- */
@@ -978,6 +989,93 @@ function renderTrajectory(t){
       </div></div></div>`;
 }
 
+/* ---------- learning from production ---------- */
+const PSTATUS={open:["bad","open"],protected:["warn","protected"],fixed:["good","fixed"],recurred:["bad","recurred"],dismissed:["neutral","dismissed"]};
+const PKIND={failure:["bad","failure"],infrastructure:["warn","infrastructure"],unusual:["neutral","unusual"]};
+const PFROM={correction:["good","a correction"],property:["good","what broke"],pattern:["neutral","pattern"],
+  passing_traces:["warn","guess: normal traces"],request:["warn","guess: the request"]};
+async function renderLearn(){
+  const box=$("#tab-learn"),days=+(store.get("assay-learn-days")||7);
+  box.innerHTML=`<div class="panel"><p class="note">Scanning production traces…</p></div>`;
+  let P,C,Su;
+  try{[P,C,Su]=await Promise.all([api(`/v1/learn/patterns?${q({source:src(),days})}`),api(`/v1/learn/candidates?${q({source:src(),status:"proposed"})}`),
+    api(`/v1/learn/suites?${q({source:src()})}`)])}catch(e){box.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
+  const L=P.loop,open=P.patterns.filter(p=>p.status==="open"&&p.kind==="failure");
+  box.innerHTML=`<div class="panel stack">
+    <div class="panel-head"><div><h2>Learn from production</h2><p class="sub">Every production trace is scored from signals that need no label: broken contracts, reported errors, user feedback, failed or looping steps, and runs far outside the usual for their task. Anomalous traces are grouped into patterns, and a pattern's most typical and most different traces become draft test cases. You approve each one into a regression suite.</p></div>
+      <select id="learn-days" aria-label="Window">${[1,7,30].map(x=>`<option value="${x}" ${x===days?"selected":""}>last ${x} day${x>1?"s":""}</option>`).join("")}</select></div>
+    <div class="loopbar">
+      <div><b>${P.traces.toLocaleString()}</b><span>production traces</span></div><span class="arrow">→</span>
+      <div><b>${P.anomalous.toLocaleString()}</b><span>anomalous (score ≥ ${P.threshold})</span></div><span class="arrow">→</span>
+      <div><b>${P.patterns.length}</b><span>patterns · ${open.length} open</span></div><span class="arrow">→</span>
+      <div><b>${C.length}</b><span>cases to review</span></div><span class="arrow">→</span>
+      <div><b>${Su.suites.reduce((a,x)=>a+x.cases,0)}</b><span>cases in ${Su.suites.length} suite${Su.suites.length===1?"":"s"}</span></div></div>
+    <div class="legend"><span>Coverage <b>${L.coverage==null?"—":pct(L.coverage,0)}</b> of ${L.patterns} failure patterns have a test</span>
+      <span>First seen → test: <b>${L.median_hours_to_test==null?"—":L.median_hours_to_test<48?L.median_hours_to_test.toFixed(0)+" h":(L.median_hours_to_test/24).toFixed(1)+" d"}</b> median</span>
+      <span>Fixed <b>${L.fixed}</b></span><span class="${L.recurred?"worse":""}">Came back <b>${L.recurred}</b></span></div>
+  </div>
+  <div class="panel"><div class="panel-head"><div><h2>Patterns</h2><p class="sub">Grouped by each trace's main cause (a broken contract or a tool error before a thumbs down), where it happened, and the task. Infrastructure patterns are shown but not made into tests: an outage can't be replayed.</p></div></div>
+    ${P.patterns.map(patternCard).join("")||`<p class="note">No anomalous traces in this window.</p>`}</div>
+  <div class="panel" id="review"><div class="panel-head"><div><h2>Review</h2><p class="sub">Draft cases waiting for you. Each expectation says where it came from: corrections and what broke are reliable; anything taken from normal traces or the request is a guess to check.</p></div></div>
+    ${C.map(candidateCard).join("")||`<p class="note">Nothing to review. Propose cases from an open pattern above.</p>`}</div>
+  <div class="panel"><div class="panel-head"><div><h2>Suites</h2><p class="sub">Approved cases, each linked to the production failure it guards against. When one fails in an evaluation run after passing, Failure causes and the release call say the bug is back.</p></div></div>
+    ${Su.suites.length?Su.suites.map(x=>`<details data-suite="${esc(x.suite)}"><summary><b class="mono">${esc(x.suite)}</b> · ${x.cases} cases guarding ${x.patterns} pattern${x.patterns===1?"":"s"} <span class="ref">last added ${esc(ago(x.last_added))}</span></summary><div class="suite-body"><p class="note">Loading…</p></div></details>`).join(""):`<p class="note">No suites yet.</p>`}</div>`;
+  $("#learn-days").onchange=e=>{store.set("assay-learn-days",e.target.value);renderLearn()};
+  box.querySelectorAll("[data-propose]").forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent="Drafting…";
+    try{const made=await api(`/v1/learn/patterns/candidates?${q({source:src(),key:b.dataset.propose,days})}`,{method:"POST"});
+      if(!made.length){b.textContent="No new traces to draft from";return}await renderLearn();$("#review")?.scrollIntoView({behavior:"smooth"})}catch(e){b.textContent=e.message}});
+  box.querySelectorAll("[data-pstatus]").forEach(b=>b.onclick=async()=>{b.disabled=true;
+    await api("/v1/learn/patterns/status",{method:"PUT",body:JSON.stringify({source:src(),key:b.dataset.key,status:b.dataset.pstatus})}).catch(()=>null);renderLearn()});
+  box.querySelectorAll("[data-approve]").forEach(b=>b.onclick=async()=>{const id=b.dataset.approve,card=b.closest(".cause");
+    let ref;try{ref=JSON.parse(card.querySelector("textarea").value)}catch(e){card.querySelector(".cmsg").textContent="The reference isn't valid JSON: "+e.message;return}
+    b.disabled=true;
+    try{await api(`/v1/learn/candidates/${id}/approve`,{method:"POST",body:JSON.stringify({source:src(),suite:card.querySelector("[name=suite]").value||"production-regressions",
+      redact_pii:card.querySelector("[name=redact]")?.checked!==false,case:{reference:ref}})});renderLearn()}catch(e){card.querySelector(".cmsg").textContent=e.message;b.disabled=false}});
+  box.querySelectorAll("[data-reject]").forEach(b=>b.onclick=async()=>{const card=b.closest(".cause");b.disabled=true;
+    await api(`/v1/learn/candidates/${b.dataset.reject}/reject`,{method:"POST",body:JSON.stringify({source:src(),note:card.querySelector("[name=note]").value||null})}).catch(()=>null);renderLearn()});
+  box.querySelectorAll("details[data-suite]").forEach(d=>d.ontoggle=async()=>{if(!d.open||d.dataset.loaded)return;d.dataset.loaded=1;
+    const rows=await api(`/v1/learn/suites/${encodeURIComponent(d.dataset.suite)}?${q({source:src()})}`).catch(()=>[]);
+    d.querySelector(".suite-body").innerHTML=`<div class="scroll"><table style="margin-top:8px"><tr><th>Case</th><th>Guards</th><th>From trace</th><th>Input</th><th>Latest</th></tr>
+      ${rows.map(r=>`<tr><td class="mono">${esc(r.case_id)}</td><td>${esc((P.patterns.find(p=>p.key===r.pattern)||{}).name||r.pattern)}</td>
+        <td><a class="mono" href="#trace/${encodeURIComponent(r.origin_trace)}">${esc(r.origin_trace)}</a></td><td class="ref">${esc(jtxt(r.input||r.input_ref||"").slice(0,90))}</td>
+        <td>${r.latest?`<span class="chip ${r.latest.fail?"bad":"good"}">${r.latest.fail?"failing":"passing"}</span> <span class="ref">${esc(r.latest.run_id)}</span>`:`<span class="ref">not run yet</span>`}</td></tr>`).join("")}</table></div>`});
+}
+function patternCard(p){
+  const [sc,sl]=PSTATUS[p.status]||["neutral",p.status],[kc,kl]=PKIND[p.kind];
+  const col=p.kind==="failure"?(p.status==="open"||p.status==="recurred"?"var(--bad)":"var(--good)"):p.kind==="infrastructure"?"var(--c-fb)":"var(--line-strong)";
+  return `<div class="cause ${p.status==="dismissed"?"decided":""}"><span class="stripe" style="background:${col}"></span><div>
+    <div class="head"><span class="chip ${kc}">${kl}</span><span class="chip ${sc}">${sl}</span>${p.cases?`<span class="chip good">${p.cases} test${p.cases>1?"s":""}</span>`:""}
+      <span class="count">${p.traces}<small>${pct(p.share,1)} of ${esc(p.task)}</small></span></div>
+    <h3>${esc(p.name)}</h3>
+    <ul><li>${esc(p.example)}</li>
+      ${Object.keys(p.signals).length?`<li>Also on these traces: ${Object.entries(p.signals).map(([k,n])=>`${esc(k.replace("_"," "))} ×${n}`).join(", ")}</li>`:""}
+      ${p.onset?`<li>Started around ${esc(p.onset.at.slice(0,16).replace("T"," "))}: ${pct(p.onset.rate_before)} of traces before, ${pct(p.onset.rate_after)} after.</li>`:""}
+      ${p.burst?`<li>${pct(p.burst.share,0)} came between ${esc(p.burst.start.slice(0,16).replace("T"," "))} and ${esc(p.burst.end.slice(11,16))}.</li>`:""}
+      <li class="ref">Seen ${esc(p.first.slice(0,16).replace("T"," "))} → ${esc(p.last.slice(0,16).replace("T"," "))}${p.first_seen?` · first logged ${esc(p.first_seen.slice(0,10))}`:""}</li></ul>
+    ${p.distinguishing.length?`<div><span class="ref">Sets these apart from normal traces:</span> ${p.distinguishing.map(featLabel).join("")}</div>`:""}
+    <div class="meta" style="margin-top:4px">${p.trace_ids.slice(0,6).map(t=>`<a class="mono" href="#trace/${encodeURIComponent(t)}">${esc(t)}</a>`).join(" · ")}</div>
+    <div class="acts">${p.kind==="infrastructure"?`<span class="note">Infrastructure: fix it, then watch the pattern go quiet. It isn't made into a test.</span>`
+      :p.status==="dismissed"?`<button class="link" type="button" data-pstatus="open" data-key="${esc(p.key)}">Reopen</button>`
+      :`<button class="primary" type="button" data-propose="${esc(p.key)}">Propose test cases</button><button class="link" type="button" data-pstatus="dismissed" data-key="${esc(p.key)}">Not a bug</button>`}</div></div></div>`;
+}
+function candidateCard(c){
+  const k=c.case,ref=k.reference||{};
+  return `<div class="cause"><span class="stripe" style="background:var(--accent)"></span><div>
+    <div class="head"><span class="chip neutral">draft #${c.id}</span><span class="ref">${esc(c.task||"")}</span>${c.pii?.length?`<span class="chip warn" title="${esc(c.pii.map(x=>x.kind+" "+x.sample).join(", "))}">personal data: ${esc([...new Set(c.pii.map(x=>x.kind))].join(", "))}</span>`:""}
+      <span class="count"><a class="mono" style="font-size:13px" href="#trace/${encodeURIComponent(c.trace_id)}">${esc(c.trace_id)}</a></span></div>
+    <h3 class="mono" style="font-size:14px">${esc(k.case_id)}</h3>
+    <p style="margin:4px 0"><span class="ref">Input:</span> ${k.input!=null?esc(jtxt(k.input).slice(0,400)):k.input_ref?`<span class="mono">${esc(k.input_ref)}</span>`:`<span class="worse">none captured</span>`}</p>
+    <div class="prov">${c.provenance.map(p=>`<span class="chip ${PFROM[p.from]?.[0]||"neutral"}">${esc(PFROM[p.from]?.[1]||p.from)}</span><span>${esc(p.detail)}</span>`).join("")}</div>
+    ${(k.missing||[]).length?`<ul>${k.missing.map(m=>`<li class="warn">${esc(m)}</li>`).join("")}</ul>`:""}
+    ${k.properties?.length?`<p class="ref" style="margin:6px 0 2px">Must hold: ${k.properties.map(p=>esc(p.label||("at most "+p.max_identical_calls+" identical calls"))).join(" · ")}</p>`:""}
+    <details ${ref.calls?"":"open"}><summary class="ref">Expected (edit before approving)</summary><textarea class="ref" spellcheck="false">${esc(JSON.stringify(ref,null,1))}</textarea></details>
+    <div class="acts"><input name="suite" value="production-regressions" aria-label="Suite" style="width:200px">
+      ${c.pii?.length?`<label><input type="checkbox" name="redact" checked> redact personal data</label>`:""}
+      <button class="primary" type="button" data-approve="${c.id}">Approve into suite</button>
+      <input name="note" placeholder="why not (optional)" aria-label="Reason" style="width:180px"><button type="button" data-reject="${c.id}">Reject</button>
+      <span class="cmsg reason"></span></div></div></div>`;
+}
+
 /* ---------- failure causes ---------- */
 const KIND={ai:["AI / pipeline error","var(--bad)","A step got the value wrong."],
   infrastructure:["Infrastructure","var(--c-fb)","A step failed or timed out, a fallback stood in for an unavailable model, the value was lost after the pipeline, or the test harness couldn't run."],
@@ -1278,7 +1376,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","workflow","measures","cost","errors","failures","agents","prompts","trace","alerts","gates","connect"];
+const TABS=["overview","workflow","measures","cost","errors","failures","agents","learn","prompts","trace","alerts","gates","connect"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -1290,7 +1388,7 @@ async function render(){
   if(t==="workflow")S.wfStep=hp[1]?decodeURIComponent(hp[1]):null;
   document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
-  if(!S.overview&&!["gates","connect","failures","agents","trace"].includes(t))return;
+  if(!S.overview&&!["gates","connect","failures","agents","learn","trace"].includes(t))return;
   try{
     if(t==="overview"){renderOverview();overviewFlow()}
     if(t==="workflow")await renderWorkflow();
@@ -1299,6 +1397,7 @@ async function render(){
     if(t==="errors")await renderErrors();
     if(t==="failures")await renderFailures();
     if(t==="agents")await renderAgents();
+    if(t==="learn")await renderLearn();
     if(t==="prompts")await renderPrompts();
     if(t==="trace")await renderTrace();
     if(t==="alerts")await renderAlerts();

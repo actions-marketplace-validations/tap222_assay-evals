@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import random
 from datetime import datetime, timedelta
+from typing import List
 
 from sqlalchemy import delete, select
 
@@ -300,6 +301,10 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
 
     with engine.begin() as conn:
         conn.execute(store.event_documents.insert(), docs)
+        conn.execute(delete(store.trace_inputs).where(store.trace_inputs.c.tenant == TENANT))
+        conn.execute(store.trace_inputs.insert(), [dict(tenant=TENANT, trace_id=d["document_id"], input=None,
+                                                        input_ref=f"s3://demo-inbox/{d['file_hash'][7:]}.pdf",
+                                                        captured_at=d["received_at"]) for d in docs])
         conn.execute(store.event_stage_runs.insert(), runs)
         conn.execute(store.event_calls.insert(), calls)
         conn.execute(store.event_indexed.insert(), indexed)
@@ -486,6 +491,95 @@ AGENT_CONTRACTS = [
 ]
 
 
+def _quirks(crng) -> dict:
+    return {k: crng.random() for k in ("ignore_kb", "skips", "search", "wrong_order", "by_increase", "delete", "loop")}
+
+
+def _case_facts(i: int, crng) -> dict:
+    return {"email": f"customer{i}@example.com", "cust": f"C-{2000 + i}", "oid": f"O-{10000 + i}",
+            "other": f"O-{20000 + i}", "price": round(crng.uniform(15, 240), 2), "qty": crng.randint(1, 4),
+            "status": crng.choice(["processing", "shipped", "delivered"]), "add": crng.randint(1, 3)}
+
+
+def _support_run(i: int, task: str, arng, quirks: dict, ts: datetime, after: bool, down: bool = False):
+    """One run of the demo support agent: (steps, answer, finished_at). `after` is prompt v5,
+    with its bugs; `down` is a kb_search outage."""
+    f = _case_facts(i, random.Random(f"agent-facts-{i}"))
+    email, cust, oid, other = f["email"], f["cust"], f["oid"], f["other"]
+    price, qty, status, add = f["price"], f["qty"], f["status"], f["add"]
+    s, clock = [], [ts]
+
+    def step(kind, **kw):
+        clock[0] += timedelta(seconds=arng.uniform(0.4, 2.5))
+        s.append(dict(kind=kind, started_at=clock[0], finished_at=clock[0] + timedelta(seconds=0.3), **kw))
+
+    def think():
+        tok = int(arng.lognormvariate(6.6, 0.3) * (1.25 if after else 1))
+        step("reason", model="claude-sonnet-5", tokens=tok, cost_usd=round(tok * 3e-6, 6), text="Planning the next step.")
+
+    def tool(name, args, result=None, error=None):
+        think()
+        step("tool", name=name, args=args, result=result, error=error)
+
+    order = {"order_id": oid, "customer_id": cust, "qty": qty, "price": price, "status": status}
+    tool("lookup_customer", {"email": email}, {"customer_id": cust, "name": f"Customer {i}"})
+    if after and task == "refund_request" and quirks["loop"] < 0.25:
+        for _ in range(2):
+            tool("lookup_customer", {"email": email}, {"customer_id": cust, "name": f"Customer {i}"})
+    looked = order
+    if task in ("refund_request", "order_status") and after and quirks["search"] < 0.35:
+        results = [dict(order), {**order, "order_id": other, "price": round(price * 0.6, 2)}]
+        if quirks["wrong_order"] < 0.5:
+            results.reverse()
+        tool("search_orders", {"customer_id": cust}, results)
+        looked = results[0]
+    elif task == "order_status" and quirks["skips"] < 0.2 and arng.random() < 0.4:
+        looked = None  # answers from memory
+    elif task != "policy_question":
+        tool("get_order", {"order_id": oid}, order)
+    if task == "refund_request":
+        tool("issue_refund", {"order_id": looked["order_id"], "amount": looked["price"]},
+             {"refund_id": f"R-{i}", "status": "issued"})
+        step("state", name=f"refund:{looked['order_id']}", args={"op": "create"},
+             result={"order_id": looked["order_id"], "amount": looked["price"]})
+        answer = f"I've refunded ${looked['price']:.2f} to your card for order {looked['order_id']}."
+    elif task == "change_quantity":
+        new = add if (after and quirks["by_increase"] < 0.5) else qty + add
+        tool("update_order", {"order_id": oid, "qty": new}, {**order, "qty": new})
+        step("state", name=f"order:{oid}", args={"op": "update"}, result={**order, "qty": new})
+        answer = f"Done: order {oid} now has {new} items."
+    elif task == "order_status":
+        answer = f"Your order {oid} is {looked['status'] if looked else 'processing'}."
+    elif task == "cancel_order":
+        if after and quirks["delete"] < 0.3:
+            tool("delete_order", {"order_id": oid}, {"deleted": True})
+            step("state", name=f"order:{oid}", args={"op": "delete"}, result=None)
+        else:
+            tool("cancel_order", {"order_id": oid}, {**order, "status": "cancelled"})
+            step("state", name=f"order:{oid}", args={"op": "update"}, result={**order, "status": "cancelled"})
+        answer = f"Order {oid} has been cancelled."
+    else:
+        for _ in range(2 if down else 1):
+            tool("kb_search", {"query": "return window for unopened items"},
+                 None if down else {"passage": "Unopened items can be returned within 30 days of delivery."},
+                 "503 Service Unavailable" if down else None)
+        days = "14 days" if (down or quirks["ignore_kb"] < 0.25) else "30 days"
+        answer = f"You can return unopened items within {days}."
+    think()
+    step("answer", text=answer)
+    return s, answer, clock[0]
+
+
+def _request(i: int, task: str) -> str:
+    """What the customer wrote: the input a failing run is replayed with."""
+    f = _case_facts(i, random.Random(f"agent-facts-{i}"))
+    return {"refund_request": f"Hi, this is {f['email']}. Please refund order {f['oid']}, it arrived damaged.",
+            "change_quantity": f"From {f['email']}: can you add {f['add']} more to order {f['oid']}?",
+            "order_status": f"Where is my order {f['oid']}? My email is {f['email']}.",
+            "cancel_order": f"Please cancel order {f['oid']} ({f['email']}), I ordered it by mistake.",
+            "policy_question": f"How long do I have to return unopened items? ({f['email']})"}[task]
+
+
 def seed_agents(engine: Engine, now: datetime, cases: int = AGENT_CASES, attempts: int = 3) -> dict:
     """A customer-support agent with nine tools, run on 150 test cases before and after
     a prompt release (support_agent v4 → v5), three attempts each. Built in:
@@ -505,11 +599,13 @@ def seed_agents(engine: Engine, now: datetime, cases: int = AGENT_CASES, attempt
     t, source = AGENT_TENANT, f"events:{AGENT_TENANT}"
     with engine.begin() as conn:
         for tbl in (store.event_documents, store.agent_steps, store.agent_trajectories, store.agent_references,
-                    store.eval_results):
+                    store.eval_results, store.trace_inputs, store.trace_feedback):
             conn.execute(delete(tbl).where(tbl.c.tenant == t))
         conn.execute(delete(store.prompt_versions).where(store.prompt_versions.c.tenant == t))
         conn.execute(delete(store.path_contracts).where(store.path_contracts.c.source == source))
         conn.execute(delete(store.failure_decisions).where(store.failure_decisions.c.source == source))
+        for tbl in (store.regression_candidates, store.suite_cases, store.pattern_log):
+            conn.execute(delete(tbl).where(tbl.c.source == source))
         for c in AGENT_CONTRACTS:
             conn.execute(store.path_contracts.insert().values(source=source, updated_at=now, **c))
     register_prompts(engine, [PromptEvent(prompt_id="support_agent", version="v4", template="You are a support agent…"),
@@ -528,14 +624,9 @@ def seed_agents(engine: Engine, now: datetime, cases: int = AGENT_CASES, attempt
         for i in range(cases):
             crng = random.Random(f"agent-case-{i}")
             task = crng.choice(tasks)
-            email = f"customer{i}@example.com"
-            cust, oid = f"C-{2000 + i}", f"O-{10000 + i}"
-            other = f"O-{20000 + i}"
-            price, qty = round(crng.uniform(15, 240), 2), crng.randint(1, 4)
-            status = crng.choice(["processing", "shipped", "delivered"])
-            add = crng.randint(1, 3)
-            quirks = {k: crng.random() for k in ("ignore_kb", "skips", "search", "wrong_order", "by_increase",
-                                                  "delete", "loop")}
+            fx = _case_facts(i, random.Random(f"agent-facts-{i}"))
+            oid, other, price, qty, status, add = fx["oid"], fx["other"], fx["price"], fx["qty"], fx["status"], fx["add"]
+            quirks = _quirks(crng)
             case_id = f"case-{i:03d}"
             ref = {"case_id": case_id, "allow_extra": ["lookup_customer", "kb_search"], "state": [],
                    "answer_match": "contains"}
@@ -567,72 +658,10 @@ def seed_agents(engine: Engine, now: datetime, cases: int = AGENT_CASES, attempt
                 arng = random.Random(f"{run_id}-{i}-{k}")
                 tid = f"{run_id}.{case_id}.a{k}"
                 ts = start + timedelta(seconds=20 * (i * attempts + k))
-                s, clock = [], [ts]
-
-                def step(kind, **kw):
-                    clock[0] += timedelta(seconds=arng.uniform(0.4, 2.5))
-                    s.append(dict(kind=kind, started_at=clock[0], finished_at=clock[0] + timedelta(seconds=0.3), **kw))
-
-                def think():
-                    tok = int(arng.lognormvariate(6.6, 0.3) * (1.25 if after else 1))
-                    step("reason", model="claude-sonnet-5", tokens=tok, cost_usd=round(tok * 3e-6, 6),
-                         text="Planning the next step.")
-
-                def tool(name, args, result=None, error=None):
-                    think()
-                    step("tool", name=name, args=args, result=result, error=error)
-
-                order = {"order_id": oid, "customer_id": cust, "qty": qty, "price": price, "status": status}
-                tool("lookup_customer", {"email": email}, {"customer_id": cust, "name": f"Customer {i}"})
-                if after and task == "refund_request" and quirks["loop"] < 0.25:
-                    for _ in range(2):
-                        tool("lookup_customer", {"email": email}, {"customer_id": cust, "name": f"Customer {i}"})
-                looked = order
-                if task in ("refund_request", "order_status") and after and quirks["search"] < 0.35:
-                    results = [dict(order), {**order, "order_id": other, "price": round(price * 0.6, 2)}]
-                    if quirks["wrong_order"] < 0.5:
-                        results.reverse()
-                    tool("search_orders", {"customer_id": cust}, results)
-                    looked = results[0]
-                elif task == "order_status" and quirks["skips"] < 0.2 and arng.random() < 0.4:
-                    looked = None  # answers from memory
-                elif task != "policy_question":
-                    tool("get_order", {"order_id": oid}, order)
-                answer = None
-                if task == "refund_request":
-                    tool("issue_refund", {"order_id": looked["order_id"], "amount": looked["price"]},
-                         {"refund_id": f"R-{i}", "status": "issued"})
-                    step("state", name=f"refund:{looked['order_id']}", args={"op": "create"},
-                         result={"order_id": looked["order_id"], "amount": looked["price"]})
-                    answer = f"I've refunded ${looked['price']:.2f} to your card for order {looked['order_id']}."
-                elif task == "change_quantity":
-                    new = add if (after and quirks["by_increase"] < 0.5) else qty + add
-                    tool("update_order", {"order_id": oid, "qty": new}, {**order, "qty": new})
-                    step("state", name=f"order:{oid}", args={"op": "update"}, result={**order, "qty": new})
-                    answer = f"Done: order {oid} now has {new} items."
-                elif task == "order_status":
-                    answer = f"Your order {oid} is {looked['status'] if looked else 'processing'}."
-                elif task == "cancel_order":
-                    if after and quirks["delete"] < 0.3:
-                        tool("delete_order", {"order_id": oid}, {"deleted": True})
-                        step("state", name=f"order:{oid}", args={"op": "delete"}, result=None)
-                    else:
-                        tool("cancel_order", {"order_id": oid}, {**order, "status": "cancelled"})
-                        step("state", name=f"order:{oid}", args={"op": "update"}, result={**order, "status": "cancelled"})
-                    answer = f"Order {oid} has been cancelled."
-                else:
-                    down = after and i in outage
-                    for _ in range(2 if down else 1):
-                        tool("kb_search", {"query": "return window for unopened items"},
-                             None if down else {"passage": "Unopened items can be returned within 30 days of delivery."},
-                             "503 Service Unavailable" if down else None)
-                    days = "14 days" if (down or quirks["ignore_kb"] < 0.25) else "30 days"
-                    answer = f"You can return unopened items within {days}."
-                think()
-                step("answer", text=answer)
+                s, answer, end_at = _support_run(i, task, arng, quirks, ts, after, down=after and i in outage)
                 heads.append(dict(tenant=t, trajectory_id=tid, run_id=run_id, case_id=case_id, attempt=k, task=task,
-                                  started_at=ts, finished_at=clock[0], answer=answer, status="completed", lineage=lineage))
-                docs.append(dict(tenant=t, document_id=tid, received_at=ts, completed_at=clock[0], status="completed",
+                                  started_at=ts, finished_at=end_at, answer=answer, status="completed", lineage=lineage))
+                docs.append(dict(tenant=t, document_id=tid, received_at=ts, completed_at=end_at, status="completed",
                                  document_type=task, segment="Support agent eval"))
                 steps += [dict(tenant=t, trajectory_id=tid, seq=n, name=None, args=None, result=None, error=None,
                                text=None, model=None, tokens=None, cost_usd=None) | x for n, x in enumerate(s)]
@@ -646,6 +675,7 @@ def seed_agents(engine: Engine, now: datetime, cases: int = AGENT_CASES, attempt
                                                            answer_match=r["answer_match"], state=r["state"] or None,
                                                            max_steps=r.get("max_steps"), case_id=r["case_id"])
                                                       for r in refs])
+    live = _agent_production(engine, now, tasks)
     src = EventsSource(engine, t)
     results = sum(agents.evaluate_run(engine, src, t, r[0])["results"] for r in runs)
     with engine.begin() as conn:
@@ -656,4 +686,68 @@ def seed_agents(engine: Engine, now: datetime, cases: int = AGENT_CASES, attempt
         conn.execute(delete(store.alerts).where(store.alerts.c.source == source))
     # One run over both evaluation runs, so the overview, measures and workflow graph cover the agent.
     run_measures(engine, src, Window(now - timedelta(days=15), now), as_of=now, prompt_regressions=False)
-    return {"trajectories": len(heads), "steps": len(steps), "eval_results": results}
+    # A developer already turned two production patterns into regression cases (the rest wait for review).
+    from assay import learn
+    from assay.runner import CachedSource
+    live_src, week = CachedSource(src), Window(now - timedelta(days=7), now)
+    pats = learn.patterns(live_src, week, engine)["patterns"]
+    for kind, step in (("loop", "lookup_customer"), ("contract", "delete_order")):
+        p = next((x for x in pats if x["type"] == kind and x["stage"] == step), None)
+        if p:
+            made = learn.propose(live_src, week, engine, p["key"])
+            if made:
+                learn.approve(engine, source, made[0]["id"], "support-agent-regressions", by="demo@assay")
+    return {"trajectories": len(heads), "steps": len(steps), "eval_results": results, "production": live}
+
+
+def _agent_production(engine: Engine, now: datetime, tasks: List[str], per_day: int = 80, days: int = 7) -> int:
+    """A week of live traffic for the demo agent: v4 until two days ago, then v5 with its
+    bugs; the customer's message captured as the input; thumbs down and retries on some
+    bad answers; kb_search down for eight hours yesterday."""
+    t = AGENT_TENANT
+    heads, steps, docs, inputs, feedback = [], [], [], [], []
+    outage = (now - timedelta(hours=26), now - timedelta(hours=18))  # kb_search down for eight hours
+    n = 0
+    for d in range(days, 0, -1):
+        for _ in range(per_day):
+            rng = random.Random(f"live-{n}")
+            ts = now - timedelta(days=d) + timedelta(seconds=rng.randint(0, 86399))
+            i = 1000 + rng.randint(0, 3999)  # a customer
+            task = rng.choice(tasks)
+            after = ts > now - timedelta(days=2)
+            quirks = _quirks(rng)
+            s, answer, end_at = _support_run(i, task, random.Random(f"live-run-{n}"), quirks, ts, after,
+                                             down=outage[0] <= ts <= outage[1])
+            ok_steps, ok_answer, _ = _support_run(i, task, random.Random(f"live-run-{n}"), {k: 1.0 for k in quirks}, ts,
+                                                  False)
+            bad = answer != ok_answer or [x.get("name") for x in s if x["kind"] == "tool"] != \
+                [x.get("name") for x in ok_steps if x["kind"] == "tool"]
+            tid = f"live-{ts:%m%d}-{n:04d}"
+            heads.append(dict(tenant=t, trajectory_id=tid, run_id=None, case_id=None, attempt=None, task=task,
+                              started_at=ts, finished_at=end_at, answer=answer, status="completed",
+                              lineage={"prompt": f"support_agent@{'v5' if after else 'v4'}", "model": "claude-sonnet-5",
+                                       "build": "d93a4b8" if after else "c7d1e02"}))
+            docs.append(dict(tenant=t, document_id=tid, received_at=ts, completed_at=end_at, status="completed",
+                             document_type=task, segment="Support agent (live)"))
+            steps += [dict(tenant=t, trajectory_id=tid, seq=k, name=None, args=None, result=None, error=None, text=None,
+                           model=None, tokens=None, cost_usd=None) | x for k, x in enumerate(s)]
+            inputs.append(dict(tenant=t, trace_id=tid, input=_request(i, task), input_ref=None, captured_at=ts))
+            r = rng.random()
+            if bad and r < 0.35:
+                feedback.append(dict(tenant=t, feedback_id=f"{tid}-fb", trace_id=tid, kind="thumbs_down",
+                                     ts=end_at + timedelta(minutes=2), note=None))
+            elif bad and r < 0.5:
+                feedback.append(dict(tenant=t, feedback_id=f"{tid}-fb", trace_id=tid, kind="retry",
+                                     ts=end_at + timedelta(minutes=1), note=None))
+            elif not bad and r < 0.08:
+                feedback.append(dict(tenant=t, feedback_id=f"{tid}-fb", trace_id=tid, kind="thumbs_up",
+                                     ts=end_at + timedelta(minutes=2), note=None))
+            n += 1
+    with engine.begin() as conn:
+        conn.execute(store.agent_trajectories.insert(), heads)
+        conn.execute(store.agent_steps.insert(), steps)
+        conn.execute(store.event_documents.insert(), docs)
+        conn.execute(store.trace_inputs.insert(), inputs)
+        if feedback:
+            conn.execute(store.trace_feedback.insert(), feedback)
+    return len(heads)

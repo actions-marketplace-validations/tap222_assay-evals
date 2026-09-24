@@ -19,11 +19,11 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import agents, alerts, auth, contracts, cost, coverage, failures, gates, ingest, prompts, rootcause, runner, store, trace, workflow
+from assay import agents, alerts, auth, contracts, cost, coverage, failures, gates, learn, ingest, prompts, rootcause, runner, store, trace, workflow
 from assay.auth import Principal
 from assay.config import Settings
 from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EvalResultEvent, EventBatch, ExtractionEvent,
-                          ReferenceEvent, ReviewEvent, StageRunEvent, TrajectoryEvent)
+                          FeedbackEvent, InputEvent, ReferenceEvent, ReviewEvent, StageRunEvent, TrajectoryEvent)
 from assay.measures import GROUPS, REGISTRY
 from assay.scheduler import Scheduler
 
@@ -99,6 +99,24 @@ class EvalGateIn(BaseModel):
     source: str
     baseline: Optional[str] = Field(None, description="Run to compare with; defaults to the run before")
     tolerance: float = Field(0.01, ge=0, le=1, description="Largest acceptable drop in the pass rate")
+
+
+class ApproveIn(BaseModel):
+    source: str
+    suite: str = Field("production-regressions", max_length=128)
+    case: Optional[Dict[str, Any]] = Field(None, description="Edits to the drafted case: reference, properties, input")
+    redact_pii: bool = Field(True, description="Replace emails, phone and card numbers in the input with placeholders")
+
+
+class RejectIn(BaseModel):
+    source: str
+    note: Optional[str] = Field(None, max_length=1024)
+
+
+class PatternStatusIn(BaseModel):
+    source: str
+    key: str
+    status: str = Field(..., pattern="^(open|dismissed)$")
 
 
 class DecisionIn(BaseModel):
@@ -519,6 +537,67 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, f"No trajectory '{trajectory_id}' in {source}.")
         return out
 
+    # ---------- learning from production ----------
+
+    @app.get("/v1/learn/anomalies", tags=["results"],
+             summary="Traces that look wrong without anyone saying so, each with the signals behind its score")
+    def learn_anomalies(source: str, days: float = 7, limit: int = 200, threshold: float = learn.THRESHOLD,
+                        p: Principal = Depends(require("read"))):
+        sc = learn.score(runner.CachedSource(resolve(p, source)), runner.window_for_days(days), engine, threshold)
+        return {"traces": sc["traces"], "anomalous": len(sc["anomalous"]), "threshold": threshold,
+                "items": [a | {"received_at": a["received_at"].isoformat()} for a in sc["anomalous"][:min(limit, 2000)]]}
+
+    @app.get("/v1/learn/patterns", tags=["results"],
+             summary="Anomalous traces clustered into patterns, each with where it is in the loop")
+    def learn_patterns(source: str, days: float = 7, threshold: float = learn.THRESHOLD,
+                       p: Principal = Depends(require("read"))):
+        return learn.patterns(runner.CachedSource(resolve(p, source)), runner.window_for_days(days), engine, threshold)
+
+    @app.post("/v1/learn/patterns/candidates", tags=["operate"],
+              summary="Draft test cases from a pattern's most typical and most different traces")
+    def learn_propose(source: str, key: str, days: float = 7, threshold: float = learn.THRESHOLD,
+                      p: Principal = Depends(require("manage"))):
+        return learn.propose(runner.CachedSource(resolve(p, source)), runner.window_for_days(days), engine, key,
+                             threshold)
+
+    @app.put("/v1/learn/patterns/status", tags=["operate"], summary="Dismiss a pattern (not a bug), or reopen it")
+    def learn_pattern_status(body: PatternStatusIn, p: Principal = Depends(require("manage"))):
+        check_source(p, body.source)
+        learn.set_status(engine, body.source, body.key, body.status)
+        return {"key": body.key, "status": body.status}
+
+    @app.get("/v1/learn/candidates", tags=["results"], summary="Drafted test cases: proposed, approved, rejected")
+    def learn_candidates(source: str, status: Optional[str] = None, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return learn.candidates(engine, source, status)
+
+    @app.post("/v1/learn/candidates/{candidate_id}/approve", tags=["operate"],
+              summary="Add a drafted case to a suite, with edits; for agents its reference is stored for evaluation")
+    def learn_approve(candidate_id: int, body: ApproveIn, p: Principal = Depends(require("manage"))):
+        check_source(p, body.source)
+        out = learn.approve(engine, body.source, candidate_id, body.suite, body.case, body.redact_pii, p.name)
+        if out is None:
+            raise HTTPException(404, f"No candidate {candidate_id} in {body.source}.")
+        return out
+
+    @app.post("/v1/learn/candidates/{candidate_id}/reject", tags=["operate"])
+    def learn_reject(candidate_id: int, body: RejectIn, p: Principal = Depends(require("manage"))):
+        check_source(p, body.source)
+        if not learn.reject(engine, body.source, candidate_id, body.note, p.name):
+            raise HTTPException(404, f"No candidate {candidate_id} in {body.source}.")
+        return {"rejected": candidate_id}
+
+    @app.get("/v1/learn/suites", tags=["results"], summary="Regression suites built from production failures")
+    def learn_suites(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return {"suites": learn.suites(engine, source), "loop": learn.loop_metrics(engine, source)}
+
+    @app.get("/v1/learn/suites/{name}", tags=["results"],
+             summary="A suite's cases: input, expectations, the production failure each guards, latest result")
+    def learn_suite(name: str, source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return learn.suite(engine, source, name)
+
     # ---------- failure causes ----------
 
     def _public(analysis):
@@ -841,6 +920,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                               ("calls", "calls", CallEvent), ("reviews", "reviews", ReviewEvent),
                               ("extractions", "extractions", ExtractionEvent), ("errors", "errors", ErrorEvent),
                               ("eval-results", "eval_results", EvalResultEvent),
+                              ("inputs", "inputs", InputEvent), ("feedback", "feedback", FeedbackEvent),
                               ("indexed", "extractions", ExtractionEvent)]:
         app.add_api_route(f"/v1/events/{path}", one_kind(kind, model), methods=["POST"], tags=["ingest"],
                           summary=f"Send {path.replace('-', ' ')}", include_in_schema=path != "indexed")

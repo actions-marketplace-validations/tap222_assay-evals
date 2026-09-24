@@ -162,8 +162,8 @@ to refuse to run open.
 
 | Endpoint | Use |
 |---|---|
-| `POST /v1/events` | any mix of `documents`, `stage_runs`, `calls`, `reviews`, `extractions`, `errors`, `eval_results`, `trajectories` in one request (up to 5,000 records) |
-| `POST /v1/events/{documents,stage-runs,calls,reviews,extractions,errors,eval-results,trajectories}` | one record type per request |
+| `POST /v1/events` | any mix of `documents`, `stage_runs`, `calls`, `reviews`, `extractions`, `errors`, `eval_results`, `trajectories`, `inputs`, `feedback` in one request (up to 5,000 records) |
+| `POST /v1/events/{documents,stage-runs,calls,reviews,extractions,errors,eval-results,trajectories,inputs,feedback}` | one record type per request |
 | `POST /v1/otlp/v1/traces` | OpenTelemetry traces (OTLP/HTTP, JSON). Point a collector's `otlphttp` exporter at `/v1/otlp` |
 
 The ingest contract:
@@ -308,6 +308,80 @@ after release.
 - `prompt_error_rate` alerts per version.
 - Release gates warn when the `prompt` in a decision's lineage (`id@version`) isn't in the
   registry.
+
+## Learning from production: failures become regression tests
+
+Most production failures are never reported. **Learn** closes the loop: production traces →
+anomalous ones → patterns → draft test cases → your approval → a permanent regression
+suite. It also shows when a fixed bug comes back.
+
+**1. Score every trace without labels.** Each signal shows its reason on the trace:
+
+| Signal | Weight |
+|---|---|
+| a critical path contract broke / a warning one | 3 / 1 |
+| someone reported a wrong value on it | 3 |
+| a user gave a thumbs down, complained or escalated / retried | 3 / 1.5 |
+| a step failed; an agent's tool errored and it never recovered | 2 |
+| the same call with identical arguments 3+ times | 2 |
+| far more steps, time or cost than the task's usual (robust z ≥ 3.5, and ≥ 1.5× the median) | 1 each |
+| a fallback model answered; a path under 1% of the task's traces | 1 each |
+| never finished | 1.5 |
+
+A trace is anomalous at 2 or more. Evaluation-run trajectories are left out: tests aren't
+production.
+
+**2. Cluster into patterns.** Traces are grouped by their main **cause**, where it happened,
+and, for task-relative signals, the task. A cause is a broken contract, a tool error or a
+failing step, and it's chosen before a symptom like a thumbs down or an outlier. Each
+pattern shows:
+- what sets its traces apart from normal ones (lift against normal traces);
+- when it started, and whether it came in a burst;
+- a kind: **failure**, **infrastructure** (a tool or step that was down; shown but not made
+  into tests, since an outage can't be replayed) or **unusual** (outliers and fallbacks,
+  worth a look).
+
+**3. Draft test cases.** For a pattern, the most typical trace becomes a draft, then the most
+different ones, never near-duplicates. Each expectation says where it came from:
+
+| From | Reliable? | What |
+|---|---|---|
+| a correction | yes | a person reported the right value |
+| what broke | yes | the contract this trace broke, or "at most 2 identical calls" after a loop. These hold whatever the right answer is |
+| normal traces | a guess | the tool sequence and step budget that normal traces of the task use |
+| the request | a guess | an argument (e.g. `order_id`) found in the input because it looks like what normal traces pass |
+
+A trace can only be replayed if its input was captured: `input` on a trajectory, or
+`POST /v1/events/inputs` with the input or an `input_ref`. Inputs are scanned for personal
+data (emails, phone and card numbers, IBANs, SSNs) and redacted on approval unless you say
+otherwise. Personal data never becomes an expected argument.
+
+**4. Review.** Edit the expected values and approve into a named suite, or reject with a
+reason. For agents, the reference is stored, so the next evaluation run checks the case.
+
+**5. Watch the loop.** Each pattern moves open → **protected** (a test guards it) →
+**fixed** (a protected pattern stops appearing) → **recurred** (seen again after being
+fixed). When a suite case that passed before fails in an evaluation run, Failure causes
+say "Production bug back", and the release call holds. The loop reports:
+- coverage: the share of failure patterns with a test;
+- the median time from first seen to a test;
+- how many patterns were fixed, and how many came back.
+
+| Endpoint | Returns |
+|---|---|
+| `POST /v1/events/inputs`, `POST /v1/events/feedback` | what traces were given, and what users did about them |
+| `GET /v1/learn/anomalies?source=…&days=7` | anomalous traces, each with its signals |
+| `GET /v1/learn/patterns?source=…` | patterns with their status, plus the loop's coverage and timing |
+| `POST /v1/learn/patterns/candidates?source=…&key=…` | draft cases from a pattern |
+| `PUT /v1/learn/patterns/status` | dismiss a pattern as not a bug, or reopen it |
+| `GET /v1/learn/candidates?source=…&status=proposed` | drafts to review |
+| `POST /v1/learn/candidates/{id}/approve`, `…/reject` | decide |
+| `GET /v1/learn/suites?source=…`, `GET /v1/learn/suites/{name}?source=…` | suites, and each case's origin and latest result |
+
+In the demo, `events:demo-agent` has a week of live traffic. It includes a pattern only
+thumbs-down feedback reveals (policy answers ignoring the knowledge base), and two patterns
+already protected by tests. `events:demo` has document-pipeline patterns built from
+reported errors, failed steps and contract breaks.
 
 ## Agents: evaluating the trajectory, not just the answer
 
@@ -472,6 +546,7 @@ curl -X POST "$ASSAY/v1/contracts" -H "Authorization: Bearer $KEY" -H "Content-T
 |---|---|
 | **Overview** | What's broken right now? Open anomalies, SLO state, and the slices that moved beyond noise since the last run. Refreshes every minute. |
 | **Workflow** | The pipeline as a graph inferred from traffic: each step's health, errors and broken path contracts; the contracts and how each is holding up; suggested contracts; and path shifts. |
+| **Learn** | Production traces scored without labels, clustered into patterns, drafted into test cases for review, and suites with the loop's coverage, time to test, and recurrences. |
 | **Agents** | An agent run's pass rate per check against the baseline, where failing runs first went wrong, efficiency (steps, repeats, tool errors, tokens, cost), runs that got longer, and every trajectory. Trace shows one step by step against its reference. |
 | **Failures** | Reported errors or an evaluation run, grouped into causes: each with its kind, confidence, evidence, what sets it apart from passes, and examples. Accept intended changes, confirm or dismiss the rest. |
 | **Cost** | Fully loaded cost per document and per page, stacked by component over time; cost by document type, segment or mode; AI spend by model with the fallback share; the rate card. |
@@ -651,6 +726,7 @@ contracts.py  path contracts, checking every document's path, shifts, suggestion
 failures.py   failures into causes: per-failure evidence, grouping, contrast with passes, kinds
 flaky.py      pass rates per check from attempts, exact tests, flaky / rerun / got worse, release call
 agents.py     trajectories: reference comparison, end state, checks, credit assignment, efficiency
+learn.py      production → anomaly scores → patterns → draft cases (with provenance, PII redaction) → suites
 trace.py      per-document trace and flags; slowest / stuck / lost finders
 rootcause.py  error localization: which step a wrong value started at, and how
 prompts.py    prompt registry, per-version results, version-vs-previous comparison, diffs

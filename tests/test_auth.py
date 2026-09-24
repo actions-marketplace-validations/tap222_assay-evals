@@ -165,7 +165,8 @@ def test_batch_endpoint_is_idempotent(tmp_path):
     first = c.post("/v1/events", headers=bearer(k), json=batch).json()
     assert first["tenant"] == "acme" and first["ingested"] == {"documents": 1, "stage_runs": 1, "calls": 1,
                                                                "reviews": 1, "extractions": 1, "errors": 0,
-                                                               "eval_results": 0, "trajectories": 0,
+                                                               "eval_results": 0, "inputs": 0, "feedback": 0,
+                                                               "trajectories": 0,
                                                                "prompts": 0}
     c.post("/v1/events", headers=bearer(k), json=batch)  # the pipeline retried
     with c.app.state.engine.connect() as conn:

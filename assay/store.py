@@ -261,6 +261,82 @@ agent_references = Table(
     Column("updated_at", DateTime, nullable=False),
 )
 
+# --- Learning from production: inputs, feedback, proposed test cases, suites ---
+
+# What a trace was given, so a failure can be replayed as a test.
+trace_inputs = Table(
+    "trace_inputs", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("trace_id", String(128), primary_key=True),  # a document or trajectory id
+    Column("input", JSON),  # the request itself (text or structured)
+    Column("input_ref", String(1024)),  # or where to fetch it: s3://…/file.pdf
+    Column("captured_at", DateTime, nullable=False),
+)
+
+# What users did about a trace: thumbs down, a retry, an escalation.
+trace_feedback = Table(
+    "trace_feedback", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("feedback_id", String(128), primary_key=True),
+    Column("trace_id", String(128), nullable=False, index=True),
+    Column("kind", String(32), nullable=False),  # thumbs_down | thumbs_up | retry | escalation | complaint
+    Column("ts", DateTime, nullable=False, index=True),
+    Column("note", String(1024)),
+)
+
+# A test case drafted from a production failure, waiting for a developer.
+regression_candidates = Table(
+    "regression_candidates", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("source", String(64), nullable=False, index=True),
+    Column("pattern", String(512), nullable=False),  # the failure pattern (cluster) it came from
+    Column("trace_id", String(128), nullable=False),
+    Column("task", String(128)),
+    Column("status", String(16), nullable=False),  # proposed | approved | rejected
+    Column("case", JSON, nullable=False),  # {"case_id", "input", "input_ref", "reference", "properties"}
+    Column("provenance", JSON, nullable=False),  # where each expectation came from
+    Column("pii", JSON),  # what personal data the input seems to hold
+    Column("created_at", DateTime, nullable=False),
+    Column("decided_at", DateTime),
+    Column("decided_by", String(128)),
+    Column("note", String(1024)),
+    UniqueConstraint("source", "trace_id", name="uq_candidate_trace"),
+)
+
+# The permanent regression suite: approved cases, each linked to the failure it guards against.
+suite_cases = Table(
+    "suite_cases", metadata,
+    Column("source", String(64), primary_key=True),
+    Column("case_id", String(128), primary_key=True),
+    Column("suite", String(128), nullable=False, index=True),
+    Column("candidate_id", Integer),
+    Column("pattern", String(512)),
+    Column("origin_trace", String(128)),
+    Column("task", String(128)),
+    Column("input", JSON),
+    Column("input_ref", String(1024)),
+    Column("reference", JSON),
+    Column("properties", JSON),
+    Column("added_at", DateTime, nullable=False),
+    Column("added_by", String(128)),
+)
+
+# Every production failure pattern seen, and where it is in the loop.
+pattern_log = Table(
+    "pattern_log", metadata,
+    Column("source", String(64), primary_key=True),
+    Column("key", String(512), primary_key=True),
+    Column("name", String(512)),
+    Column("kind", String(16)),  # failure | infrastructure | unusual: only failures become tests
+    Column("first_seen", DateTime, nullable=False),
+    Column("last_seen", DateTime, nullable=False),
+    Column("traces", Integer, nullable=False, default=0),
+    Column("status", String(16), nullable=False),  # open | protected | fixed | recurred | dismissed
+    Column("protected_at", DateTime),
+    Column("fixed_at", DateTime),
+    Column("recurred_at", DateTime),
+)
+
 # A person's call on a group of failures: accepted as intended, not a problem, or confirmed.
 failure_decisions = Table(
     "failure_decisions", metadata,

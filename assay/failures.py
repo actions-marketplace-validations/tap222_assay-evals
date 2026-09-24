@@ -772,6 +772,26 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
     out = group_failures(traced, passes[:MAX_POPULATION], [r.ts for r in rows], changes=changes,
                          release_notes=_release_notes(engine, source.name), burst_width=span / 8, is_eval=True,
                          decisions=load_decisions(engine, source.name))
+    # Cases that came from production failures (assay/learn.py): flag a bug that's back.
+    from assay import learn
+    guarded = learn.guards(engine, source.name)
+    member_of = {f["id"]: f for f in traced}
+    back_total = 0
+    for g in out["groups"]:
+        hits = [member_of[i] for i in g["member_ids"] if member_of[i]["case_id"] in guarded]
+        if not hits:
+            continue
+        back = [h for h in hits if h.get("since") == "new"]
+        back_total += len({h["case_id"] for h in back})
+        pats = Counter(guarded[h["case_id"]]["name"] for h in hits)
+        name, _ = pats.most_common(1)[0]
+        first = min(guarded[h["case_id"]]["first_seen"] or "" for h in hits)[:10]
+        g["guards"] = {"cases": len({h["case_id"] for h in hits}), "back": len({h["case_id"] for h in back}),
+                       "patterns": dict(pats)}
+        g["evidence"].insert(0, (f"Production bug back: {len({h['case_id'] for h in back})} regression case(s) that "
+                                 f"passed before fail again" if back else
+                                 f"{len({h['case_id'] for h in hits})} regression case(s) from production still fail")
+                             + f", guarding “{name}” (first seen {first}).")
     # What each failing check's cause means for the release (see flaky.summarize).
     key_of = {f["id"]: flaky.check_key(_Row(f)) for f in traced}
     roles = {}
@@ -784,8 +804,18 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
     return out | {"scope": {"kind": "eval", "run_id": run_id, "baseline": baseline, "changes": {
         k: {"from": a, "to": b} for k, (a, b) in changes.items()}, "results": len(rows), "checks": len(cand),
         "passed": len(passes), "attempts_per_check": round(len(rows) / len(cand), 1)},
-        "population": len(cand), "stability": flaky.summarize(states, tolerance, roles)
-        | {"run_id": run_id, "baseline": baseline, "lineage": this["lineage"]}}
+        "population": len(cand), "stability": _with_guards(flaky.summarize(states, tolerance, roles), back_total)
+        | {"run_id": run_id, "baseline": baseline, "lineage": this["lineage"], "production_bugs_back": back_total}}
+
+
+def _with_guards(st: dict, back: int) -> dict:
+    """A production bug that came back holds the release, whatever the pass rate says."""
+    if back:
+        st["reasons"].insert(0, f"{back} regression case(s) from production failures passed before and fail again: "
+                                "a bug that was fixed is back.")
+        if st["outcome"] in ("advance", "rerun"):
+            st["outcome"] = "hold"
+    return st
 
 
 class _Row:
