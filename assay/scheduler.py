@@ -44,7 +44,7 @@ class Scheduler:
                 source = runner.resolve_source(name, self.engine, self.settings)
                 run_id = runner.run_measures(
                     self.engine, source, runner.window_for_days(self.settings.schedule_window_days),
-                    notify=self.settings.notifier(), alert_min_n=self.settings.alert_min_n,
+                    notify=_notifier(self.engine, name, self.settings), alert_min_n=self.settings.alert_min_n,
                     alert_after_runs=self.settings.alert_after_runs)
                 self.last[name] = {"at": started.isoformat(), "ok": True, "run_id": run_id}
             except Exception as exc:
@@ -60,3 +60,8 @@ class Scheduler:
         return {"enabled": self.enabled, "every_minutes": self.settings.schedule_minutes,
                 "window_days": self.settings.schedule_window_days,
                 "sources": self.settings.schedule_sources, "last": self.last}
+
+
+def _notifier(engine, source_name, settings):
+    from assay import integrations
+    return integrations.notifier(engine, source_name, settings.public_url, settings.notifier())

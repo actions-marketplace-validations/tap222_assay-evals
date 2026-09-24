@@ -11,6 +11,21 @@
                prompt_id="extract_fields", prompt_version="v13")   # or Assay.prompt_version(template)
     assay.document("inv-123", received_at=start, completed_at=datetime.utcnow())  # upserts by id
     assay.review("inv-123", minutes=4.5, reviewer="sam")
+    assay.input("inv-123", input_ref="s3://inbox/inv-123.pdf")   # so a failure can become a test
+    assay.feedback("inv-123", "thumbs_down")                        # what the user thought
+
+    # Agents: every reasoning step, tool call, state change and the answer
+    with assay.trajectory("run-42", task="refund_request", input=message) as t:
+        t.reason(model="claude-sonnet-5", tokens=812, cost_usd=0.0024)
+        order = t.call_tool("get_order", {"order_id": "O-17"}, get_order)   # runs it, records result or error
+        t.state("refund:O-17", "create", {"amount": 27.61})
+        t.answer("Refunded $27.61.")
+
+    # Tests: one result per check (passes too), and whether the release can go out
+    assay.eval_result("nightly-0924", "case-17", "fail", field="total", expected="1240.00", actual="1,240.00")
+    assay.flush()
+    assert assay.gate("nightly-0924", source="events:acme")["outcome"] == "advance"
+
     assay.flush()   # also happens automatically every `batch_size` records and at exit
 
 Records are buffered and sent together to POST /v1/events, one request per
@@ -27,6 +42,7 @@ import json
 import logging
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from contextlib import contextmanager
@@ -35,7 +51,8 @@ from typing import Callable, Dict, List, Optional
 
 log = logging.getLogger("assay.client")
 
-KINDS = ("documents", "stage_runs", "calls", "reviews", "extractions", "errors", "prompts")
+KINDS = ("documents", "stage_runs", "calls", "reviews", "extractions", "errors", "eval_results", "trajectories",
+         "inputs", "feedback", "prompts")
 
 
 class _Step:
@@ -50,7 +67,53 @@ MAX_PER_REQUEST = 5000
 
 
 def _jsonable(v):
-    return v.isoformat() if isinstance(v, datetime) else v
+    if isinstance(v, datetime):
+        return v.isoformat()
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
+class _Trajectory:
+    """Handle yielded by Assay.trajectory(): records an agent's steps in order."""
+
+    def __init__(self):
+        self.steps: List[dict] = []
+        self.final: Optional[str] = None
+
+    def reason(self, text: Optional[str] = None, model: Optional[str] = None, tokens: Optional[int] = None,
+               cost_usd: Optional[float] = None) -> None:
+        self.steps.append(dict(kind="reason", text=text, model=model, tokens=tokens, cost_usd=cost_usd,
+                               started_at=datetime.utcnow()))
+
+    def tool(self, name: str, args: Optional[dict] = None, result=None, error: Optional[str] = None) -> None:
+        """A tool call you've already made."""
+        self.steps.append(dict(kind="tool", name=name, args=args, result=result, error=error,
+                               started_at=datetime.utcnow()))
+
+    def call_tool(self, name: str, args: dict, fn: Callable, *extra, **kw):
+        """Call fn(**args) (plus any extra arguments), record the result or the error, and return
+        the result (re-raising errors)."""
+        started = datetime.utcnow()
+        try:
+            out = fn(*extra, **args, **kw)
+        except Exception as exc:
+            self.steps.append(dict(kind="tool", name=name, args=args, error=f"{type(exc).__name__}: {exc}"[:1000],
+                                   started_at=started, finished_at=datetime.utcnow()))
+            raise
+        self.steps.append(dict(kind="tool", name=name, args=args, result=out, started_at=started,
+                               finished_at=datetime.utcnow()))
+        return out
+
+    def state(self, obj: str, op: str = "update", value=None) -> None:
+        """A change to the world: state("order:17", "update", {"qty": 3}); op is create, update or delete."""
+        self.steps.append(dict(kind="state", name=obj, args={"op": op}, result=value, started_at=datetime.utcnow()))
+
+    def answer(self, text: str) -> None:
+        self.final = text
+        self.steps.append(dict(kind="answer", text=text, started_at=datetime.utcnow()))
 
 
 class Assay:
@@ -141,6 +204,49 @@ class Assay:
         """One extracted value; has_positions if it carries a source location."""
         self._add("extractions", dict(document_id=document_id, has_positions=has_positions, field=field, **fields))
 
+    def input(self, trace_id: str, input=None, input_ref: Optional[str] = None) -> None:
+        """What a document or agent run was given, so a failure can be replayed as a test."""
+        self._add("inputs", dict(trace_id=trace_id, input=input, input_ref=input_ref))
+
+    def feedback(self, trace_id: str, kind: str, note: Optional[str] = None, ts: Optional[datetime] = None) -> None:
+        """What a user did: thumbs_down, thumbs_up, retry, escalation or complaint."""
+        self._add("feedback", dict(trace_id=trace_id, kind=kind, note=note, ts=ts or datetime.utcnow()))
+
+    def eval_result(self, run_id: str, case_id: str, status: str, field: Optional[str] = None, **fields) -> None:
+        """One check in a test run: status pass, fail, or error (the check couldn't run). Send passes too.
+        expected, actual, evaluator ("exact_match@2"), score, reason, attempt, document_id, lineage."""
+        fields.setdefault("ts", datetime.utcnow())
+        self._add("eval_results", dict(run_id=run_id, case_id=case_id, status=status, field=field, **fields))
+
+    @contextmanager
+    def trajectory(self, trajectory_id: str, task: Optional[str] = None, input=None, **fields):
+        """Record one agent run. fields: run_id, case_id, attempt (for test runs), lineage, segment.
+        A block that raises is recorded as failed (and re-raised)."""
+        t, started, status = _Trajectory(), datetime.utcnow(), "completed"
+        try:
+            yield t
+        except Exception:
+            status = "failed"
+            raise
+        finally:
+            self._add("trajectories", dict(trajectory_id=trajectory_id, task=task, input=input, started_at=started,
+                                           finished_at=datetime.utcnow(), answer=t.final, status=status,
+                                           steps=t.steps, **fields))
+
+    def reference(self, case_id: str, calls: Optional[List[dict]] = None, answer: Optional[str] = None,
+                  state: Optional[List[dict]] = None, allow_extra: Optional[List[str]] = None,
+                  max_steps: Optional[int] = None) -> None:
+        """What an agent test case expects. Sent at once."""
+        self._send("/v1/agents/references", [dict(case_id=case_id, calls=calls or [], answer=answer,
+                                                  state=state or [], allow_extra=allow_extra or [],
+                                                  max_steps=max_steps)])
+
+    def gate(self, run_id: str, source: str, tolerance: float = 0.01, baseline: Optional[str] = None) -> dict:
+        """Ask whether a release can go out, from a test run's results (needs a manage key).
+        Returns {"outcome": advance | rerun | hold | rollback, "reasons": [...], ...}. Flush first."""
+        return self._json("POST", f"/v1/evals/runs/{urllib.parse.quote(run_id, safe='')}/gate",
+                          {"source": source, "tolerance": tolerance, "baseline": baseline})
+
     # ---------- sending ----------
 
     def _add(self, kind: str, record: dict) -> None:
@@ -174,13 +280,22 @@ class Assay:
                             sum(len(v) for v in payload.values()), exc_info=True)
                 return
 
-    def _http(self, path: str, payload: dict) -> None:
+    def _json(self, method: str, path: str, payload: Optional[dict] = None) -> dict:
+        req = urllib.request.Request(self.url + path, data=json.dumps(payload).encode() if payload is not None else None,
+                                     headers=self._headers(), method=method)
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            return json.loads(resp.read().decode() or "{}")
+
+    def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         if self.tenant:
             headers["X-Tenant"] = self.tenant
-        req = urllib.request.Request(self.url + path, data=json.dumps(payload).encode(), headers=headers,
+        return headers
+
+    def _http(self, path: str, payload: dict) -> None:
+        req = urllib.request.Request(self.url + path, data=json.dumps(payload).encode(), headers=self._headers(),
                                      method="POST")
         for attempt in range(3):
             try:

@@ -68,6 +68,7 @@ def main(argv=None) -> int:
         return 0
 
     engine = store.make_engine(settings.store_url)
+    from assay import integrations
 
     if args.cmd == "run":
         try:
@@ -76,7 +77,9 @@ def main(argv=None) -> int:
             print(exc, file=sys.stderr)
             return 2
         run_id = runner.run_measures(engine, source, runner.window_for_days(args.days),
-                                     notify=settings.notifier(), alert_min_n=settings.alert_min_n,
+                                     notify=integrations.notifier(engine, source.name, settings.public_url,
+                                                                  settings.notifier()),
+                                     alert_min_n=settings.alert_min_n,
                                      alert_after_runs=settings.alert_after_runs)
         out = runner.latest_run(engine, source.name)
         for mid, m in out["measures"].items():

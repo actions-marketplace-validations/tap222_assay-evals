@@ -46,6 +46,34 @@ before and after a prompt release, with one of each agent failure mode built in 
 
 None of it is real data.
 
+## Getting started without code
+
+Open the dashboard and go to **Connect**. It works as a checklist:
+
+1. **Pick how your data can reach Assay.** There are five choices, in plain words:
+   - **Upload a spreadsheet.** No code. Corrections, test results, user feedback, or a list
+     of items, as a CSV file or cells copied from Excel or Google Sheets. Assay works out what
+     the sheet holds and which column is which, and shows rows it can't read and why. You can
+     correct its guesses before importing. Test sheets just need a run name.
+   - **We use OpenTelemetry.** One exporter added to the collector's config.
+   - **A developer can add a few lines.** One Python file, no dependencies.
+   - **Another system can send web requests.** Zapier, n8n, or any script.
+   - **Our data is in a database.** Read-only access and a mapping file.
+
+   Each choice gives you something to copy, with the server's address filled in. It also
+   writes a ready-to-send message for whoever looks after that system. If you manage keys,
+   one button creates a sending key and puts it in both.
+2. **Watch the checklist.** It shows which features your data switches on and the one next
+   step for each that's missing, and it refreshes itself as data arrives.
+3. **Send results where your team works.** Paste a Slack webhook URL, a Jira site and token,
+   or a Linear key, and Assay checks it works. Alerts then appear in Slack, and any failure
+   pattern under **Learn** gets an "Open a ticket" button. Saved tokens are never shown
+   again. **Block bad releases** gives you a ready-made GitHub Actions, GitLab or plain-script
+   job for whoever looks after your builds: it stops a release unless Assay says "advance".
+
+Upgrading Assay is safe. On start it adds any new tables and columns to your existing
+database and never removes data.
+
 ## Connect your pipeline
 
 There are two ways to connect. Both feed the same measures.
@@ -731,7 +759,9 @@ trace.py      per-document trace and flags; slowest / stuck / lost finders
 rootcause.py  error localization: which step a wrong value started at, and how
 prompts.py    prompt registry, per-version results, version-vs-previous comparison, diffs
 coverage.py   what a source can answer, and which field unlocks the rest
-client.py     standard-library SDK for pushing events
+client.py     standard-library SDK: documents, steps, calls, agent runs, test results, inputs, feedback, release check
+connect.py    no-code setup: what's arrived and what it switches on, spreadsheet import, hand-off instructions
+integrations.py  Slack, Jira, Linear (secrets masked), and CI release-check jobs
 auth.py       API keys, scopes, tenant isolation, rate limits
 ingest.py     event contract: validation, idempotent upserts, OpenTelemetry mapping
 gates.py      noise floor (spread of identical runs), paired bootstrap CI, advance / hold / rollback
@@ -756,4 +786,7 @@ api.py        FastAPI; dashboard in static/index.html
   of calls per window. Push aggregation into SQL before running at production volume.
 - **Timing noise:** p90 completion time on small slices is the noisiest alert. It needs a
   bootstrap error estimate.
-- **Migrations:** tables are created on startup. Add Alembic before changing the schema.
+- **Migrations beyond adding:** on start, Assay adds new tables and columns to an existing
+  database. Renaming or removing columns would need a real migration tool (Alembic).
+- **Secrets at rest:** Slack, Jira and Linear tokens are masked in the API but stored as
+  plain text in Assay's database. Protect the database, or add encryption with a server key.

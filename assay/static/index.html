@@ -195,6 +195,22 @@ table.lineage th.hl,table.lineage td.hl{box-shadow:inset 2px 0 0 var(--accent),i
 .loopbar .arrow{flex:0 0 auto;padding:10px 4px;color:var(--muted);align-self:center;border:0;background:none}
 .prov{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;font-size:13px;align-items:baseline}
 textarea.ref{width:100%;min-height:120px;font:12px/1.45 var(--mono);background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:8px;color:var(--ink)}
+/* connect */
+.checklist{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}
+.checklist div{display:grid;grid-template-columns:22px 1fr;gap:6px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);font-size:13.5px}
+.checklist .ok{border-color:var(--good)}
+.checklist .mark{font:600 15px var(--mono)}
+.checklist .ok .mark{color:var(--good)}.checklist .no .mark{color:var(--muted)}
+.progress{height:8px;background:var(--sunk);border-radius:4px;overflow:hidden}.progress i{display:block;height:100%;background:var(--good)}
+.choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+.choice{border:1.5px solid var(--line);border-radius:10px;padding:12px;background:var(--surface);text-align:left;cursor:pointer;display:grid;gap:4px;font:inherit;color:inherit}
+.choice:hover{border-color:var(--line-strong)}.choice.on{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.choice b{font-size:14.5px}.choice span{font-size:12.5px;color:var(--muted)}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:12.5px}
+.live i{width:8px;height:8px;border-radius:50%;background:var(--muted)}.live.on i{background:var(--good);box-shadow:0 0 0 3px var(--good-bg)}
+.intg{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.intg .card{cursor:default}
+.intg input{width:100%}
 .suggest{background:var(--sunk);border-radius:8px;padding:10px 12px;display:grid;gap:4px}
 pre.code{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font:12.5px/1.55 var(--mono);overflow-x:auto;white-space:pre}
 details summary{cursor:pointer}
@@ -271,6 +287,14 @@ async function api(path,opts={}){
   return r.json();
 }
 const src=()=>$("#source").value;
+// A file from the API, sent with the key (a plain link wouldn't carry it).
+async function download(path,name){
+  const key=store.get("assay-key");
+  const r=await fetch(path,{headers:key?{"Authorization":"Bearer "+key}:{}});
+  if(!r.ok)return;
+  const url=URL.createObjectURL(await r.blob()),a=document.createElement("a");
+  a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
 const q=o=>new URLSearchParams(Object.entries(o).filter(([,v])=>v!==""&&v!=null)).toString();
 
 /* ---------- formatting ---------- */
@@ -580,7 +604,155 @@ async function renderCost(){
 }
 
 /* ---------- connect ---------- */
+const WAYS={
+  sheet:["Upload a spreadsheet","No code. Corrections, test results, user feedback or a list of items, as CSV or copied cells."],
+  otel:["We use OpenTelemetry","No code changes: one exporter in the collector's config."],
+  python:["A developer can add a few lines","One file, no dependencies. About an hour of a developer's time."],
+  http:["Another system can send web requests","Any language or tool that can POST JSON (Zapier, n8n, a script)."],
+  database:["Our data is in a database","Read-only access plus a mapping file, set up once by whoever runs the server."]};
+let connectTimer=null;
 async function renderConnect(){
+  clearInterval(connectTimer);
+  const box=$("#tab-connect"),way=store.get("assay-connect-way")||"sheet",source=src()||"events:my-team";
+  const st=src()?await api(`/v1/connect/status?${q({source:src()})}`).catch(()=>null):null;
+  const ready=st?st.ready:0,total=st?st.total:8;
+  box.innerHTML=`<div class="panel stack">
+    <div class="panel-head"><div><h2>Get connected</h2><p class="sub">Pick how your data can reach Assay. Each way gives you something to copy, a file to upload, or a message to send whoever looks after your systems. The checklist fills in as data arrives.</p></div>
+      ${st?`<span class="live ${st.receiving?"on":""}"><i></i>${st.receiving?"Receiving data":"Nothing in the last 24 hours"}</span>`:""}</div>
+    <div><div class="panel-head" style="margin-bottom:6px"><h3>${ready} of ${total} features ready${src()?` for <span class="mono">${esc(src())}</span>`:""}</h3></div>
+      <div class="progress"><i style="width:${ready/total*100}%"></i></div></div>
+    <div class="checklist">${(st?.features||[]).map(f=>`<div class="${f.ready?"ok":"no"}"><span class="mark">${f.ready?"✓":"○"}</span><span>${f.ready?`<a href="#${f.tab}">${esc(f.name)}</a>`:`<b>${esc(f.name)}</b><br><span class="note">${esc(f.next)}</span>`}</span></div>`).join("")||`<p class="note">Nothing has arrived yet. Choose a way below.</p>`}</div>
+    ${st?`<details><summary class="note">What has arrived</summary><div class="facts" style="margin-top:8px">${Object.values(st.records).map(r=>`<div><dt>${esc(r.label)}</dt><dd>${r.total?r.total.toLocaleString():`<span class="note">none yet</span>`}${r.last_24h?` <span class="ref">+${r.last_24h.toLocaleString()} today</span>`:""}</dd></div>`).join("")}</div></details>`:""}
+  </div>
+  <div class="panel stack"><h2>How does your data get here?</h2>
+    <div class="choices">${Object.entries(WAYS).map(([k,[t,d]])=>`<button type="button" class="choice ${k===way?"on":""}" data-way="${k}"><b>${esc(t)}</b><span>${esc(d)}</span></button>`).join("")}</div>
+    <div id="way-body"></div></div>
+  <div class="panel stack"><div class="panel-head"><div><h2>Send results where your team works</h2><p class="sub">Paste a link or token; Assay checks it works. Saved tokens are never shown again.</p></div></div>
+    <div id="intg-body"><p class="note">Loading…</p></div></div>
+  <details class="panel"><summary><b>Advanced</b> <span class="note">· what each measure needs, API keys, history backfill</span></summary><div id="connect-advanced" class="stack" style="margin-top:12px"></div></details>`;
+  box.querySelectorAll("[data-way]").forEach(b=>b.onclick=()=>{store.set("assay-connect-way",b.dataset.way);renderConnect()});
+  renderWay(way,source);renderIntegrations(source);
+  const adv=box.querySelector("details.panel");adv.ontoggle=()=>{if(adv.open&&!adv.dataset.done){adv.dataset.done=1;renderConnectAdvanced($("#connect-advanced"))}};
+  if(src())connectTimer=setInterval(async()=>{if(tab()!=="connect"||document.hidden)return;
+    const n=await api(`/v1/connect/status?${q({source:src()})}`).catch(()=>null);if(n&&(n.ready!==ready||n.receiving!==st?.receiving))renderConnect()},10000);
+}
+function copyBtn(id){return `<button type="button" data-copy="${id}">Copy</button>`}
+function wireCopy(root){root.querySelectorAll("[data-copy]").forEach(b=>b.onclick=async()=>{const el=document.getElementById(b.dataset.copy);
+  try{await navigator.clipboard.writeText(el.value??el.textContent);b.textContent="Copied"}catch(e){const r=document.createRange();r.selectNodeContents(el);getSelection().removeAllRanges();getSelection().addRange(r);b.textContent="Selected: press Ctrl/Cmd+C"}})}
+async function renderWay(way,source){
+  const box=$("#way-body");
+  if(way==="sheet")return renderUpload(box);
+  const host=location.origin,open=S.me?.mode==="open";
+  const keyNote=open?`<p class="note">This server doesn't ask for a key yet, so none is needed. Before going live, have whoever runs it switch keys on.</p>`
+    :S.me?.scopes?.includes("admin")?`<p class="note"><button type="button" id="make-key" class="primary">Create a key for this</button> <span id="key-made"></span></p>`
+    :`<p class="note">You'll need a key with the <b>ingest</b> scope. Ask whoever manages Assay for one.</p>`;
+  const snippet={otel:`exporters:
+  otlphttp/assay:
+    endpoint: ${host}/v1/otlp
+    encoding: json
+    headers: { Authorization: "Bearer <your key>" }
+service:
+  pipelines:
+    traces: { exporters: [otlphttp/assay] }`,
+    python:`from client import Assay   # copy assay/client.py into the project
+assay = Assay("${host}", api_key="<your key>")
+
+assay.document(item_id, received_at=start, document_type="invoice")
+with assay.stage(item_id, "extract") as step:
+    step.outputs.update(result)            # what the step produced
+assay.input(item_id, request_text)         # so failures can become tests
+assay.feedback(item_id, "thumbs_down")     # when a user reacts`,
+    http:`POST ${host}/v1/events
+Authorization: Bearer <your key>
+Content-Type: application/json
+
+{"documents": [{"document_id": "order-17", "received_at": "2026-09-24T10:00:00Z", "document_type": "refund"}],
+ "feedback":  [{"trace_id": "order-17", "kind": "thumbs_down"}]}`,
+    database:`ASSAY_SOURCE_URL=postgresql+psycopg://readonly:<password>@db:5432/pipeline
+ASSAY_SOURCE_MAPPING=./mappings/mine.json      # which column is which; see mappings/example.json
+python -m assay check-source                   # checks every mapped column`}[way];
+  const who={otel:"whoever runs your OpenTelemetry collector",python:"a developer on the project",http:"whoever looks after the system (or your Zapier / n8n flow)",database:"whoever runs the database and the Assay server"}[way];
+  box.innerHTML=`<div class="two"><div class="stack" style="gap:8px;align-content:start"><h3>What to add</h3>${keyNote}
+      <pre class="code" id="snip">${esc(snippet)}</pre><div>${copyBtn("snip")}</div></div>
+    <div class="stack" style="gap:8px;align-content:start"><h3>Or send it to ${esc(who)}</h3>
+      <p class="note">A ready-to-send message with everything they need.</p>
+      <textarea class="ref" id="handoff" style="min-height:220px" spellcheck="false">Loading…</textarea>
+      <div class="picker">${copyBtn("handoff")}<a id="mailto" class="ref" href="#">Open in email</a></div></div></div>`;
+  const h=await api(`/v1/connect/handoff?${q({source,method:way})}`).catch(e=>({text:e.message}));
+  const setText=t=>{$("#handoff").value=t;$("#mailto").href=`mailto:?subject=${encodeURIComponent("Connecting to Assay")}&body=${encodeURIComponent(t)}`};
+  setText(h.text);wireCopy(box);
+  const mk=$("#make-key");if(mk)mk.onclick=async()=>{mk.disabled=true;
+    try{const k=await api("/v1/keys",{method:"POST",body:JSON.stringify({name:`${WAYS[way][0]} (${source})`,tenant:source.startsWith("events:")?source.slice(7):null,scopes:["ingest"]})});
+      $("#snip").textContent=$("#snip").textContent.replaceAll("<your key>",k.key);setText($("#handoff").value.replace(/API key: .*/,"API key: "+k.key));
+      $("#key-made").innerHTML=`Created. It's in the snippet and the message now; <b>copy them before leaving this page</b>, the key won't be shown again.`}
+    catch(e){$("#key-made").textContent=e.message;mk.disabled=false}};
+}
+function renderUpload(box){
+  box.innerHTML=`<div class="stack" style="gap:10px">
+    <p class="note">Export from Excel or Google Sheets as CSV, or copy the cells and paste them here. The first row must be the column names. Assay works out what's in it and which column is which; you can correct it before importing.</p>
+    <div class="picker"><input type="file" id="sheet-file" accept=".csv,.tsv,.txt" aria-label="Spreadsheet file"><span class="note">or</span></div>
+    <textarea class="ref" id="sheet-text" placeholder="Paste cells here (with the header row)" spellcheck="false"></textarea>
+    <div><button type="button" id="sheet-read" class="primary">Read it</button></div>
+    <div id="sheet-out"></div></div>`;
+  $("#sheet-file").onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{$("#sheet-text").value=r.result;readSheet()};r.readAsText(f)};
+  $("#sheet-read").onclick=()=>readSheet();
+}
+async function readSheet(kind){
+  const text=$("#sheet-text").value,out=$("#sheet-out");if(!text.trim()){out.innerHTML=`<p class="reason">Nothing to read yet.</p>`;return}
+  let p;try{p=await api("/v1/connect/preview",{method:"POST",body:JSON.stringify({text,kind:kind||null})})}catch(e){out.innerHTML=`<p class="reason">${esc(e.message)}</p>`;return}
+  const needsRun=p.ask_run_name;
+  out.innerHTML=`<div class="stack" style="gap:10px">
+    <div class="picker"><span>This looks like</span><select id="sheet-kind">${Object.entries(p.kinds).map(([k,l])=>`<option value="${k}" ${k===p.kind?"selected":""}>${esc(l)}</option>`).join("")}</select>
+      <span class="note">${p.rows.toLocaleString()} rows</span></div>
+    ${(()=>{const row=f=>`<tr><td>${esc(p.labels[f]||f)}${p.required.includes(f)?` <span class="worse">needed</span>`:""}</td>
+        <td><select data-map="${f}"><option value="">(none)</option>${p.headers.map(h=>`<option ${p.mapping[f]===h?"selected":""}>${esc(h)}</option>`).join("")}</select></td></tr>`;
+      const shown=p.fields.filter(f=>!(needsRun&&f==="run_id")&&(p.required.includes(f)||p.mapping[f])),more=p.fields.filter(f=>!(needsRun&&f==="run_id")&&!shown.includes(f));
+      return `<div class="scroll"><table><tr><th>What Assay needs</th><th>Your column</th></tr>${shown.map(row).join("")}</table></div>
+        ${more.length?`<details><summary class="note">More columns you could match (${more.length})</summary><div class="scroll"><table>${more.map(row).join("")}</table></div></details>`:""}`})()}
+    ${needsRun?`<div class="picker"><span>Name this test run</span><input id="sheet-run" value="upload-${new Date().toISOString().slice(0,10)}"></div>`:""}
+    <details><summary class="note">First rows</summary><div class="scroll"><table style="margin-top:6px"><tr>${p.headers.map(h=>`<th>${esc(h)}</th>`).join("")}</tr>${p.sample.map(r=>`<tr>${r.map(c=>`<td class="ref">${esc(String(c).slice(0,60))}</td>`).join("")}</tr>`).join("")}</table></div></details>
+    ${p.problems.length?`<div class="flags">${p.problems.slice(0,8).map(x=>`<div class="flag"><span class="chip warn">${x.row?"row "+x.row:"setup"}</span>${esc(x.problem)}</div>`).join("")}</div>`:""}
+    <div class="picker"><button type="button" id="sheet-import" class="primary" ${p.valid||needsRun?"":"disabled"}>Import ${p.valid.toLocaleString()} rows</button><span id="sheet-msg" class="note"></span></div></div>`;
+  $("#sheet-kind").onchange=e=>readSheet(e.target.value);
+  $("#sheet-import").onclick=async()=>{const b=$("#sheet-import");b.disabled=true;b.textContent="Importing…";
+    const mapping={};document.querySelectorAll("[data-map]").forEach(s=>mapping[s.dataset.map]=s.value||null);
+    try{const r=await api("/v1/connect/import",{method:"POST",body:JSON.stringify({text,kind:$("#sheet-kind").value,mapping,
+        defaults:$("#sheet-run")?{run_id:$("#sheet-run").value}:null})});
+      $("#sheet-msg").innerHTML=`<b>${r.imported.toLocaleString()} imported</b>${r.skipped?`, ${r.skipped} skipped (${esc(r.problems[0]?.problem||"")})`:""}. The checklist above updates in a moment.`;
+      b.textContent="Imported";await loadSources();setTimeout(renderConnect,1500)}
+    catch(e){$("#sheet-msg").textContent=e.message;b.disabled=false;b.textContent="Import"}};
+}
+async function renderIntegrations(source){
+  const box=$("#intg-body");if(!box)return;
+  if(!src()){box.innerHTML=`<p class="note">Connect a source first.</p>`;return}
+  let I;try{I=await api(`/v1/integrations?${q({source})}`)}catch(e){box.innerHTML=`<p class="note">Setting these up needs a key with the <b>manage</b> scope. ${esc(e.message)}</p>`;return}
+  const help={slack:"Slack → Apps → Incoming Webhooks → Add to a channel → copy the URL.",jira:"Create a token at id.atlassian.com → Security → API tokens.",
+    linear:"Linear → Settings → API → Personal API keys. Team ID: Settings → Teams → the team's URL."};
+  const does={slack:"Alerts appear in the channel, with a link back.",jira:"Open a ticket for any pattern under Learn.",linear:"Open an issue for any pattern under Learn."};
+  const ci=src()?await api(`/v1/integrations/ci?${q({source,system:store.get("assay-ci")||"github"})}`).catch(()=>null):null;
+  box.innerHTML=`<div class="intg">${Object.entries(I.kinds).map(([k,d])=>{const c=I.configured[k];return `<div class="card" data-intg="${k}">
+      <div class="top"><b>${esc(d.label)}</b>${c?`<span class="chip good">connected</span>`:`<span class="chip neutral">not set up</span>`}</div>
+      <p class="note">${esc(does[k])}</p>
+      ${Object.entries(d.fields).map(([f,l])=>`<label class="note">${esc(l)}<input name="${f}" ${/token|key|url/.test(f)?`type="password" autocomplete="off"`:""} value="${esc(c?.[f]||"")}" placeholder="${esc(l)}"></label>`).join("")}
+      <p class="ref">${esc(help[k])}</p>
+      <div class="picker"><button type="button" class="primary" data-save="${k}">Save</button>${c?`<button type="button" data-test="${k}">Test</button><button class="link" type="button" data-remove="${k}">Remove</button>`:""}</div>
+      <p class="note" data-msg="${k}"></p></div>`}).join("")}
+    <div class="card"><div class="top"><b>Block bad releases</b>${ci?`<select id="ci-system"><option value="github">GitHub Actions</option><option value="gitlab">GitLab</option><option value="script">Any CI (script)</option></select>`:""}</div>
+      <p class="note">Your pipeline asks Assay before releasing, and stops unless the answer is "advance". Give this file to whoever looks after your builds.</p>
+      ${ci?`<pre class="code" id="ci-text" style="max-height:220px;overflow:auto">${esc(ci.text)}</pre><div>${copyBtn("ci-text")}</div>`:`<p class="note">Available once a source is connected.</p>`}</div></div>`;
+  const sys=$("#ci-system");if(sys){sys.value=store.get("assay-ci")||"github";sys.onchange=e=>{store.set("assay-ci",e.target.value);renderIntegrations(source)}}
+  wireCopy(box);
+  const msg=(k,t,ok)=>{const m=box.querySelector(`[data-msg="${k}"]`);m.textContent=t;m.className=ok?"note":"reason"};
+  box.querySelectorAll("[data-save]").forEach(b=>b.onclick=async()=>{const k=b.dataset.save,card=box.querySelector(`[data-intg="${k}"]`),config={};
+    card.querySelectorAll("input[name]").forEach(i=>config[i.name]=i.value.trim());
+    try{await api(`/v1/integrations/${k}`,{method:"PUT",body:JSON.stringify({source,config})});
+      const t=await api(`/v1/integrations/${k}/test?${q({source})}`,{method:"POST"});await renderIntegrations(source);msg(k,(t.ok?"Saved. ":"Saved, but the test failed: ")+t.message,t.ok)}
+    catch(e){msg(k,e.message,false)}});
+  box.querySelectorAll("[data-test]").forEach(b=>b.onclick=async()=>{const k=b.dataset.test;b.disabled=true;
+    const t=await api(`/v1/integrations/${k}/test?${q({source})}`,{method:"POST"}).catch(e=>({ok:false,message:e.message}));msg(k,t.message,t.ok);b.disabled=false});
+  box.querySelectorAll("[data-remove]").forEach(b=>b.onclick=async()=>{await api(`/v1/integrations/${b.dataset.remove}?${q({source})}`,{method:"DELETE"}).catch(()=>null);renderIntegrations(source)});
+}
+async function renderConnectAdvanced(box){
   const host=location.origin,tenant=(src()||"events:acme").startsWith("events:")?src().slice(7):"acme";
   let cov=null,err="";
   if(src()){try{cov=await api(`/v1/coverage?${q({source:src(),days:7})}`)}catch(e){err=e.message}}
@@ -625,7 +797,7 @@ python -m assay backfill --days 30  # history, so alerts work today
 python -m assay serve --every 60 --source sql`;
   const statusChip={live:"good",partial:"warn",blocked:"neutral"};
   const byStatus=s=>(cov?.measures||[]).filter(m=>m.status===s);
-  $("#tab-connect").innerHTML=`
+  box.innerHTML=`
   <div class="panel"><div class="panel-head"><div><h2>Connect your pipeline</h2>
     <p class="sub">Two ways in, same measures. Send events from your code, or give Assay read-only access to the database your pipeline already writes. Then backfill, and the alerts work from the first day.</p></div></div>
     <div class="two">
@@ -997,6 +1169,8 @@ const PFROM={correction:["good","a correction"],property:["good","what broke"],p
 async function renderLearn(){
   const box=$("#tab-learn"),days=+(store.get("assay-learn-days")||7);
   box.innerHTML=`<div class="panel"><p class="note">Scanning production traces…</p></div>`;
+  const I=await api(`/v1/integrations?${q({source:src()})}`).catch(()=>null);
+  S.tracker=I?.configured?.jira?"Jira":I?.configured?.linear?"Linear":null;
   let P,C,Su;
   try{[P,C,Su]=await Promise.all([api(`/v1/learn/patterns?${q({source:src(),days})}`),api(`/v1/learn/candidates?${q({source:src(),status:"proposed"})}`),
     api(`/v1/learn/suites?${q({source:src()})}`)])}catch(e){box.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
@@ -1019,11 +1193,16 @@ async function renderLearn(){
   <div class="panel" id="review"><div class="panel-head"><div><h2>Review</h2><p class="sub">Draft cases waiting for you. Each expectation says where it came from: corrections and what broke are reliable; anything taken from normal traces or the request is a guess to check.</p></div></div>
     ${C.map(candidateCard).join("")||`<p class="note">Nothing to review. Propose cases from an open pattern above.</p>`}</div>
   <div class="panel"><div class="panel-head"><div><h2>Suites</h2><p class="sub">Approved cases, each linked to the production failure it guards against. When one fails in an evaluation run after passing, Failure causes and the release call say the bug is back.</p></div></div>
-    ${Su.suites.length?Su.suites.map(x=>`<details data-suite="${esc(x.suite)}"><summary><b class="mono">${esc(x.suite)}</b> · ${x.cases} cases guarding ${x.patterns} pattern${x.patterns===1?"":"s"} <span class="ref">last added ${esc(ago(x.last_added))}</span></summary><div class="suite-body"><p class="note">Loading…</p></div></details>`).join(""):`<p class="note">No suites yet.</p>`}</div>`;
+    ${Su.suites.length?Su.suites.map(x=>`<details data-suite="${esc(x.suite)}"><summary><b class="mono">${esc(x.suite)}</b> · ${x.cases} cases guarding ${x.patterns} pattern${x.patterns===1?"":"s"} <span class="ref">last added ${esc(ago(x.last_added))}</span>
+      · download ${["json","csv"].map(f=>`<button class="link" type="button" data-dl="/v1/learn/suites/${encodeURIComponent(x.suite)}/export?${q({source:src(),format:f})}" data-name="${esc(x.suite)}.${f}">${f.toUpperCase()}</button>`).join(" / ")}</summary><div class="suite-body"><p class="note">Loading…</p></div></details>`).join(""):`<p class="note">No suites yet.</p>`}</div>`;
   $("#learn-days").onchange=e=>{store.set("assay-learn-days",e.target.value);renderLearn()};
   box.querySelectorAll("[data-propose]").forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent="Drafting…";
     try{const made=await api(`/v1/learn/patterns/candidates?${q({source:src(),key:b.dataset.propose,days})}`,{method:"POST"});
       if(!made.length){b.textContent="No new traces to draft from";return}await renderLearn();$("#review")?.scrollIntoView({behavior:"smooth"})}catch(e){b.textContent=e.message}});
+  box.querySelectorAll("[data-dl]").forEach(b=>b.onclick=e=>{e.preventDefault();download(b.dataset.dl,b.dataset.name)});
+  box.querySelectorAll("[data-ticket]").forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent="Opening…";
+    try{const t=await api(`/v1/learn/patterns/ticket?${q({source:src(),key:b.dataset.ticket,days})}`,{method:"POST"});
+      b.outerHTML=`<a href="${esc(t.url||"#")}" target="_blank" rel="noopener">Ticket ${esc(t.id||"")} ↗</a>`}catch(e){b.textContent=e.message}});
   box.querySelectorAll("[data-pstatus]").forEach(b=>b.onclick=async()=>{b.disabled=true;
     await api("/v1/learn/patterns/status",{method:"PUT",body:JSON.stringify({source:src(),key:b.dataset.key,status:b.dataset.pstatus})}).catch(()=>null);renderLearn()});
   box.querySelectorAll("[data-approve]").forEach(b=>b.onclick=async()=>{const id=b.dataset.approve,card=b.closest(".cause");
@@ -1056,7 +1235,8 @@ function patternCard(p){
     <div class="meta" style="margin-top:4px">${p.trace_ids.slice(0,6).map(t=>`<a class="mono" href="#trace/${encodeURIComponent(t)}">${esc(t)}</a>`).join(" · ")}</div>
     <div class="acts">${p.kind==="infrastructure"?`<span class="note">Infrastructure: fix it, then watch the pattern go quiet. It isn't made into a test.</span>`
       :p.status==="dismissed"?`<button class="link" type="button" data-pstatus="open" data-key="${esc(p.key)}">Reopen</button>`
-      :`<button class="primary" type="button" data-propose="${esc(p.key)}">Propose test cases</button><button class="link" type="button" data-pstatus="dismissed" data-key="${esc(p.key)}">Not a bug</button>`}</div></div></div>`;
+      :`<button class="primary" type="button" data-propose="${esc(p.key)}">Propose test cases</button><button class="link" type="button" data-pstatus="dismissed" data-key="${esc(p.key)}">Not a bug</button>`}
+      ${p.ticket_url?`<a href="${esc(p.ticket_url)}" target="_blank" rel="noopener">Ticket ${esc(p.ticket_id||"")} ↗</a>`:S.tracker&&p.status!=="dismissed"?`<button type="button" data-ticket="${esc(p.key)}">Open a ${esc(S.tracker)} ticket</button>`:""}</div></div></div>`;
 }
 function candidateCard(c){
   const k=c.case,ref=k.reference||{};

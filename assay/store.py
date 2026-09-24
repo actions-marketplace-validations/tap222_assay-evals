@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from sqlalchemy import (JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer,
                         MetaData, String, Table, Text, UniqueConstraint, create_engine)
+from typing import List
+
 from sqlalchemy.engine import Engine
 
 metadata = MetaData()
@@ -335,6 +337,8 @@ pattern_log = Table(
     Column("protected_at", DateTime),
     Column("fixed_at", DateTime),
     Column("recurred_at", DateTime),
+    Column("ticket_id", String(64)),  # the Jira / Linear ticket opened for it
+    Column("ticket_url", String(512)),
 )
 
 # A person's call on a group of failures: accepted as intended, not a problem, or confirmed.
@@ -402,8 +406,40 @@ api_keys = Table(
 )
 
 
+# Outbound connections set up from the dashboard: Slack, Jira, Linear. Secrets are never
+# returned by the API once saved (see assay/integrations.py).
+integrations = Table(
+    "integrations", metadata,
+    Column("source", String(64), primary_key=True),  # "*" = every source
+    Column("kind", String(32), primary_key=True),  # slack | jira | linear
+    Column("config", JSON, nullable=False),
+    Column("enabled", Boolean, nullable=False, default=True),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+
+def upgrade(engine: Engine) -> List[str]:
+    """Bring an existing database up to this version: create missing tables, and add
+    columns that newer versions introduced. Only ever adds (nullable) columns, so it's
+    safe to run on every start and never loses data."""
+    from sqlalchemy import inspect, text
+    metadata.create_all(engine)
+    added = []
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in metadata.sorted_tables:
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have or col.primary_key:
+                    continue
+                ddl = col.type.compile(dialect=engine.dialect)
+                conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN "{col.name}" {ddl}'))
+                added.append(f"{table.name}.{col.name}")
+    return added
+
+
 def make_engine(url: str) -> Engine:
     kwargs = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {}
     engine = create_engine(url, **kwargs)
-    metadata.create_all(engine)
+    upgrade(engine)
     return engine

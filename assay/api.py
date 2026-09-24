@@ -14,12 +14,12 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import agents, alerts, auth, contracts, cost, coverage, failures, gates, learn, ingest, prompts, rootcause, runner, store, trace, workflow
+from assay import (agents, alerts, auth, connect, contracts, cost, coverage, failures, gates, integrations, learn, ingest, prompts, rootcause, runner, store, trace, workflow)
 from assay.auth import Principal
 from assay.config import Settings
 from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EvalResultEvent, EventBatch, ExtractionEvent,
@@ -117,6 +117,19 @@ class PatternStatusIn(BaseModel):
     source: str
     key: str
     status: str = Field(..., pattern="^(open|dismissed)$")
+
+
+class SheetIn(BaseModel):
+    text: str = Field(..., max_length=20_000_000, description="CSV or tab-separated text, first row headers")
+    kind: Optional[str] = Field(None, description="errors | eval_results | feedback | documents | inputs; "
+                                                  "omit to detect")
+    mapping: Optional[Dict[str, Optional[str]]] = Field(None, description="field → column header")
+    defaults: Optional[Dict[str, Any]] = Field(None, description="Values for every row, e.g. {\"run_id\": \"may-tests\"}")
+
+
+class IntegrationIn(BaseModel):
+    source: str
+    config: Dict[str, Any]
 
 
 class DecisionIn(BaseModel):
@@ -537,6 +550,74 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, f"No trajectory '{trajectory_id}' in {source}.")
         return out
 
+    # ---------- connecting without code ----------
+
+    def base_url(request: Request) -> str:
+        return (settings.public_url or str(request.base_url)).rstrip("/")
+
+    @app.get("/v1/connect/status", tags=["results"],
+             summary="What has arrived, and which features that switches on, in plain words")
+    def connect_status(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return connect.status(engine, source)
+
+    @app.post("/v1/connect/preview", tags=["ingest"],
+              summary="Read a spreadsheet (CSV or pasted cells): what it holds, which column is which, what's wrong")
+    def connect_preview(body: SheetIn, p: Principal = Depends(require("ingest"))):
+        if body.kind and body.kind not in connect.SHEETS:
+            raise HTTPException(422, f"kind is one of: {', '.join(connect.SHEETS)}.")
+        return connect.preview(body.text, body.kind)
+
+    @app.post("/v1/connect/import", tags=["ingest"], summary="Import a spreadsheet")
+    def connect_import(body: SheetIn, x_tenant: Optional[str] = Header(None), p: Principal = Depends(require("ingest"))):
+        kind = body.kind or connect.preview(body.text)["kind"]
+        if kind not in connect.SHEETS:
+            raise HTTPException(422, f"kind is one of: {', '.join(connect.SHEETS)}.")
+        return connect.import_sheet(engine, tenant_for(p, x_tenant), kind, body.text, body.mapping, body.defaults)
+
+    @app.get("/v1/connect/handoff", tags=["results"],
+             summary="Instructions to send whoever will wire it up (otel | python | http | database)")
+    def connect_handoff(request: Request, source: str, method: str = "otel", p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return {"text": connect.handoff(base_url(request), source, None, method)}
+
+    @app.get("/v1/integrations", tags=["operate"], summary="Slack, Jira and Linear, as set up (secrets masked)")
+    def get_integrations(source: str, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        return {"configured": integrations.list_(engine, source),
+                "kinds": {k: {"label": v["label"], "fields": v["fields"]} for k, v in integrations.KINDS.items()}}
+
+    @app.put("/v1/integrations/{kind}", tags=["operate"])
+    def put_integration(kind: str, body: IntegrationIn, p: Principal = Depends(require("manage"))):
+        check_source(p, body.source)
+        if kind not in integrations.KINDS:
+            raise HTTPException(404, f"Unknown integration '{kind}'.")
+        try:
+            return integrations.save(engine, body.source, kind, body.config)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @app.delete("/v1/integrations/{kind}", tags=["operate"])
+    def delete_integration(kind: str, source: str, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        integrations.remove(engine, source, kind)
+        return {"removed": kind}
+
+    @app.post("/v1/integrations/{kind}/test", tags=["operate"], summary="Check the connection works")
+    def test_integration(kind: str, source: str, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        try:
+            return {"ok": True, "message": integrations.test(engine, source, kind)}
+        except (ValueError, RuntimeError) as e:
+            return {"ok": False, "message": str(e)}
+
+    @app.get("/v1/integrations/ci", tags=["operate"],
+             summary="A ready-to-paste CI job that blocks a release unless Assay says advance")
+    def ci_config(request: Request, source: str, system: str = "github", tolerance: float = 0.01,
+                  p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return {"system": system, "text": integrations.ci_config(system, base_url(request), source, tolerance)}
+
     # ---------- learning from production ----------
 
     @app.get("/v1/learn/anomalies", tags=["results"],
@@ -565,6 +646,33 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         check_source(p, body.source)
         learn.set_status(engine, body.source, body.key, body.status)
         return {"key": body.key, "status": body.status}
+
+    @app.post("/v1/learn/patterns/ticket", tags=["operate"], summary="Open a Jira or Linear ticket for a pattern")
+    def learn_ticket(request: Request, source: str, key: str, days: float = 7, p: Principal = Depends(require("manage"))):
+        pats = learn.patterns(runner.CachedSource(resolve(p, source)), runner.window_for_days(days), engine,
+                              update_log=False)
+        pattern = next((x for x in pats["patterns"] if x["key"] == key), None)
+        if pattern is None:
+            raise HTTPException(404, "No such pattern in this window.")
+        try:
+            ticket = integrations.create_ticket(engine, source, pattern, base_url(request))
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+        integrations.record_ticket(engine, source, key, ticket)
+        return ticket
+
+    @app.get("/v1/learn/suites/{name}/export", tags=["results"],
+             summary="A suite as a file your test tool can run: json, jsonl or csv")
+    def learn_export(name: str, source: str, format: str = "json", p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        cases = learn.suite(engine, source, name)
+        if format not in ("json", "jsonl", "csv"):
+            raise HTTPException(422, "format is json, jsonl or csv.")
+        body, media = learn.export(cases, format)
+        return Response(body, media_type=media,
+                        headers={"Content-Disposition": f'attachment; filename="{name}.{format}"'})
 
     @app.get("/v1/learn/candidates", tags=["results"], summary="Drafted test cases: proposed, approved, rejected")
     def learn_candidates(source: str, status: Optional[str] = None, p: Principal = Depends(require("read"))):
@@ -773,7 +881,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(422, f"Unknown measures: {', '.join(unknown)}")
         source = resolve(p, req.source)
         run_id = runner.run_measures(engine, source, runner.window_for_days(req.days), req.measures,
-                                     notify=settings.notifier(), alert_min_n=settings.alert_min_n,
+                                     notify=integrations.notifier(engine, source.name, settings.public_url,
+                                                                  settings.notifier()),
+                                     alert_min_n=settings.alert_min_n,
                                      alert_after_runs=settings.alert_after_runs)
         return runner.latest_run(engine, source.name) | {"run_id": run_id}
 

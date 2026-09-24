@@ -361,6 +361,8 @@ def patterns(source, window: Window, engine: Engine, threshold: float = THRESHOL
     for g in out:
         g["status"] = log.get(g["key"], {}).get("status", "open")
         g["first_seen"] = log.get(g["key"], {}).get("first_seen")
+        g["ticket_url"] = log.get(g["key"], {}).get("ticket_url")
+        g["ticket_id"] = log.get(g["key"], {}).get("ticket_id")
     # Patterns in the log not seen this window: protected ones are now fixed.
     quiet = [dict(v, key=k, traces=0) for k, v in log.items() if k not in seen and v["status"] in ("fixed", "protected")]
     rank = {"recurred": 0, "open": 1, "protected": 2, "fixed": 3, "dismissed": 4}
@@ -716,3 +718,22 @@ def guards(engine: Engine, source: str) -> Dict[str, dict]:
                             "name": log[r.pattern].name if r.pattern in log else r.pattern,
                             "first_seen": log[r.pattern].first_seen.isoformat() if r.pattern in log else None}
                 for r in conn.execute(select(t).where(t.c.source == source))}
+
+
+def export(cases: List[dict], fmt: str = "json") -> tuple:
+    """A suite as a file a test tool can run: one case per entry, with input and expectations."""
+    import csv
+    import io
+    rows = [{"case_id": c["case_id"], "task": c.get("task"), "input": c.get("input"), "input_ref": c.get("input_ref"),
+             "expected": c.get("reference") or {}, "must_hold": c.get("properties") or [],
+             "guards": c.get("pattern"), "from_trace": c.get("origin_trace")} for c in cases]
+    if fmt == "jsonl":
+        return "\n".join(json.dumps(r, default=str) for r in rows) + "\n", "application/x-ndjson"
+    if fmt == "csv":
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=list(rows[0]) if rows else ["case_id"])
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: json.dumps(v, default=str) if isinstance(v, (dict, list)) else v for k, v in r.items()})
+        return buf.getvalue(), "text/csv"
+    return json.dumps({"cases": rows}, indent=1, default=str), "application/json"
