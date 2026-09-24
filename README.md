@@ -98,7 +98,7 @@ cron. Keep the window and the interval steady, because the baseline compares lik
 ## Deploy on Vercel
 
 The repo is ready to import at **vercel.com/new**. There are no build settings to change:
-`vercel.json` routes every path to `api/index.py`, which serves the API and dashboard.
+Vercel detects the FastAPI `app` in the root `app.py`, which serves the API and dashboard.
 
 - **With no environment variables**, results go to SQLite in `/tmp`. Each fresh instance
   loads the demo tenant on its first request (about 3–6 s), and the data is lost when the
@@ -108,7 +108,7 @@ The repo is ready to import at **vercel.com/new**. There are no build settings t
   from your machine (`ASSAY_STORE_URL=… python -m assay demo`), or point it at DocAI Core
   with `ASSAY_DOCAI_URL`.
 - **Scheduled runs:** serverless has no background process. Set `CRON_SECRET` and
-  `ASSAY_SCHEDULE_SOURCES`, then add a cron in `vercel.json`:
+  `ASSAY_SCHEDULE_SOURCES`, then add a `vercel.json` with a cron:
   `"crons": [{"path": "/v1/cron", "schedule": "0 6 * * *"}]`. The Hobby plan allows daily
   crons only.
 - Set `ASSAY_API_KEY` before sharing the URL outside the team.

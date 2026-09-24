@@ -1,4 +1,5 @@
-"""Vercel entry point. Vercel's Python runtime serves the ASGI `app` below.
+"""Vercel entry point. Vercel detects a FastAPI `app` in a root app.py and
+sends every request to it with the original path (no rewrites needed).
 
 Vercel functions have no persistent disk and no long-running process, so:
 - without ASSAY_STORE_URL, results go to SQLite in /tmp and the demo tenant
@@ -7,9 +8,6 @@ Vercel functions have no persistent disk and no long-running process, so:
 - the in-process scheduler is off; Vercel Cron calls /v1/cron instead.
 """
 import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 if not os.environ.get("ASSAY_STORE_URL"):
     os.environ["ASSAY_STORE_URL"] = "sqlite:////tmp/assay.db"
