@@ -11,11 +11,11 @@ from dataclasses import fields as dc_fields
 from typing import Dict, List, Optional
 
 from assay.measures import REGISTRY
-from assay.models import CallRecord, DocumentRecord, IndexedRecord, ReviewRecord, StageRun, Window
+from assay.models import CallRecord, DocumentRecord, ErrorReport, IndexedRecord, ReviewRecord, StageRun, Window
 
 RECORDS = {
     "documents": DocumentRecord, "stage_runs": StageRun, "calls": CallRecord,
-    "indexed": IndexedRecord, "reviews": ReviewRecord,
+    "indexed": IndexedRecord, "reviews": ReviewRecord, "errors": ErrorReport,
 }
 
 # Fields each measure can't work without: [(record, field or None for "any rows")].
@@ -37,6 +37,8 @@ REQUIRES: Dict[str, List[tuple]] = {
     "noop_stage_rate": [("stage_runs", "did_work")],
     "source_positions": [("indexed", None)],
     "handoff_loss": [("documents", "completed_at"), ("documents", "file_hash")],
+    "reported_error_rate": [("errors", None)],
+    "errors_by_origin": [("errors", None), ("stage_runs", "outputs")],
 }
 
 # Fields that make a working measure more useful: (record, field, why).
@@ -48,6 +50,7 @@ IMPROVES: Dict[str, List[tuple]] = {
                           ("calls", "resolving_layer", "separate fallback escalation from normal inference")],
     "time_to_complete_p90": [("documents", "processing_mode", "compare realtime and batch service levels")],
     "call_latency_p95": [("calls", "model_served", "see which model is slow")],
+    "errors_by_origin": [("stage_runs", "sequence", "order steps exactly instead of by start time")],
 }
 
 WAITING_ON_GROUND_TRUTH = {"split_stp", "field_accuracy", "superseded_value_rate", "escape_rate"}
@@ -69,7 +72,8 @@ def _label(record: str, field: Optional[str]) -> str:
 def compute(source, window: Window, rates: Optional[Dict[str, float]] = None) -> dict:
     rates = rates or {}
     getters = {"documents": source.documents, "stage_runs": source.stage_runs, "calls": source.calls,
-               "indexed": source.indexed, "reviews": getattr(source, "reviews", lambda w: None)}
+               "indexed": source.indexed, "reviews": getattr(source, "reviews", lambda w: None),
+               "errors": getattr(source, "errors", lambda w: None)}
     profiles = {}
     for name, cls in RECORDS.items():
         try:

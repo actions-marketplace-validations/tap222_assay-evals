@@ -134,6 +134,22 @@ event_stage_runs = Table(
     Column("started_at", DateTime, index=True),
     Column("finished_at", DateTime),
     Column("did_work", Boolean),
+    Column("outputs", JSON),
+    Column("sequence", Integer),
+)
+
+event_errors = Table(
+    "event_errors", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("error_id", String(128), primary_key=True),
+    Column("document_id", String(128), nullable=False, index=True),
+    Column("field", String(256), nullable=False),
+    Column("reported_at", DateTime, nullable=False, index=True),
+    Column("expected", String(4096)),
+    Column("observed", String(4096)),
+    Column("kind", String(16), nullable=False),
+    Column("reporter", String(128)),
+    Column("source", String(64)),
 )
 
 event_indexed = Table(

@@ -33,7 +33,17 @@ from typing import Callable, Dict, List, Optional
 
 log = logging.getLogger("assay.client")
 
-KINDS = ("documents", "stage_runs", "calls", "reviews", "extractions")
+KINDS = ("documents", "stage_runs", "calls", "reviews", "extractions", "errors")
+
+
+class _Step:
+    """Handle yielded by Assay.stage(): collects what the step produced."""
+
+    def __init__(self):
+        self.outputs: Dict[str, object] = {}
+
+    def output(self, field: str, value) -> None:
+        self.outputs[field] = value
 MAX_PER_REQUEST = 5000
 
 
@@ -65,17 +75,33 @@ class Assay:
         self._add("stage_runs", dict(document_id=document_id, stage=stage, status=status, **fields))
 
     @contextmanager
-    def stage(self, document_id: str, stage: str, did_work: Optional[bool] = True):
-        """Time a stage; records "failed" (and re-raises) if the block raises."""
-        started, status = datetime.utcnow(), "success"
+    def stage(self, document_id: str, stage: str, did_work: Optional[bool] = True,
+              sequence: Optional[int] = None):
+        """Time a stage; records "failed" (and re-raises) if the block raises.
+
+        Record what the step produced, for error analysis:
+
+            with assay.stage(doc_id, "field_extraction", sequence=3) as step:
+                fields = extract(text)
+                step.output("total", fields.total)
+                step.outputs.update(vendor=fields.vendor, date=fields.date)
+        """
+        step, started, status = _Step(), datetime.utcnow(), "success"
         try:
-            yield
+            yield step
         except Exception:
             status = "failed"
             raise
         finally:
             self.stage_run(document_id, stage, status, started_at=started, finished_at=datetime.utcnow(),
-                           did_work=did_work)
+                           did_work=did_work, sequence=sequence, outputs=step.outputs or None)
+
+    def report_error(self, document_id: str, field: str, expected: Optional[str] = None,
+                     observed: Optional[str] = None, kind: str = "wrong", **fields) -> None:
+        """A reviewer, QA check or customer found an output wrong. Assay traces it to
+        the step it started at. kind: wrong | missing | extra."""
+        self._add("errors", dict(document_id=document_id, field=field, expected=expected, observed=observed,
+                                 kind=kind, reported_at=fields.pop("reported_at", datetime.utcnow()), **fields))
 
     def call(self, document_id: Optional[str], stage: str, call_id: Optional[str] = None,
              ts: Optional[datetime] = None, **fields) -> None:

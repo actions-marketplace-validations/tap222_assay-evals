@@ -11,6 +11,13 @@ incidents so alerting has something to catch:
 - last 5 days: Globex Logistics documents stop reaching the downstream system
 - last 4 days: Globex field extraction escalates to a pricier fallback model,
   so its cost per document jumps
+- last 3 days: a bad release of the validation step corrupts correct totals
+
+Every step records what it produced, and a share of wrong outputs are reported
+(as a reviewer or customer would), so error analysis can trace each one to the
+step it started at: OCR losing totals on long documents, a misclassification
+that breaks extraction, misread dates, and errors that happen after the
+pipeline.
 
 Cost comes from per-page model prices, review and rework minutes for about a
 fifth of documents (more for long contracts and claims), and an example rate
@@ -51,6 +58,68 @@ PAGES = {"invoice": (1, 3), "bank_statement": (3, 12), "contract": (8, 40), "id_
          "insurance_claim": (4, 20), None: (1, 10)}
 TOUCH = {"invoice": 0.10, "bank_statement": 0.20, "contract": 0.45, "id_document": 0.08,
          "insurance_claim": 0.35, None: 0.25}
+VENDORS = ["Acme Supply Co", "Blue Harbor Freight", "Crestline Medical", "Delta Office Partners", "Evergreen Legal LLP"]
+RELEASE_BUG_DAYS = 3  # validation v2.4 shipped 3 days ago and mangles amounts
+
+
+def _truth(rng, received, itype):
+    total = round(rng.uniform(40, 25000), 2)
+    return {"reference": f"{(itype or 'doc')[:3].upper()}-{rng.randint(10000, 99999)}",
+            "vendor": rng.choice(VENDORS), "total": f"{total:,.2f}",
+            "date": (received - timedelta(days=rng.randint(0, 20))).strftime("%Y-%m-%d")}
+
+
+def _text(truth, itype, pages, garble_total=False):
+    d = datetime.strptime(truth["date"], "%Y-%m-%d")
+    total = "$?,??1.?0" if garble_total else f"${truth['total']}"
+    return (f"{(itype or 'document').replace('_', ' ').upper()} {truth['reference']}   {truth['vendor']}   "
+            f"Date: {d:%d %b %Y}   Bill to: Accounts Payable   Line items ...   Total due {total}   "
+            f"Page 1 of {pages}   Remit to {truth['vendor']}, 100 Main Street")
+
+
+def _step_outputs(rng, truth, itype, pages, age, completed):
+    """What each step produced, with realistic faults injected. Returns
+    (outputs by stage, [(field, expected, observed, kind)] wrong in the final output)."""
+    long_doc = pages >= 10
+    garble = long_doc and rng.random() < 0.04                      # OCR loses the total (upstream)
+    misclass = itype is not None and rng.random() < 0.015           # classifier picks the wrong type
+    bad_date = rng.random() < 0.012                                 # extraction misreads the date
+    release_bug = age < RELEASE_BUG_DAYS and rng.random() < 0.10    # validation v2.4 regression
+    after = rng.random() < 0.004                                    # right in the pipeline, wrong in delivery
+    predicted_type = rng.choice([t for t in TYPES if t and t != itype]) if misclass else itype
+    fields = dict(truth)
+    if garble:
+        fields["total"] = f"{float(truth['total'].replace(',', '')) * 0.887:,.2f}"  # grabbed the subtotal
+    if misclass:
+        fields["vendor"] = "Accounts Payable"  # wrong template: takes the bill-to line
+    if bad_date:
+        d = datetime.strptime(truth["date"], "%Y-%m-%d")
+        if d.day <= 12 and d.day != d.month:
+            fields["date"] = f"{d.year}-{d.day:02d}-{d.month:02d}"
+        else:
+            bad_date = False
+    validated = {"total": fields["total"].replace(",", ""), "date": fields["date"]}
+    if release_bug and not garble:
+        validated["total"] = f"{float(fields['total'].replace(',', '')) / 1000:.2f}"
+    outputs = {"text_extraction": {"_text": _text(truth, itype, pages, garble)},
+               "classification": {"document_type": predicted_type},
+               "field_extraction": fields,
+               "validation": validated}
+    wrong = []
+    if completed:
+        if misclass:
+            wrong += [("document_type", itype, predicted_type, "wrong"), ("vendor", truth["vendor"], fields["vendor"], "wrong")]
+        if garble:
+            wrong.append(("total", truth["total"], validated["total"], "wrong"))
+        elif release_bug:
+            wrong.append(("total", truth["total"], validated["total"], "wrong"))
+        if bad_date:
+            wrong.append(("date", truth["date"], fields["date"], "wrong"))
+        if after and not wrong:
+            wrong.append(("reference", truth["reference"], truth["reference"][:-1] + "0", "wrong"))
+    return outputs, wrong
+
+
 EXAMPLE_RATES = {"review_per_hour": 36.0, "rework_per_hour": 36.0,
                  "platform_per_document": 0.004, "platform_per_page": 0.0008}
 
@@ -74,7 +143,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
 
     with engine.begin() as conn:
         for t in (store.event_calls, store.event_documents, store.event_stage_runs, store.event_indexed,
-                  store.event_reviews):
+                  store.event_reviews, store.event_errors):
             conn.execute(delete(t).where(t.c.tenant == TENANT))
         run_ids = [r[0] for r in conn.execute(select(store.measure_runs.c.id)
                                               .where(store.measure_runs.c.source == SOURCE))]
@@ -90,7 +159,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                                                 target=t, note=n, updated_at=now)
                                            for m, d, v, t, n in EXAMPLE_SLOS])
 
-    calls, docs, runs, indexed, reviews = [], [], [], [], []
+    calls, docs, runs, indexed, reviews, errors = [], [], [], [], [], []
     for day in range(days):
         for k in range(docs_per_day):
             received = now - timedelta(days=days - day) + timedelta(minutes=rng.randint(0, 1439))
@@ -113,6 +182,15 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                              status="completed" if completed else "processing", processing_mode=mode,
                              file_hash=fh, segment=segment, document_type=itype,
                              delivered_downstream=(rng.random() >= lost_rate) if completed else None))
+            truth = _truth(rng, received, itype)
+            step_out, wrong = _step_outputs(rng, truth, itype, pages, age, completed)
+            for field_, expected, observed, kind in wrong:
+                reported = (completed or received) + timedelta(hours=rng.uniform(2, 30))
+                if rng.random() < 0.75 and reported < now:  # most wrong outputs get noticed
+                    errors.append(dict(tenant=TENANT, error_id=f"{did}-{field_}", document_id=did, field=field_,
+                                       expected=expected, observed=observed, kind=kind, reported_at=reported,
+                                       reporter=f"reviewer-{rng.randint(1, 6)}",
+                                       source=rng.choice(["review", "review", "qa", "customer"])))
             for s, stage in enumerate(PIPELINE):
                 start = received + timedelta(seconds=30 * s)
                 fail_p = 0.12 if (stage == "field_extraction" and 4 <= age < 6) else 0.004
@@ -120,7 +198,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                 runs.append(dict(tenant=TENANT, run_id=f"{did}-{stage}", document_id=did, stage=stage,
                                  status="failed" if failed else "success", started_at=start,
                                  finished_at=start + timedelta(seconds=0.1 if stage in STUBS else 20),
-                                 did_work=stage not in STUBS))
+                                 did_work=stage not in STUBS, sequence=s, outputs=step_out.get(stage)))
             for stage in STAGES:
                 ts = received + timedelta(seconds=rng.randint(10, 600))
                 attributed = rng.random() < (0.97 if (stage == "document_splitting" and ago(ts) < rollout) else 0.6)
@@ -166,6 +244,8 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
         conn.execute(store.event_calls.insert(), calls)
         conn.execute(store.event_indexed.insert(), indexed)
         conn.execute(store.event_reviews.insert(), reviews)
+        if errors:
+            conn.execute(store.event_errors.insert(), errors)
 
     # Backfill one run per day over a rolling window, oldest first, so alerts
     # open and resolve in the order they would have live.
@@ -179,5 +259,6 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
         open_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "open"))).all())
         resolved_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "resolved"))).all())
     return {"documents": len(docs), "calls": len(calls), "stage_runs": len(runs), "reviews": len(reviews),
+            "errors": len(errors),
             "runs": len(run_ids),
             "alerts_open": open_n, "alerts_resolved": resolved_n}

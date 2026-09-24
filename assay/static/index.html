@@ -132,6 +132,11 @@ pre.code{margin:0;background:var(--sunk);border:1px solid var(--line);border-rad
 details summary{cursor:pointer}
 span.costbar{display:flex;height:12px;border-radius:3px;overflow:hidden;background:var(--sunk)}
 span.costbar i{display:block;height:100%}
+h4.dimh{margin:0 0 6px;font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:500}
+table.lineage td,table.lineage th{white-space:nowrap;font-size:12.5px}
+table.lineage td.v-correct{background:var(--good-bg);color:var(--good)}
+table.lineage td.v-wrong{background:var(--bad-bg);color:var(--bad);font-weight:600}
+table.lineage td.v-evidence{background:var(--sunk)}
 @media (max-width:600px){main{padding:16px}header{padding:10px 16px}.bar-row{grid-template-columns:90px 1fr 100px}}
 </style>
 </head>
@@ -151,6 +156,7 @@ span.costbar i{display:block;height:100%}
     <a href="#overview" data-tab="overview">Overview</a>
     <a href="#measures" data-tab="measures">Measures</a>
     <a href="#cost" data-tab="cost">Cost</a>
+    <a href="#errors" data-tab="errors">Errors</a>
     <a href="#trace" data-tab="trace">Trace</a>
     <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
     <a href="#gates" data-tab="gates">Release gates</a>
@@ -164,6 +170,7 @@ span.costbar i{display:block;height:100%}
   <section id="tab-overview" class="stack"></section>
   <section id="tab-measures" class="stack" hidden></section>
   <section id="tab-cost" class="stack" hidden></section>
+  <section id="tab-errors" class="stack" hidden></section>
   <section id="tab-trace" class="stack" hidden></section>
   <section id="tab-alerts" class="stack" hidden></section>
   <section id="tab-gates" class="stack" hidden></section>
@@ -259,7 +266,7 @@ async function refresh(){
 function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
-  ["overview","measures","cost","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
+  ["overview","measures","cost","errors","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
 }
 
 /* ---------- overview ---------- */
@@ -494,11 +501,14 @@ assay = Assay("${host}", api_key="ak_...")   # an "ingest" key; it decides the t
 
 assay.document(doc_id, received_at=start, document_type="invoice",
                segment=customer, page_count=pages)
-with assay.stage(doc_id, "field_extraction"):
-    result = extract(doc)
+with assay.stage(doc_id, "ocr", sequence=1) as step:
+    text = ocr(pages); step.output("_text", text)       # what each step produced,
+with assay.stage(doc_id, "field_extraction", sequence=2) as step:
+    fields = extract(text); step.outputs.update(fields)  # so errors can be traced
 assay.call(doc_id, stage="field_extraction", model_declared="claude-sonnet-5",
            model_served=resp.model, latency_ms=ms, cost_usd=price, status="success")
 assay.review(doc_id, minutes=4.5, reviewer="sam")      # people time, for cost
+assay.report_error(doc_id, "total", expected="1,240.00")  # a wrong value: Assay finds the step
 assay.document(doc_id, received_at=start, completed_at=datetime.utcnow())`;
   const curl=`curl -X POST ${host}/v1/events \\
   -H "Authorization: Bearer $ASSAY_KEY" -H "Content-Type: application/json" \\
@@ -586,6 +596,83 @@ async function renderKeys(){
 }
 function alertMsg(e){const o=$("#key-out");if(o)o.innerHTML=`<p class="reason">${esc(e.message)}</p>`}
 
+/* ---------- errors ---------- */
+const VERDICT={introduced:["Introduced","var(--bad)","The first step to produce the field got it wrong, though the right value was in its input."],
+  corrupted:["Corrupted","var(--c-fb)","Right after one step, changed to wrong by a later one."],
+  dropped:["Dropped","var(--warn)","Right at one step, gone at a later one."],
+  upstream:["Input / upstream","var(--c-est)","The right value never appears in any step's text: the source document or OCR."],
+  caused_by:["Caused by an earlier error","var(--c-rew)","An earlier step's wrong decision (e.g. document type) made this step fail."],
+  after:["After the pipeline","var(--c-plat)","Every step had it right; it went wrong in delivery, mapping or downstream."],
+  unlocalized:["Not localized","var(--line-strong)","No step records this field. Send step outputs to trace it."]};
+const vchip=v=>`<span class="chip" style="color:#fff;background:${VERDICT[v]?.[1]||"var(--muted)"}">${esc(VERDICT[v]?.[0]||v)}</span>`;
+function errorCard(r,{link=true}={}){
+  return `<div class="alert"><span class="stripe" style="background:${VERDICT[r.verdict]?.[1]}"></span><div>
+    <div class="msg"><b class="mono">${esc(r.field)}</b> ${r.kind==="missing"?"missing":r.kind==="extra"?"shouldn't exist":r.expected?`should be <b>${esc(r.expected)}</b>${r.observed!=null?`, was <b>${esc(r.observed)}</b>`:""}`:`is wrong${r.observed!=null?`: was <b>${esc(r.observed)}</b>`:""}`} ${vchip(r.verdict)} ${r.origin_stage?`at <b class="mono">${esc(r.origin_stage)}</b>`:""}</div>
+    <div class="meta">${esc(r.explanation)}</div>
+    ${r.signals?.length?`<div class="meta" style="color:var(--warn)">At that step: ${r.signals.map(esc).join(" · ")}</div>`:""}
+    <div class="meta">${link?`<a href="#trace/${encodeURIComponent(r.document_id)}" class="mono">${esc(r.document_id)}</a> · `:""}${esc(r.source||"reported")}${r.reporter?` by ${esc(r.reporter)}`:""}${r.reported_at?` · ${esc(ago(r.reported_at))}`:""}</div></div><span></span></div>`;
+}
+function reportForm(docId="",fields=[]){
+  return `<form id="report-form" class="slo-form" style="flex-wrap:wrap">
+    <input id="rep-doc" placeholder="Document ID" value="${esc(docId)}" required style="width:160px" aria-label="Document ID">
+    ${fields.length?`<select id="rep-field" aria-label="Field">${fields.map(f=>`<option>${esc(f)}</option>`).join("")}</select>`:`<input id="rep-field" placeholder="Field, e.g. total" required style="width:140px" aria-label="Field">`}
+    <select id="rep-kind" aria-label="What's wrong"><option value="wrong">is wrong; should be</option><option value="missing">is missing; should be</option><option value="extra">shouldn't be there</option></select>
+    <input id="rep-expected" placeholder="correct value" style="width:160px" aria-label="Correct value">
+    <button type="submit">Report and trace</button></form><div id="report-out"></div>`;
+}
+function wireReport(after){
+  const f=$("#report-form");if(!f)return;
+  $("#rep-kind").onchange=e=>{$("#rep-expected").disabled=e.target.value==="extra"};
+  f.onsubmit=async e=>{e.preventDefault();
+    const body={document_id:$("#rep-doc").value.trim(),field:$("#rep-field").value.trim(),kind:$("#rep-kind").value,
+      expected:$("#rep-kind").value==="extra"?null:$("#rep-expected").value,source:"dashboard",reporter:S.me?.name||null};
+    try{const r=await api("/v1/errors",{method:"POST",body:JSON.stringify(body)});
+      $("#report-out").innerHTML=r.localized?`<div style="margin-top:10px">${errorCard(r.localized)}</div>`:`<p class="note">${esc(r.detail||"Recorded.")}</p>`;
+      if(after)after()}
+    catch(err){$("#report-out").innerHTML=`<p class="reason">${esc(err.message)}</p>`}};
+}
+async function renderErrors(){
+  const days=+(store.get("assay-err-days")||30);
+  let s=null,err="";try{s=await api(`/v1/errors?${q({source:src(),days})}`)}catch(e){err=e.message}
+  const rate=S.latest?.measures?.reported_error_rate;
+  if(!s){$("#tab-errors").innerHTML=`<div class="panel stack"><div><h2>Error analysis</h2><p class="sub">${esc(err)}</p></div>
+    <p class="note">Two things make it work. <b>1.</b> Each step sends what it produced (<code>outputs</code> on stage runs, <code>step.output(...)</code> in the Python client, or <code>assay.output.*</code> span attributes). <b>2.</b> Someone reports a wrong value: a reviewer, a QA check, or a customer complaint (<code>POST /v1/errors</code>, or the form below). Assay then walks that document's steps and says where it went wrong.</p>
+    ${reportForm()}</div>`;wireReport(renderErrors);return}
+  const order=[...s.stages,...s.by_origin_stage.map(([st])=>st).filter(st=>st!=="(none)"&&!s.stages.includes(st))];
+  const cell={};s.by_origin_and_verdict.forEach(x=>{(cell[x.stage||"(none)"]??={})[x.verdict]=x.errors});
+  const rows=[...order,"(none)"].filter(st=>cell[st]);const max=Math.max(...rows.map(st=>Object.values(cell[st]).reduce((a,b)=>a+b,0)),1);
+  const localized=s.errors-(s.by_verdict.find(([v])=>v==="unlocalized")?.[1]||0);
+  const table=(title,pairs,label)=>`<div><h4 class="dimh">${title}</h4><table>${pairs.slice(0,8).map(([k,n])=>`<tr><td>${esc(label?label(k):k)}</td><td class="num">${n}</td></tr>`).join("")}</table></div>`;
+  $("#tab-errors").innerHTML=`
+  <div class="strip">
+    <div class="${s.errors?"bad":"good"}"><b>${s.errors.toLocaleString()}</b><span>errors reported, last ${days} days</span></div>
+    <div><b>${s.documents_with_errors.toLocaleString()}</b><span>documents affected</span></div>
+    <div><b>${rate?.overall?(rate.overall.value*100).toFixed(1)+"%":"—"}</b><span>reported error rate (latest run)</span></div>
+    <div><b>${s.errors?Math.round(localized/s.errors*100)+"%":"—"}</b><span>traced to a step</span></div>
+  </div>
+  <div class="panel stack">
+    <div class="panel-head"><div><h2>Where errors start</h2><p class="sub">Each reported wrong value, traced back through the document's steps to where it first went wrong. Steps in pipeline order.</p></div>
+      <select id="err-days" aria-label="Window">${[7,30,90].map(d=>`<option value="${d}" ${d===days?"selected":""}>${d} days</option>`).join("")}</select></div>
+    <div>${rows.map(st=>{const c=cell[st],tot=Object.values(c).reduce((a,b)=>a+b,0);
+      return `<div class="bar-row" style="grid-template-columns:170px 1fr 60px;cursor:default"><span class="lbl mono" title="${esc(st==="(none)"?"After the pipeline, or not traced":st)}">${esc(st==="(none)"?"after pipeline":st)}</span>
+        <span class="costbar" style="width:${tot/max*100}%;height:14px">${Object.keys(VERDICT).filter(v=>c[v]).map(v=>`<i style="width:${c[v]/tot*100}%;background:${VERDICT[v][1]}" title="${esc(VERDICT[v][0])}: ${c[v]}"></i>`).join("")}</span>
+        <span class="num">${tot}</span></div>`}).join("")}</div>
+    <div class="legend">${Object.entries(VERDICT).filter(([v])=>s.by_verdict.some(([x])=>x===v)).map(([v,[l,c,d]])=>`<span title="${esc(d)}"><i style="background:${c}"></i>${esc(l)} · ${s.by_verdict.find(([x])=>x===v)[1]}</span>`).join("")}</div>
+  </div>
+  <div class="two">
+    <div class="panel"><div class="panel-head"><h2>Breakdown</h2></div>
+      <div class="dims" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+        ${table("By field",s.by_field)}${table("By document type",s.by_document_type)}${table("By segment",s.by_segment)}
+        <div><h4 class="dimh">Model at the origin step</h4><table>${s.by_origin_model.slice(0,8).map(m=>`<tr><td><span class="mono">${esc(m.stage)}</span><br><span class="ref">${esc(m.model)}</span></td><td class="num">${m.errors}</td></tr>`).join("")}</table></div>
+      </div></div>
+    <div class="panel stack" style="align-content:start"><div class="panel-head"><div><h2>Report a wrong value</h2><p class="sub">Assay traces it immediately. Reviewers, QA and support can all use this; pipelines use <code>POST /v1/errors</code>.</p></div></div>${reportForm()}</div>
+  </div>
+  <div class="panel"><div class="panel-head"><h2>Recent errors</h2><span class="ref">click a document to see every step's values</span></div>
+    ${s.recent.slice(0,40).map(r=>errorCard(r)).join("")||`<p class="note">None yet.</p>`}</div>`;
+  $("#err-days").onchange=e=>{store.set("assay-err-days",e.target.value);renderErrors()};
+  wireReport(renderErrors);
+}
+
 /* ---------- trace ---------- */
 async function renderTrace(){
   const T=S.trace;
@@ -610,15 +697,35 @@ async function renderTrace(){
   $("#find").onsubmit=e=>{e.preventDefault();const v=$("#docid").value.trim();if(v)showTrace(v)};
   if(T.doc)showTrace(T.doc,false);
 }
+// What every step produced, side by side, with reported errors marked where they went wrong.
+function stepByStep(ea,id){
+  if(!ea)return"";
+  const steps=ea.steps,errs=ea.errors||[];
+  const state={};errs.forEach(r=>r.timeline.forEach(tl=>{(state[r.field]??={})[tl.index]=tl}));
+  const fields=[...new Set([...ea.lineage.map(l=>l.field),...errs.map(e=>e.field)])];
+  const valOf=f=>ea.lineage.find(l=>l.field===f)?.values||[];
+  const anyOutputs=steps.some(s=>s.records_outputs);
+  const fmtv=v=>v==null?"":typeof v==="object"?JSON.stringify(v):String(v);
+  return `<div class="panel stack"><div class="panel-head"><div><h2>Step by step</h2><p class="sub">What each step produced for this document${errs.length?". Red is where a reported value was wrong, green where it was still right":""}.</p></div></div>
+    ${anyOutputs?`<div class="scroll"><table class="lineage"><tr><th>Field</th>${steps.map((s,i)=>`<th>${i+1}. ${esc(s.stage)}${s.status!=="success"?` <span class="worse">(${esc(s.status)})</span>`:""}</th>`).join("")}</tr>
+      ${steps.some(s=>s.text)?`<tr><td class="ref">text output</td>${steps.map(s=>`<td class="ref" title="${esc(s.text||"")}">${s.text?esc(s.text.slice(0,28))+"…":""}</td>`).join("")}</tr>`:""}
+      ${fields.map(f=>`<tr><td class="mono">${esc(f)}${errs.some(e=>e.field===f)?` <span class="chip bad">reported</span>`:""}</td>${steps.map((s,i)=>{const tl=state[f]?.[i],v=valOf(f)[i];
+        const cls=tl?.state==="wrong"||tl?.state==="extra"?"v-wrong":tl?.state==="correct"?"v-correct":tl?.evidence?"v-evidence":"";
+        return `<td class="${cls}" title="${tl?.evidence?"The right value is in this step's text":""}">${esc(fmtv(v).slice(0,40))}${tl?.evidence&&v==null?`<span class="ref">✓ in text</span>`:""}</td>`}).join("")}</tr>`).join("")}</table></div>`
+      :`<p class="note">These steps didn't send their outputs, so wrong values can't be traced to a step yet. Send <code>outputs</code> with each stage run (or <code>step.output(...)</code> in the Python client).</p>`}
+    ${errs.length?`<h3>Reported errors on this document</h3>${errs.map(r=>errorCard(r,{link:false})).join("")}`:""}
+    <div><h3 style="margin-bottom:6px">Report a wrong value on this document</h3>${reportForm(id,fields)}</div></div>`;
+}
 async function showTrace(id,scroll=true){
   S.trace.doc=id;const out=$("#trace-out");
   try{history.replaceState(null,"","#trace/"+encodeURIComponent(id))}catch(e){}
-  let t;try{t=await api(`/v1/trace/${encodeURIComponent(id)}?${q({source:src()})}`)}catch(e){out.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
+  let t,ea=null;try{[t,ea]=await Promise.all([api(`/v1/trace/${encodeURIComponent(id)}?${q({source:src()})}`),
+    api(`/v1/errors/${encodeURIComponent(id)}?${q({source:src()})}`).catch(()=>null)])}catch(e){out.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
   const d=t.document,sev={bad:"bad",warn:"warn",info:"neutral"};
   const t0=new Date(d.received_at).getTime();
   const ends=[...t.stages.map(s=>s.finished_at),...t.calls.map(c=>c.ts),d.completed_at].filter(Boolean).map(x=>new Date(x).getTime()+0);
   const t1=Math.max(t0+1000,...ends,...t.calls.map(c=>new Date(c.ts).getTime()+(c.latency_ms||0)));
-  const W=900,L=150,R=12,row=22,rows=t.stages.length+t.calls.length,H=rows*row+34;
+  const W=900,L=210,R=12,row=22,rows=t.stages.length+t.calls.length,H=rows*row+34;
   const x=ms=>L+(ms-t0)/(t1-t0)*(W-L-R);
   let g=`<line x1="${L}" x2="${W-R}" y1="${H-18}" y2="${H-18}" stroke="var(--line)"/><text x="${L}" y="${H-4}">received</text><text x="${W-R}" y="${H-4}" text-anchor="end">+${esc(fmt((t1-t0)/1000,"seconds"))}</text>`;
   t.stages.forEach((s,i)=>{const a=s.started_at?new Date(s.started_at).getTime():t0,b=s.finished_at?new Date(s.finished_at).getTime():a;const yy=i*row+4;
@@ -644,6 +751,7 @@ async function showTrace(id,scroll=true){
         <td class="ref">${c.resolving_layer?esc(c.resolving_layer+" / "+(c.gate_reason||"?")):`<span class="warn">not recorded</span>`}</td><td class="num">${esc(fmt(c.latency_ms,"ms"))}</td>
         <td class="num">${c.cost_usd==null?`<span class="warn">none</span>`:esc(fmt(c.cost_usd,"usd"))}</td><td>${esc(c.status||"—")}</td></tr>`).join("")}</table></div>`:""}
   </div>`;
+  out.insertAdjacentHTML("beforeend",stepByStep(ea,id));wireReport(()=>showTrace(id,false));
   if(scroll)out.scrollIntoView({behavior:"smooth",block:"start"});
 }
 
@@ -672,7 +780,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","measures","cost","trace","alerts","gates","connect"];
+const TABS=["overview","measures","cost","errors","trace","alerts","gates","connect"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -688,6 +796,7 @@ async function render(){
     if(t==="overview")renderOverview();
     if(t==="measures")await (S.measure?renderMeasureDetail():renderMeasureGrid());
     if(t==="cost")await renderCost();
+    if(t==="errors")await renderErrors();
     if(t==="trace")await renderTrace();
     if(t==="alerts")await renderAlerts();
     if(t==="gates")await renderGates();

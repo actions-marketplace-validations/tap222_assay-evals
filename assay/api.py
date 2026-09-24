@@ -19,10 +19,11 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import alerts, auth, cost, coverage, gates, ingest, runner, store, trace
+from assay import alerts, auth, cost, coverage, gates, ingest, rootcause, runner, store, trace
 from assay.auth import Principal
 from assay.config import Settings
-from assay.ingest import CallEvent, DocumentEvent, EventBatch, ExtractionEvent, ReviewEvent, StageRunEvent
+from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EventBatch, ExtractionEvent, ReviewEvent,
+                          StageRunEvent)
 from assay.measures import GROUPS, REGISTRY
 from assay.scheduler import Scheduler
 
@@ -156,10 +157,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                                 headers={"Retry-After": str(retry)})
         return p
 
-    def require(scope: str):
+    def require(*scopes: str):
+        """Any one of `scopes` is enough."""
         def dep(p: Principal = Depends(principal)) -> Principal:
-            if not p.can(scope):
-                raise HTTPException(403, f"This key lacks the '{scope}' scope (it has: {', '.join(sorted(p.scopes))}).")
+            if not any(p.can(s) for s in scopes):
+                raise HTTPException(403, f"This key needs the '{' or '.join(scopes)}' scope "
+                                         f"(it has: {', '.join(sorted(p.scopes))}).")
             return p
         return dep
 
@@ -312,6 +315,37 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if out is None:
             raise HTTPException(404, f"No document '{document_id}' in {source}.")
         return out
+
+    @app.get("/v1/errors", tags=["results"], summary="Where reported errors come from, across documents")
+    def error_summary(source: str, days: float = 30, p: Principal = Depends(require("read"))):
+        out = rootcause.summarize(resolve(p, source), runner.window_for_days(days))
+        if out is None:
+            raise HTTPException(404, "No error reports from this source yet. Report one with POST /v1/errors.")
+        return out
+
+    @app.get("/v1/errors/{document_id}", tags=["results"],
+             summary="One document: every step's values, and where each reported error started")
+    def error_detail(document_id: str, source: str, p: Principal = Depends(require("read"))):
+        out = rootcause.analyze_document(resolve(p, source), document_id)
+        if out is None:
+            raise HTTPException(404, f"No document '{document_id}' in {source}.")
+        d = out["document"]
+        return out | {"document": {"document_id": d.document_id, "document_type": d.document_type,
+                                   "segment": d.segment, "received_at": d.received_at.isoformat() if d.received_at else None}}
+
+    @app.post("/v1/errors", tags=["ingest"], status_code=201,
+              summary="Report a wrong output value; returns where it went wrong")
+    def report_error(body: ErrorEvent, x_tenant: Optional[str] = Header(None),
+                     p: Principal = Depends(require("ingest", "manage"))):
+        tenant = tenant_for(p, x_tenant)
+        ingest.write(engine, "errors", [body], tenant)
+        src = runner.resolve_source(f"events:{tenant}", engine, settings)
+        out = rootcause.analyze_document(src, body.document_id)
+        if out is None:
+            return {"recorded": True, "localized": None,
+                    "detail": f"Recorded, but document '{body.document_id}' isn't known yet, so it can't be traced."}
+        mine = [e for e in out["errors"] if e["field"] == body.field]
+        return {"recorded": True, "localized": mine[-1] if mine else None}
 
     @app.get("/v1/coverage", tags=["results"], summary="Which measures your data can answer, and what unlocks the rest")
     def get_coverage(source: str, days: float = 7, p: Principal = Depends(require("read"))):
@@ -515,7 +549,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     for path, kind, model in [("documents", "documents", DocumentEvent), ("stage-runs", "stage_runs", StageRunEvent),
                               ("calls", "calls", CallEvent), ("reviews", "reviews", ReviewEvent),
-                              ("extractions", "extractions", ExtractionEvent),
+                              ("extractions", "extractions", ExtractionEvent), ("errors", "errors", ErrorEvent),
                               ("indexed", "extractions", ExtractionEvent)]:
         app.add_api_route(f"/v1/events/{path}", one_kind(kind, model), methods=["POST"], tags=["ingest"],
                           summary=f"Send {path.replace('-', ' ')}", include_in_schema=path != "indexed")

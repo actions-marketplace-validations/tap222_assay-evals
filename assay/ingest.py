@@ -8,6 +8,7 @@ stage and start time; an extraction from document and field).
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -20,6 +21,7 @@ from sqlalchemy.engine import Engine
 from assay import store
 
 MAX_BATCH = 5000  # records per request, across all types
+MAX_OUTPUTS_BYTES = 64 * 1024
 
 
 class Event(BaseModel):
@@ -59,6 +61,30 @@ class StageRunEvent(Event):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     did_work: Optional[bool] = Field(None, description="false if the stage reported success but did nothing")
+    outputs: Optional[Dict[str, Any]] = Field(
+        None, description="What the step produced, as named values (nested allowed). Long strings, e.g. "
+                          "OCR text under '_text', are used as evidence. Max 64 KB.")
+    sequence: Optional[int] = Field(None, ge=0, description="Step position in the pipeline; else start time orders steps")
+
+    @model_validator(mode="after")
+    def _outputs_size(self):
+        if self.outputs is not None and len(json.dumps(self.outputs, default=str)) > MAX_OUTPUTS_BYTES:
+            raise ValueError(f"outputs is larger than {MAX_OUTPUTS_BYTES // 1024} KB; send the fields, "
+                             "and trim long text")
+        return self
+
+
+class ErrorEvent(Event):
+    error_id: Optional[str] = Field(None, max_length=128,
+                                    description="Omit to derive one from document, field and expected value")
+    document_id: str
+    field: str = Field(..., description="The output field that was wrong; dotted paths like line_items.0.total work")
+    expected: Optional[str] = Field(None, description="The correct value (omit when kind is extra)")
+    observed: Optional[str] = Field(None, description="What the pipeline output")
+    kind: str = Field("wrong", pattern="^(wrong|missing|extra)$")
+    reported_at: Optional[datetime] = None
+    reporter: Optional[str] = None
+    source: Optional[str] = Field(None, description="review, qa, customer, …")
 
 
 class CallEvent(Event):
@@ -105,6 +131,7 @@ class EventBatch(Event):
     calls: List[CallEvent] = []
     reviews: List[ReviewEvent] = []
     extractions: List[ExtractionEvent] = []
+    errors: List[ErrorEvent] = []
 
 
 def _derive(*parts) -> str:
@@ -117,6 +144,7 @@ TABLES = {
     "calls": (store.event_calls, "call_id"),
     "reviews": (store.event_reviews, "review_id"),
     "extractions": (store.event_indexed, "extraction_id"),
+    "errors": (store.event_errors, "error_id"),
 }
 
 
@@ -128,6 +156,11 @@ def _rows(kind: str, events: List[Event], tenant: str) -> List[dict]:
         r = e.model_dump(exclude_unset=True) if kind == "documents" else e.model_dump()
         if kind == "stage_runs" and not r.get("run_id"):
             r["run_id"] = _derive(r["document_id"], r["stage"], r.get("started_at"))
+        if kind == "errors":
+            r.setdefault("reported_at", None)
+            r["reported_at"] = r["reported_at"] or datetime.utcnow()
+            if not r.get("error_id"):
+                r["error_id"] = _derive(r["document_id"], r["field"], r.get("expected"), r.get("kind"))
         if kind == "extractions" and not r.get("extraction_id"):
             r["extraction_id"] = _derive(r["document_id"], r["field"]) if r.get("field") else uuid.uuid4().hex
         out.append(r | {"tenant": tenant})
@@ -177,7 +210,9 @@ Model call from any span with a gen_ai.* attribute. model_declared =
            request model), latency from the span, status error if the span errored.
            stage = assay.stage, else the parent span's assay.stage or name, else the span name.
            Optional: assay.cost_usd, assay.resolving_layer, assay.gate_reason.
-Stage run  from any other span with an assay.stage attribute. Optional assay.did_work.
+Stage run  from any other span with an assay.stage attribute. Optional assay.did_work,
+           assay.sequence (step position), and assay.output.<field> attributes
+           for what the step produced (used to localize errors).
 code_revision comes from the resource's service.version.
 """
 
@@ -243,8 +278,9 @@ def from_otlp(payload: Dict[str, Any]) -> EventBatch:
                 status="error" if errored else "success",
                 segment=a.get("assay.segment"), document_type=a.get("assay.document_type")))
         elif a.get("assay.stage"):
+            outputs = {k[len("assay.output."):]: v for k, v in a.items() if k.startswith("assay.output.")}
             batch.stage_runs.append(StageRunEvent(
                 run_id=sp.get("spanId"), document_id=doc_id, stage=str(a["assay.stage"]),
                 status="failed" if errored else "success", started_at=start, finished_at=end,
-                did_work=a.get("assay.did_work")))
+                did_work=a.get("assay.did_work"), outputs=outputs or None, sequence=a.get("assay.sequence")))
     return batch

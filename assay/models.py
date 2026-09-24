@@ -59,6 +59,12 @@ class StageRun:
     # False when the stage reported success without doing any work (a stub).
     # None when the source cannot tell.
     did_work: Optional[bool] = None
+    # What the step produced, as named values: {"document_type": "invoice",
+    # "total": "1,240.00", "_text": "<OCR text>"}. Long strings count as text
+    # evidence (was the right value available here?). Used for error analysis.
+    outputs: Optional[dict] = None
+    # Position of the step in the pipeline, if known; otherwise start time orders steps.
+    sequence: Optional[int] = None
 
 
 @dataclass
@@ -81,6 +87,20 @@ class ReviewRecord:
     cost_usd: Optional[float] = None  # if set, used as-is instead of minutes x rate
     reviewer: Optional[str] = None
     stage: Optional[str] = None
+
+
+@dataclass
+class ErrorReport:
+    """Someone found an output value wrong: a reviewer, QA, or a customer."""
+    error_id: str
+    document_id: str
+    field: str
+    reported_at: datetime
+    expected: Optional[str] = None  # the correct value; None if the value shouldn't exist at all
+    observed: Optional[str] = None  # what the pipeline output
+    kind: str = "wrong"  # wrong | missing | extra
+    reporter: Optional[str] = None
+    source: Optional[str] = None  # review | qa | customer | …
 
 
 @dataclass(frozen=True)

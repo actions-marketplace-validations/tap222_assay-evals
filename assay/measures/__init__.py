@@ -1,5 +1,6 @@
 from assay.measures.base import Measure, MeasureOutput, SliceResult
 from assay.measures.cost import CostPerDocument, CostPerPage, HumanTouchRate, TotalSpend
+from assay.measures.errors import ErrorsByOrigin, ReportedErrorRate
 from assay.measures.ground_truth import EscapeRate, FieldAccuracy, SplitStraightThrough, SupersededValues
 from assay.measures.operations import (CallErrorRate, CallLatencyP95, DocumentVolume, InputMixDrift,
                                        StageFailureRate)
@@ -15,6 +16,8 @@ REGISTRY = {m.id: m for m in [
     # pipeline integrity
     FallbackAttribution(), ModelMismatch(), CostCoverage(), RevisionCoverage(),
     NoOpStages(), SourcePositions(), HandoffLoss(),
+    # error analysis
+    ReportedErrorRate(), ErrorsByOrigin(),
     # needs ground truth
     SplitStraightThrough(), FieldAccuracy(), SupersededValues(), EscapeRate(),
 ]}
@@ -25,6 +28,7 @@ GROUPS = {
     "Cost": ["cost_per_document", "cost_per_page", "total_spend", "human_touch_rate", "cost_coverage"],
     "Pipeline integrity": ["fallback_attribution", "model_mismatch", "revision_coverage",
                            "noop_stage_rate", "source_positions", "handoff_loss"],
+    "Errors": ["reported_error_rate", "errors_by_origin"],
     "Accuracy (needs ground truth)": ["split_stp", "field_accuracy", "superseded_value_rate", "escape_rate"],
 }
 

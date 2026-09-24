@@ -55,6 +55,16 @@ class CachedSource:
     def document_detail(self, document_id):
         return self._source.document_detail(document_id)
 
+    def document_details(self, document_ids):
+        if hasattr(self._source, "document_details"):
+            return self._source.document_details(document_ids)
+        return {i: d for i in document_ids if (d := self._source.document_detail(i))}
+
+    def errors(self, w, document_id=None):
+        if not hasattr(self._source, "errors"):
+            return None
+        return self._get("errors", w) if document_id is None else self._source.errors(w, document_id)
+
 
 def load_rates(engine: Engine, source_name: str) -> dict:
     """The rate card for a source: its own rates over the "*" defaults."""

@@ -25,7 +25,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from assay.models import CallRecord, DocumentRecord, IndexedRecord, ReviewRecord, StageRun, Window
+from assay.models import CallRecord, DocumentRecord, ErrorReport, IndexedRecord, ReviewRecord, StageRun, Window
 
 DEFAULT_MAPPING: Dict = {
     "documents": {
@@ -53,6 +53,10 @@ DEFAULT_MAPPING: Dict = {
             # True when the stage actually processed the document. If your
             # schema can't tell, leave it NULL and use "noop_stages" instead.
             "did_work": "s.did_work",
+            # Optional, for error analysis: a JSON column of what the step
+            # produced, and the step's position in the pipeline.
+            "outputs": "NULL",
+            "sequence": "NULL",
         },
     },
     "calls": {
@@ -87,6 +91,10 @@ DEFAULT_MAPPING: Dict = {
     # {"from": ..., "columns": {review_id, document_id, ts, kind, minutes,
     # cost_usd, reviewer, stage}} to include review and rework in cost.
     "reviews": None,
+    # Reported wrong outputs, for error analysis. Off by default: set it to
+    # {"from": ..., "columns": {error_id, document_id, field, reported_at,
+    # expected, observed, kind, reporter, source}}.
+    "errors": None,
     # Stages known to report success without processing anything (placeholders
     # wired into the pipeline but not implemented). Marks them did_work = false.
     "noop_stages": [],
@@ -94,8 +102,8 @@ DEFAULT_MAPPING: Dict = {
 
 # Field each record type is filtered on for a time window.
 TIME_FIELD = {"calls": "ts", "documents": "received_at", "stage_runs": "started_at", "indexed": None,
-              "reviews": "ts"}
-RECORD_TYPES = ("documents", "stage_runs", "calls", "indexed", "reviews")
+              "reviews": "ts", "errors": "reported_at"}
+RECORD_TYPES = ("documents", "stage_runs", "calls", "indexed", "reviews", "errors")
 
 
 def load_mapping(path: Optional[str] = None) -> Dict:
@@ -164,8 +172,20 @@ class SQLSource:
         did = r.get("did_work")
         if r["stage"] in self.noop_stages:
             did = False
-        return StageRun(**{**r, "document_id": str(r["document_id"]),
+        outputs = r.get("outputs")
+        if isinstance(outputs, (str, bytes)):  # JSON stored as text
+            try:
+                outputs = json.loads(outputs)
+            except ValueError:
+                outputs = {"_text": outputs if isinstance(outputs, str) else outputs.decode(errors="replace")}
+        return StageRun(**{**r, "document_id": str(r["document_id"]), "outputs": outputs,
                            "did_work": None if did is None else bool(did)})
+
+    def errors(self, window: Optional[Window], document_id: Optional[str] = None) -> Optional[List[ErrorReport]]:
+        if not self.mapping.get("errors"):
+            return None
+        return [ErrorReport(**{**r, "error_id": str(r["error_id"]), "document_id": str(r["document_id"])})
+                for r in self._select("errors", window, document_id)]
 
     def calls(self, window: Window) -> Iterable[CallRecord]:
         return [self._call(r) for r in self._select("calls", window)]

@@ -31,6 +31,8 @@ The demo is a generated pipeline serving four customers. It has four staged inci
 - a new customer shifting the input mix
 - one customer's documents going missing downstream
 - one customer's field extraction escalating to a pricier fallback model
+- a bad release of the validation step that corrupts correct totals, plus everyday errors
+  (OCR losing totals, misclassification, misread dates) reported by reviewers and customers
 
 None of it is real data.
 
@@ -190,6 +192,66 @@ expected = hmac.new(secret, f"{ts}.".encode() + body, hashlib.sha256).hexdigest(
 assert hmac.compare_digest(f"sha256={expected}", signature) and abs(time.time() - int(ts)) < 300
 ```
 
+## Error analysis: where did it go wrong?
+
+When an output is wrong, Assay traces it back through that document's steps and tells you
+which step it started at, and how. This works for a pipeline of 4 steps or 20.
+
+**1. Each step records what it produced.** Stage runs take an `outputs` object with named values,
+nested allowed. Long strings, such as OCR text under `_text`, count as evidence of what was
+available at that step.
+
+```python
+with assay.stage(doc_id, "ocr", sequence=1) as step:
+    step.output("_text", text)
+with assay.stage(doc_id, "field_extraction", sequence=2) as step:
+    step.outputs.update(total=f.total, vendor=f.vendor, date=f.date)
+```
+
+In OpenTelemetry, use span attributes `assay.output.<field>` and `assay.sequence`. From a
+database, map the `outputs` (a JSON column) and `sequence` fields of `stage_runs`.
+
+**2. Someone reports a wrong value**: a reviewer, a QA check, a customer complaint, or a
+correction your review tool already records.
+
+```
+POST /v1/errors   {"document_id": "inv-7", "field": "total", "expected": "1240.00", "observed": "1.24"}
+```
+
+The response already contains the diagnosis. Reports also arrive in batches
+(`errors` in `POST /v1/events`), with `kind` = `wrong`, `missing` or `extra`, and dotted
+fields such as `line_items.0.total`.
+
+**3. Assay localizes it.** It walks the steps in order, by `sequence` or else start time, and
+compares each step's value with the correct one. Formatting doesn't count: `$1,240.00` =
+`1240`, and `01 Sep 2026` = `2026-09-01`.
+
+| Verdict | Meaning | Where to look |
+|---|---|---|
+| **Introduced** | the first step to produce the field got it wrong, though the right value was in its input | that step's model, prompt or rules |
+| **Corrupted** | right after step A, changed to wrong by step B | step B, often a recent release |
+| **Dropped** | right at one step, gone at a later one (for missing values) | the step that lost it |
+| **Input / upstream** | the right value never appears in any step's text | the source document or OCR |
+| **Caused by an earlier error** | an earlier wrong *decision* on the same document (a label such as the document type) made this step fail | the earlier step, not this one |
+| **After the pipeline** | every step had it right, yet the output was wrong | delivery, field mapping, or the downstream system |
+| **Not localized** | no step records the field | add step outputs |
+
+Labels a step decides (`invoice`, `approved`) are judged at the step that decided them.
+Values copied from the page (amounts, dates, ids, names) are also checked against the text,
+which is what separates *introduced* from *upstream*. Each diagnosis also lists anything else
+odd at the origin step: a failure, a stage that did no work, a fallback model, or a
+declared/served mismatch.
+
+**Across documents**, the Errors tab and `GET /v1/errors` show where errors start, in pipeline
+order, split by verdict and broken down by field, document type, segment and the model at the
+origin step. Two measures make this alertable:
+- `reported_error_rate`: the share of documents with a reported wrong value
+- `errors_by_origin`: counts per step, verdict and field, with every known step recorded even
+  at zero, so a step that suddenly starts corrupting values (a bad release) opens an alert
+
+On a document's trace, **Step by step** shows every step's values side by side, with the wrong
+ones marked, plus a form to report another.
+
 ## What you get
 
 | View | Answers |
@@ -197,7 +259,8 @@ assert hmac.compare_digest(f"sha256={expected}", signature) and abs(time.time() 
 | **Overview** | What's broken right now? Open anomalies, SLO state, and the slices that moved beyond noise since the last run. Refreshes every minute. |
 | **Cost** | Fully loaded cost per document and per page, stacked by component over time; cost by document type, segment or mode; AI spend by model with the fallback share; the rate card. |
 | **Measures** | Each measure over time, with the expected range it's judged against, any SLO line, a breakdown of every slice, and an SLO editor. |
-| **Trace** | Why was *this* document slow, lost or wrong? A timeline of every stage and model call, with problems flagged. Lists the slowest, stuck and lost documents to start from. |
+| **Errors** | Where reported wrong values start: by step in pipeline order, by verdict, field, document type, segment and model; recent errors with their diagnosis; a report form. |
+| **Trace** | Why was *this* document slow, lost or wrong? A timeline of every stage and model call, each step's values side by side with wrong ones marked, and problems flagged. |
 | **Alerts** | Pending, open and resolved alerts, with how long each lasted. |
 | **Release gates** | Every advance, hold or rollback decision, with its lineage. |
 | **Connect** | Setup snippets, what your data can answer measure by measure, and one-click backfill. |
@@ -212,6 +275,7 @@ Every alert has an **Investigate** link to its slice. `#measures/<id>` and
 | **Operational health** | `document_volume`, `stage_failure_rate`, `call_error_rate`, `call_latency_p95`, `time_to_complete_p90`, `input_mix_drift` |
 | **Cost** | `cost_per_document`, `cost_per_page`, `total_spend`, `human_touch_rate`, `cost_coverage` (see Cost below) |
 | **Pipeline integrity** | `fallback_attribution` (does each call record which model tier answered, and why), `model_mismatch` (served ≠ declared), `revision_coverage`, `noop_stage_rate` (stages that report success without doing work), `source_positions` (values a reviewer can click through to), `handoff_loss` (finished documents missing downstream) |
+| **Errors** | `reported_error_rate`, `errors_by_origin` (see Error analysis) |
 | **Accuracy** | `split_stp`, `field_accuracy`, `superseded_value_rate`, `escape_rate`: listed as *unmeasured* until labelled ground truth can be ingested |
 
 Every measure reports an overall row plus one row per slice value. A missing dimension is
@@ -318,6 +382,7 @@ measures/     operations.py, cost.py, pipeline.py, ground_truth.py; each a class
 cost.py       cost ledger: components, estimates, breakdowns
 alerts.py     bands, SLO matching, pending → open → resolved, webhook
 trace.py      per-document trace and flags; slowest / stuck / lost finders
+rootcause.py  error localization: which step a wrong value started at, and how
 coverage.py   what a source can answer, and which field unlocks the rest
 client.py     standard-library SDK for pushing events
 auth.py       API keys, scopes, tenant isolation, rate limits
