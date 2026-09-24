@@ -51,8 +51,14 @@ def main(argv=None) -> int:
     c.add_argument("--source", default="sql", help="sql or events:<tenant>")
     c.add_argument("--days", type=float, default=7)
     sub.add_parser("demo", help="Load a synthetic demo tenant and backfill 7 weeks of daily runs")
+    sub.add_parser("schema", help="Print the v1 event schema as JSON Schema")
 
     args = p.parse_args(argv)
+    if args.cmd == "schema":
+        import json
+        from assay.schema import json_schema
+        print(json.dumps(json_schema(), indent=1))
+        return 0
     settings = Settings.from_env()
 
     if args.cmd == "serve":

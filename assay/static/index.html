@@ -654,20 +654,23 @@ async function renderWay(way,source){
 service:
   pipelines:
     traces: { exporters: [otlphttp/assay] }`,
-    python:`from client import Assay   # copy assay/client.py into the project
-assay = Assay("${host}", api_key="<your key>")
+    python:`# pip install ./sdk/python   (standard library only)
+import assay_sdk as assay
+assay.init("${host}", key="<your key>")
 
-assay.document(item_id, received_at=start, document_type="invoice")
-with assay.stage(item_id, "extract") as step:
-    step.outputs.update(result)            # what the step produced
-assay.input(item_id, request_text)         # so failures can become tests
-assay.feedback(item_id, "thumbs_down")     # when a user reacts`,
-    http:`POST ${host}/v1/events
+with assay.run("refund_request", input=message) as run:
+    run.llm(model="claude-sonnet-5", cost_usd=0.002)
+    order = run.call("get_order", get_order, order_id=oid)   # tool calls
+    run.answer(reply)
+assay.feedback(run.id, "thumbs_down")                        # when a user reacts`,
+    http:`POST ${host}/v1/ingest
 Authorization: Bearer <your key>
 Content-Type: application/json
 
-{"documents": [{"document_id": "order-17", "received_at": "2026-09-24T10:00:00Z", "document_type": "refund"}],
- "feedback":  [{"trace_id": "order-17", "kind": "thumbs_down"}]}`,
+[{"v":1,"type":"run.start","id":"e1","ts":"2026-09-24T10:00:00Z","run_id":"r-17","task":"refund"},
+ {"v":1,"type":"step","id":"e2","ts":"2026-09-24T10:00:01Z","run_id":"r-17","seq":0,"kind":"answer","text":"Done"},
+ {"v":1,"type":"run.end","id":"e3","ts":"2026-09-24T10:00:02Z","run_id":"r-17"},
+ {"v":1,"type":"feedback","id":"e4","ts":"2026-09-24T10:05:00Z","run_id":"r-17","kind":"thumbs_down"}]`,
     database:`ASSAY_SOURCE_URL=postgresql+psycopg://readonly:<password>@db:5432/pipeline
 ASSAY_SOURCE_MAPPING=./mappings/mine.json      # which column is which; see mappings/example.json
 python -m assay check-source                   # checks every mapped column`}[way];

@@ -16,10 +16,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import (agents, alerts, auth, connect, contracts, cost, coverage, failures, gates, integrations, learn, ingest, prompts, rootcause, runner, store, trace, workflow)
+from assay import (agents, alerts, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, prompts, rootcause, runner, store, trace, workflow)
 from assay.auth import Principal
 from assay.config import Settings
 from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EvalResultEvent, EventBatch, ExtractionEvent,
@@ -549,6 +549,30 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if out is None:
             raise HTTPException(404, f"No trajectory '{trajectory_id}' in {source}.")
         return out
+
+    # ---------- the v1 event schema ----------
+
+    @app.post("/v1/ingest", tags=["ingest"],
+              summary="Send events in the v1 schema: runs, steps, and outcomes (docs/event-schema.md)")
+    async def ingest_v1(request: Request, x_tenant: Optional[str] = Header(None),
+                        p: Principal = Depends(require("ingest"))):
+        tenant = tenant_for(p, x_tenant)
+        body = await request.json()
+        items = body.get("events") if isinstance(body, dict) else body
+        if not isinstance(items, list):
+            raise HTTPException(422, 'Send a list of events, or {"events": [...]}.')
+        too_big(len(items))
+        try:
+            events = schema.EVENTS.validate_python(items)
+        except ValidationError as e:
+            raise HTTPException(422, [{"event": err["loc"][0] if err["loc"] else None,
+                                       "field": ".".join(str(x) for x in err["loc"][2:]) or None,
+                                       "problem": err["msg"]} for err in e.errors()[:50]])
+        return {"accepted": len(events), "by_type": schema.ingest(engine, events, tenant)}
+
+    @app.get("/v1/schema", tags=["ingest"], summary="The v1 event schema, as JSON Schema")
+    def get_schema():
+        return schema.json_schema()
 
     # ---------- connecting without code ----------
 

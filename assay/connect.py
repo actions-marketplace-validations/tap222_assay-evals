@@ -267,17 +267,19 @@ def handoff(base_url: str, source: str, key: Optional[str], method: str) -> str:
                  "service:\n  pipelines:\n    traces: {{ exporters: [otlphttp/assay] }}\n\n"
                  "Agents: standard gen_ai tool spans become agent steps. Add assay.answer, and for tests\n"
                  "assay.run_id / assay.case_id, on the root span."),
-        "python": ("Copy assay/client.py (one file, no dependencies) into the project, then:\n\n"
-                   "from client import Assay\nassay = Assay(\"{url}\", api_key=\"<API key>\")\n"
-                   "assay.document(item_id, received_at=start, document_type=\"invoice\")\n"
-                   "with assay.stage(item_id, \"extract\") as step: step.outputs.update(result)\n"
-                   "assay.feedback(item_id, \"thumbs_down\")          # when a user reacts\n"
-                   "assay.input(item_id, request_text)               # so failures can become tests\n"
-                   "# agents: with assay.trajectory(run_id, task=...) as t: t.tool(...); t.answer(...)\n"
-                   "# tests: assay.eval_result(run_id, case_id, status=\"pass\"|\"fail\", ...)"),
-        "http": ("Send JSON to {url}/v1/events with header Authorization: Bearer <API key>.\n"
-                 "One request can hold documents, stage_runs, calls, trajectories, errors, feedback,\n"
-                 "inputs and eval_results; it's safe to retry. Full reference: {url}/docs"),
+        "python": ("Install the SDK (standard library only): pip install ./sdk/python from the Assay repo. Then:\n\n"
+                   "import assay_sdk as assay\nassay.init(\"{url}\", key=\"<API key>\")\n\n"
+                   "with assay.run(\"refund_request\", input=message) as run:     # one run of the system\n"
+                   "    run.llm(model=\"claude-sonnet-5\", cost_usd=0.002)\n"
+                   "    order = run.call(\"get_order\", get_order, order_id=oid)  # tool calls\n"
+                   "    run.answer(reply)\n"
+                   "assay.feedback(run.id, \"thumbs_down\")                      # when a user reacts\n\n"
+                   "Pipelines: assay.run(task, kind=\"pipeline\") with run.stage(name). Tests: assay.check(...).\n"
+                   "Schema: {url}/v1/schema, and docs/event-schema.md in the repo."),
+        "http": ("POST events to {url}/v1/ingest with header Authorization: Bearer <API key>.\n"
+                 "Each event is JSON in the Assay event schema v1 ({url}/v1/schema): run.start, step,\n"
+                 "run.end, feedback, check, correction, expect. Events carry an id, so retries are safe.\n"
+                 "Full reference: {url}/docs"),
         "database": ("Give Assay read-only access to the pipeline database: set ASSAY_SOURCE_URL and a\n"
                      "mapping file (see mappings/example.json), then run: python -m assay check-source"),
     }

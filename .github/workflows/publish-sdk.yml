@@ -1,0 +1,83 @@
+# Publishes the Python SDK (sdk/python, "assay-evals") when a tag like sdk-v0.1.0 is pushed.
+#
+#   git tag sdk-v0.1.0 && git push origin sdk-v0.1.0
+#
+# Uses PyPI trusted publishing: no tokens are stored anywhere. One-time setup:
+#   1. pypi.org and test.pypi.org → Account → Publishing → Add a new pending publisher:
+#        project assay-evals · owner tap222 · repository docai-eval
+#        workflow publish-sdk.yml · environment pypi (on test.pypi.org: testpypi)
+#   2. GitHub → Settings → Environments: create "testpypi" and "pypi";
+#      on "pypi", add yourself as a required reviewer, so the real release waits for your click.
+name: Publish SDK
+
+on:
+  push:
+    tags: ["sdk-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: The tag matches the package version
+        run: |
+          TAG="${GITHUB_REF_NAME#sdk-v}"
+          PKG=$(python -c "import tomllib; print(tomllib.load(open('sdk/python/pyproject.toml','rb'))['project']['version'])")
+          CODE=$(python -c "import re; print(re.search(r'__version__ = \"(.+?)\"', open('sdk/python/assay_sdk/__init__.py').read())[1])")
+          echo "tag $TAG · pyproject $PKG · __version__ $CODE"
+          test "$TAG" = "$PKG" && test "$PKG" = "$CODE"
+      - name: Test against the server
+        run: |
+          pip install -e ".[dev]"
+          pytest -q tests/test_sdk.py
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build sdk/python --outdir dist
+          twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+      - name: Installs from TestPyPI
+        run: |
+          VERSION="${GITHUB_REF_NAME#sdk-v}"
+          for i in 1 2 3 4 5 6; do
+            pip install --index-url https://test.pypi.org/simple/ "assay-evals==$VERSION" && break
+            sleep 20
+          done
+          python -c "import assay_sdk; print('assay-evals', assay_sdk.__version__)"
+
+  pypi:
+    needs: testpypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

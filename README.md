@@ -289,6 +289,12 @@ to refuse to run open.
 
 ### Sending data
 
+**New integrations should use the event schema.** [`docs/event-schema.md`](docs/event-schema.md)
+describes one contract for runs, steps and outcomes (feedback, test checks, corrections,
+expectations). It streams to `POST /v1/ingest`, and its JSON Schema is at `GET /v1/schema`.
+The Python SDK in [`sdk/python`](sdk/python/README.md) (`pip install ./sdk/python`, no
+dependencies) is the smallest way to send it. The endpoints below keep working.
+
 | Endpoint | Use |
 |---|---|
 | `POST /v1/events` | any mix of `documents`, `stage_runs`, `calls`, `reviews`, `extractions`, `errors`, `eval_results`, `trajectories`, `inputs`, `feedback` in one request (up to 5,000 records) |

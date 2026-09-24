@@ -1,0 +1,37 @@
+[project]
+name = "assay-evals"
+version = "0.1.0"
+description = "Record what your AI system does, and how it went, in Assay: runs, agent steps, feedback and test results"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "tap222" }]
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["llm", "agents", "evaluation", "observability", "tracing", "ai"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Testing",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/tap222/docai-eval"
+Documentation = "https://github.com/tap222/docai-eval/tree/main/sdk/python#readme"
+"Event schema" = "https://github.com/tap222/docai-eval/blob/main/docs/event-schema.md"
+Issues = "https://github.com/tap222/docai-eval/issues"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["assay_sdk"]
+
+[tool.setuptools.package-data]
+assay_sdk = ["py.typed"]

@@ -247,6 +247,29 @@ agent_steps = Table(
     Column("cost_usd", Float),
     Column("started_at", DateTime),
     Column("finished_at", DateTime),
+    Column("parent_seq", Integer),  # a step nested inside another
+)
+
+# Runs as the v1 event schema describes them (assay/schema.py): what run.start and run.end
+# said, kept so steps and outcomes arriving in later batches land in the right place.
+runs = Table(
+    "runs", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("run_id", String(128), primary_key=True),
+    Column("kind", String(16), nullable=False),  # agent | pipeline
+    Column("task", String(128)),
+    Column("segment", String(128)),
+    Column("started_at", DateTime, nullable=False, index=True),
+    Column("ended_at", DateTime),
+    Column("status", String(16)),  # running | completed | failed | abandoned
+    Column("answer", Text),
+    Column("error", String(2048)),
+    Column("version", JSON),
+    Column("test_run", String(128), index=True),
+    Column("test_case", String(128)),
+    Column("attempt", Integer),
+    Column("parent_run_id", String(128)),
+    Column("tags", JSON),
 )
 
 # What a test case expects of a trajectory: the tool calls, the answer, and the end state.

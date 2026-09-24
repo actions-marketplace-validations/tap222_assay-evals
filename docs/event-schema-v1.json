@@ -1,0 +1,1032 @@
+{
+ "$defs": {
+  "Check": {
+   "additionalProperties": false,
+   "properties": {
+    "v": {
+     "const": 1,
+     "description": "Schema version",
+     "title": "V",
+     "type": "integer"
+    },
+    "id": {
+     "description": "Unique per event; retries reuse it",
+     "maxLength": 128,
+     "minLength": 1,
+     "title": "Id",
+     "type": "string"
+    },
+    "ts": {
+     "description": "When it happened (a step: when it started)",
+     "format": "date-time",
+     "title": "Ts",
+     "type": "string"
+    },
+    "type": {
+     "const": "check",
+     "title": "Type",
+     "type": "string"
+    },
+    "test": {
+     "$ref": "#/$defs/Test"
+    },
+    "status": {
+     "enum": [
+      "pass",
+      "fail",
+      "error"
+     ],
+     "title": "Status",
+     "type": "string"
+    },
+    "run_id": {
+     "anyOf": [
+      {
+       "maxLength": 128,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "The run that produced the output",
+     "title": "Run Id"
+    },
+    "field": {
+     "anyOf": [
+      {
+       "maxLength": 256,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Field"
+    },
+    "expected": {
+     "anyOf": [
+      {
+       "maxLength": 4096,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Expected"
+    },
+    "actual": {
+     "anyOf": [
+      {
+       "maxLength": 4096,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Actual"
+    },
+    "evaluator": {
+     "anyOf": [
+      {
+       "maxLength": 128,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Evaluator"
+    },
+    "score": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Score"
+    },
+    "reason": {
+     "anyOf": [
+      {
+       "maxLength": 2048,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Reason"
+    },
+    "version": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "string"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Version"
+    }
+   },
+   "required": [
+    "v",
+    "id",
+    "ts",
+    "type",
+    "test",
+    "status"
+   ],
+   "title": "Check",
+   "type": "object"
+  },
+  "Correction": {
+   "additionalProperties": false,
+   "properties": {
+    "v": {
+     "const": 1,
+     "description": "Schema version",
+     "title": "V",
+     "type": "integer"
+    },
+    "id": {
+     "description": "Unique per event; retries reuse it",
+     "maxLength": 128,
+     "minLength": 1,
+     "title": "Id",
+     "type": "string"
+    },
+    "ts": {
+     "description": "When it happened (a step: when it started)",
+     "format": "date-time",
+     "title": "Ts",
+     "type": "string"
+    },
+    "type": {
+     "const": "correction",
+     "title": "Type",
+     "type": "string"
+    },
+    "run_id": {
+     "maxLength": 128,
+     "title": "Run Id",
+     "type": "string"
+    },
+    "field": {
+     "maxLength": 256,
+     "title": "Field",
+     "type": "string"
+    },
+    "expected": {
+     "anyOf": [
+      {
+       "maxLength": 4096,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Expected"
+    },
+    "observed": {
+     "anyOf": [
+      {
+       "maxLength": 4096,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Observed"
+    },
+    "kind": {
+     "default": "wrong",
+     "enum": [
+      "wrong",
+      "missing",
+      "extra"
+     ],
+     "title": "Kind",
+     "type": "string"
+    },
+    "reporter": {
+     "anyOf": [
+      {
+       "maxLength": 128,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Reporter"
+    }
+   },
+   "required": [
+    "v",
+    "id",
+    "ts",
+    "type",
+    "run_id",
+    "field"
+   ],
+   "title": "Correction",
+   "type": "object"
+  },
+  "Expect": {
+   "additionalProperties": false,
+   "properties": {
+    "v": {
+     "const": 1,
+     "description": "Schema version",
+     "title": "V",
+     "type": "integer"
+    },
+    "id": {
+     "description": "Unique per event; retries reuse it",
+     "maxLength": 128,
+     "minLength": 1,
+     "title": "Id",
+     "type": "string"
+    },
+    "ts": {
+     "description": "When it happened (a step: when it started)",
+     "format": "date-time",
+     "title": "Ts",
+     "type": "string"
+    },
+    "type": {
+     "const": "expect",
+     "title": "Type",
+     "type": "string"
+    },
+    "case": {
+     "maxLength": 128,
+     "title": "Case",
+     "type": "string"
+    },
+    "calls": {
+     "items": {
+      "additionalProperties": true,
+      "type": "object"
+     },
+     "title": "Calls",
+     "type": "array"
+    },
+    "allow_extra": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Allow Extra",
+     "type": "array"
+    },
+    "answer": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Answer"
+    },
+    "answer_match": {
+     "default": "contains",
+     "enum": [
+      "contains",
+      "equals"
+     ],
+     "title": "Answer Match",
+     "type": "string"
+    },
+    "state": {
+     "items": {
+      "additionalProperties": true,
+      "type": "object"
+     },
+     "title": "State",
+     "type": "array"
+    },
+    "max_steps": {
+     "anyOf": [
+      {
+       "minimum": 1,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Max Steps"
+    }
+   },
+   "required": [
+    "v",
+    "id",
+    "ts",
+    "type",
+    "case"
+   ],
+   "title": "Expect",
+   "type": "object"
+  },
+  "Feedback": {
+   "additionalProperties": false,
+   "properties": {
+    "v": {
+     "const": 1,
+     "description": "Schema version",
+     "title": "V",
+     "type": "integer"
+    },
+    "id": {
+     "description": "Unique per event; retries reuse it",
+     "maxLength": 128,
+     "minLength": 1,
+     "title": "Id",
+     "type": "string"
+    },
+    "ts": {
+     "description": "When it happened (a step: when it started)",
+     "format": "date-time",
+     "title": "Ts",
+     "type": "string"
+    },
+    "type": {
+     "const": "feedback",
+     "title": "Type",
+     "type": "string"
+    },
+    "run_id": {
+     "maxLength": 128,
+     "title": "Run Id",
+     "type": "string"
+    },
+    "kind": {
+     "enum": [
+      "thumbs_up",
+      "thumbs_down",
+      "retry",
+      "escalation",
+      "complaint"
+     ],
+     "title": "Kind",
+     "type": "string"
+    },
+    "note": {
+     "anyOf": [
+      {
+       "maxLength": 1024,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Note"
+    }
+   },
+   "required": [
+    "v",
+    "id",
+    "ts",
+    "type",
+    "run_id",
+    "kind"
+   ],
+   "title": "Feedback",
+   "type": "object"
+  },
+  "RunEnd": {
+   "additionalProperties": false,
+   "properties": {
+    "v": {
+     "const": 1,
+     "description": "Schema version",
+     "title": "V",
+     "type": "integer"
+    },
+    "id": {
+     "description": "Unique per event; retries reuse it",
+     "maxLength": 128,
+     "minLength": 1,
+     "title": "Id",
+     "type": "string"
+    },
+    "ts": {
+     "description": "When it happened (a step: when it started)",
+     "format": "date-time",
+     "title": "Ts",
+     "type": "string"
+    },
+    "type": {
+     "const": "run.end",
+     "title": "Type",
+     "type": "string"
+    },
+    "run_id": {
+     "maxLength": 128,
+     "title": "Run Id",
+     "type": "string"
+    },
+    "status": {
+     "default": "completed",
+     "enum": [
+      "completed",
+      "failed",
+      "abandoned"
+     ],
+     "title": "Status",
+     "type": "string"
+    },
+    "answer": {
+     "anyOf": [
+      {
+       "maxLength": 32768,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Answer"
+    },
+    "error": {
+     "anyOf": [
+      {
+       "maxLength": 2048,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Error"
+    }
+   },
+   "required": [
+    "v",
+    "id",
+    "ts",
+    "type",
+    "run_id"
+   ],
+   "title": "RunEnd",
+   "type": "object"
+  },
+  "RunStart": {
+   "additionalProperties": false,
+   "properties": {
+    "v": {
+     "const": 1,
+     "description": "Schema version",
+     "title": "V",
+     "type": "integer"
+    },
+    "id": {
+     "description": "Unique per event; retries reuse it",
+     "maxLength": 128,
+     "minLength": 1,
+     "title": "Id",
+     "type": "string"
+    },
+    "ts": {
+     "description": "When it happened (a step: when it started)",
+     "format": "date-time",
+     "title": "Ts",
+     "type": "string"
+    },
+    "type": {
+     "const": "run.start",
+     "title": "Type",
+     "type": "string"
+    },
+    "run_id": {
+     "maxLength": 128,
+     "title": "Run Id",
+     "type": "string"
+    },
+    "kind": {
+     "default": "agent",
+     "description": "agent: llm/tool/state/answer steps; pipeline: stage steps with model calls",
+     "enum": [
+      "agent",
+      "pipeline"
+     ],
+     "title": "Kind",
+     "type": "string"
+    },
+    "task": {
+     "anyOf": [
+      {
+       "maxLength": 128,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Task"
+    },
+    "segment": {
+     "anyOf": [
+      {
+       "maxLength": 128,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Segment"
+    },
+    "input": {
+     "anyOf": [
+      {},
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Input"
+    },
+    "input_ref": {
+     "anyOf": [
+      {
+       "maxLength": 1024,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Input Ref"
+    },
+    "version": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "string"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Version"
+    },
+    "test": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Test"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "parent_run_id": {
+     "anyOf": [
+      {
+       "maxLength": 128,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Parent Run Id"
+    },
+    "tags": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "integer"
+         },
+         {
+          "type": "number"
+         },
+         {
+          "type": "boolean"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Tags"
+    }
+   },
+   "required": [
+    "v",
+    "id",
+    "ts",
+    "type",
+    "run_id"
+   ],
+   "title": "RunStart",
+   "type": "object"
+  },
+  "Step": {
+   "additionalProperties": false,
+   "properties": {
+    "v": {
+     "const": 1,
+     "description": "Schema version",
+     "title": "V",
+     "type": "integer"
+    },
+    "id": {
+     "description": "Unique per event; retries reuse it",
+     "maxLength": 128,
+     "minLength": 1,
+     "title": "Id",
+     "type": "string"
+    },
+    "ts": {
+     "description": "When it happened (a step: when it started)",
+     "format": "date-time",
+     "title": "Ts",
+     "type": "string"
+    },
+    "type": {
+     "const": "step",
+     "title": "Type",
+     "type": "string"
+    },
+    "run_id": {
+     "maxLength": 128,
+     "title": "Run Id",
+     "type": "string"
+    },
+    "seq": {
+     "minimum": 0,
+     "title": "Seq",
+     "type": "integer"
+    },
+    "kind": {
+     "enum": [
+      "llm",
+      "tool",
+      "state",
+      "answer",
+      "stage"
+     ],
+     "title": "Kind",
+     "type": "string"
+    },
+    "name": {
+     "anyOf": [
+      {
+       "maxLength": 128,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Name"
+    },
+    "parent_seq": {
+     "anyOf": [
+      {
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Parent Seq"
+    },
+    "ended_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ended At"
+    },
+    "status": {
+     "default": "ok",
+     "enum": [
+      "ok",
+      "error"
+     ],
+     "title": "Status",
+     "type": "string"
+    },
+    "error": {
+     "anyOf": [
+      {
+       "maxLength": 2048,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Error"
+    },
+    "model": {
+     "anyOf": [
+      {
+       "maxLength": 128,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Model"
+    },
+    "tokens_in": {
+     "anyOf": [
+      {
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Tokens In"
+    },
+    "tokens_out": {
+     "anyOf": [
+      {
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Tokens Out"
+    },
+    "cost_usd": {
+     "anyOf": [
+      {
+       "minimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Cost Usd"
+    },
+    "prompt": {
+     "anyOf": [
+      {
+       "maxLength": 192,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "id@version",
+     "title": "Prompt"
+    },
+    "text": {
+     "anyOf": [
+      {
+       "maxLength": 32768,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Text"
+    },
+    "args": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Args"
+    },
+    "result": {
+     "anyOf": [
+      {},
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Result"
+    },
+    "op": {
+     "anyOf": [
+      {
+       "enum": [
+        "create",
+        "update",
+        "delete"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Op"
+    },
+    "value": {
+     "anyOf": [
+      {},
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Value"
+    },
+    "outputs": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Outputs"
+    },
+    "did_work": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Did Work"
+    }
+   },
+   "required": [
+    "v",
+    "id",
+    "ts",
+    "type",
+    "run_id",
+    "seq",
+    "kind"
+   ],
+   "title": "Step",
+   "type": "object"
+  },
+  "Test": {
+   "additionalProperties": false,
+   "properties": {
+    "run": {
+     "description": "The test run, e.g. nightly-2026-09-24",
+     "maxLength": 128,
+     "title": "Run",
+     "type": "string"
+    },
+    "case": {
+     "description": "The test case; the same across test runs",
+     "maxLength": 128,
+     "title": "Case",
+     "type": "string"
+    },
+    "attempt": {
+     "anyOf": [
+      {
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Attempt"
+    }
+   },
+   "required": [
+    "run",
+    "case"
+   ],
+   "title": "Test",
+   "type": "object"
+  }
+ },
+ "items": {
+  "discriminator": {
+   "mapping": {
+    "check": "#/$defs/Check",
+    "correction": "#/$defs/Correction",
+    "expect": "#/$defs/Expect",
+    "feedback": "#/$defs/Feedback",
+    "run.end": "#/$defs/RunEnd",
+    "run.start": "#/$defs/RunStart",
+    "step": "#/$defs/Step"
+   },
+   "propertyName": "type"
+  },
+  "oneOf": [
+   {
+    "$ref": "#/$defs/RunStart"
+   },
+   {
+    "$ref": "#/$defs/Step"
+   },
+   {
+    "$ref": "#/$defs/RunEnd"
+   },
+   {
+    "$ref": "#/$defs/Feedback"
+   },
+   {
+    "$ref": "#/$defs/Check"
+   },
+   {
+    "$ref": "#/$defs/Correction"
+   },
+   {
+    "$ref": "#/$defs/Expect"
+   }
+  ]
+ },
+ "type": "array",
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://assay.dev/schema/events-v1.json",
+ "title": "Assay events, v1",
+ "description": "A list of events. See docs/event-schema.md."
+}
