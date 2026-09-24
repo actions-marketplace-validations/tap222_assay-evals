@@ -46,6 +46,107 @@ before and after a prompt release, with one of each agent failure mode built in 
 
 None of it is real data.
 
+## Setup guide
+
+Setting up Assay has two stages. Installing it is done once by someone technical and takes
+30–60 minutes. Integrating it happens in the dashboard and needs no code.
+
+### Part 1: install (someone technical, once)
+
+**1. Pick where it runs.**
+
+| Option | Steps | Good for |
+|---|---|---|
+| **Docker** (recommended) | `git clone https://github.com/tap222/docai-eval && cd docai-eval`<br>`docker build -t assay .`<br>`docker run -d -p 8400:8400 -v assay-data:/data assay` | a company server or VM |
+| **Vercel** | Import the repo at vercel.com/new (no build settings). Add a Postgres database, e.g. Neon from the Vercel marketplace, and set `ASSAY_STORE_URL` to it | a quick hosted setup |
+| **Laptop trial** | `pip install -e ".[postgres]"`<br>`python -m assay demo`<br>`python -m assay serve` → http://127.0.0.1:8400 | trying it with demo data |
+
+On Vercel without a database, data is lost whenever an instance restarts. Use that for
+demos only.
+
+**2. Use a real database for anything beyond a trial.** SQLite is fine on one server. For
+production, set `ASSAY_STORE_URL=postgresql+psycopg://user:pass@host:5432/assay`. Tables are
+created automatically, and a newer version adds its columns when it starts, so there are no
+migrations to run.
+
+**3. Switch on access control before sharing the link.** A new server has no login. Creating
+the first admin key switches login on:
+
+```bash
+python -m assay keys create --tenant acme --scopes admin --name "acme admin"
+# with Docker: docker exec <container> assay keys create --tenant acme --scopes admin --name "acme admin"
+```
+
+Save the printed key. It isn't shown again.
+
+**4. Optional settings.** All of them are listed in `.env.example`.
+- `ASSAY_PUBLIC_URL`: the dashboard's address, so alerts and tickets link back to it.
+- `ASSAY_SCHEDULE_MINUTES=60` and `ASSAY_SCHEDULE_SOURCES=events:acme`: recompute every hour.
+  On Vercel, use the cron setup under [Deploy](#deploy) instead.
+
+**5. Hand over the dashboard address and the admin key** to whoever will set up the
+integrations.
+
+### Part 2: integrate (in the dashboard, no code)
+
+Open the dashboard, paste the key when asked, and go to **Connect**. The details are in
+[Getting started without code](#getting-started-without-code).
+
+**6. Pick how your data gets in.** Use one choice or several:
+
+| Choice | Who does it | Effort |
+|---|---|---|
+| **Upload a spreadsheet** | you | minutes |
+| **We use OpenTelemetry** | whoever runs the collector | about an hour, no code changes |
+| **A developer can add a few lines** (Python) | a developer | about an hour |
+| **Another system can send web requests** (Zapier, n8n, a script) | whoever owns it | 1–3 hours |
+| **Our data is in a database** | whoever runs the Assay server | about a day |
+
+Each choice has a **Create a key for this** button, a snippet to copy, and a ready-to-send
+message for the person who needs to act on it.
+
+**7. Watch the checklist.** It shows "N of 8 features ready" and gives the next step for
+anything missing:
+- items and steps switch on health, cost and alerts;
+- corrections show where wrong answers start;
+- test results switch on release checks;
+- agent runs switch on step-by-step agent checks;
+- feedback and inputs let Assay find problems nobody reported and turn them into tests.
+
+**8. Build history (optional).** Under **Connect → Advanced**, **Backfill 30 days** replays
+the past month so alerts work from day one.
+
+**9. Send results where your team works.** Under **Send results where your team works**:
+- **Slack:** paste an incoming-webhook URL and save. Assay sends a test message.
+- **Jira or Linear:** paste the site and token and save. Failure patterns under **Learn** then
+  get an **Open a ticket** button.
+- **Block bad releases:** give the generated GitHub Actions or GitLab file to whoever runs
+  your builds, and add a key with the `manage` scope as the `ASSAY_KEY` secret.
+
+### Part 3: day to day
+
+| Where | What you do |
+|---|---|
+| **Overview** and **Alerts** | see what's broken right now |
+| **Failures** | see a test run's failures grouped into causes, and accept intended changes |
+| **Learn** | review draft test cases built from production failures, and approve them into a suite |
+| **Agents** and **Trace** | open any run step by step |
+
+### Go-live checklist
+
+- [ ] Postgres, not SQLite in `/tmp`
+- [ ] An admin key created and stored safely, and a separate `ingest` key for each system
+  that sends data
+- [ ] `ASSAY_PUBLIC_URL` set
+- [ ] At least one source showing **Receiving data** under Connect
+- [ ] Slack connected, plus Jira or Linear if you want tickets
+- [ ] Regular recomputing: the built-in schedule, cron, or Vercel cron
+- [ ] Assay's database protected: Slack, Jira and Linear tokens are stored in it unencrypted
+
+**Shortest path to a first result:** Docker, create a key, then **Connect → Upload a
+spreadsheet** of corrections or test results. You'll see results within 15 minutes, with no
+developer involved after the install.
+
 ## Getting started without code
 
 Open the dashboard and go to **Connect**. It works as a checklist:
