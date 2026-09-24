@@ -70,6 +70,8 @@ def test_alert_goes_pending_then_open_then_resolved(engine):
     assert notes == [("opened", "stage_failure_rate")]
 
     alerts.evaluate_run(engine, add_run(engine, 8, [("stage_failure_rate", None, None, 0.01, 1000)]), notify=notify)
+    assert all_alerts(engine)[0]["state"] == "open"  # one good run isn't recovery
+    alerts.evaluate_run(engine, add_run(engine, 9, [("stage_failure_rate", None, None, 0.01, 1000)]), notify=notify)
     a = all_alerts(engine)[0]
     assert a["state"] == "resolved" and a["resolved_at"] is not None
     assert notes[-1] == ("resolved", "stage_failure_rate")
@@ -176,3 +178,34 @@ def test_scheduler_runs_each_source_and_records_failures(tmp_path):
     assert sched.last["sql"]["ok"] is False and "ASSAY_SOURCE_URL" in sched.last["sql"]["error"]
     with eng.connect() as c:
         assert len(c.execute(select(store.measure_runs)).all()) == 1
+
+
+def test_sustained_shift_stays_open_until_it_recovers(engine):
+    for d in range(8):
+        alerts.evaluate_run(engine, add_run(engine, d, [("stage_failure_rate", None, None, 0.01, 1000)]))
+    for d in range(8, 20):  # the new, worse level persists far longer than the learning window
+        alerts.evaluate_run(engine, add_run(engine, d, [("stage_failure_rate", None, None, 0.2, 1000)]))
+    assert [a["state"] for a in all_alerts(engine)] == ["open"]
+    for d in (20, 21):
+        alerts.evaluate_run(engine, add_run(engine, d, [("stage_failure_rate", None, None, 0.01, 1000)]))
+    assert [a["state"] for a in all_alerts(engine)] == ["resolved"]
+
+
+def test_one_dip_during_an_incident_does_not_resolve_it(engine):
+    for d in range(8):
+        alerts.evaluate_run(engine, add_run(engine, d, [("stage_failure_rate", None, None, 0.01, 1000)]))
+    for d, v in zip(range(8, 13), [0.2, 0.2, 0.01, 0.2, 0.2]):
+        alerts.evaluate_run(engine, add_run(engine, d, [("stage_failure_rate", None, None, v, 1000)]))
+    assert [a["state"] for a in all_alerts(engine)] == ["open"]
+
+
+def test_reporting_measures_never_raise_anomalies(engine):
+    for d in range(6):
+        alerts.evaluate_run(engine, add_run(engine, d, [("total_spend", None, None, 100.0, 1000)]))
+    for d in (6, 7):
+        alerts.evaluate_run(engine, add_run(engine, d, [("total_spend", None, None, 900.0, 1000)]))
+    assert all_alerts(engine) == []
+
+
+def test_stderr_widens_the_band():
+    assert learn_band([1.0] * 8, "usd", n=50, stderr=0.5).high >= 1.0 + 1.5

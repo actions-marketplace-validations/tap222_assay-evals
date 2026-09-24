@@ -70,14 +70,14 @@ def _reference_db(path):
     with eng.begin() as c:
         c.execute(text("CREATE TABLE documents (document_id TEXT PRIMARY KEY, received_at TIMESTAMP,"
                        " completed_at TIMESTAMP, status TEXT, processing_mode TEXT, file_hash TEXT,"
-                       " segment TEXT, document_type TEXT)"))
+                       " segment TEXT, document_type TEXT, page_count INTEGER)"))
         c.execute(text("CREATE TABLE stage_runs (document_id TEXT, stage TEXT, status TEXT,"
                        " started_at TIMESTAMP, finished_at TIMESTAMP, did_work BOOLEAN)"))
         c.execute(text("CREATE TABLE model_calls (call_id TEXT, stage TEXT, ts TIMESTAMP, document_id TEXT,"
                        " model_declared TEXT, model_served TEXT, resolving_layer TEXT, gate_reason TEXT,"
                        " cost_usd NUMERIC, code_revision TEXT, latency_ms NUMERIC, status TEXT)"))
         c.execute(text("CREATE TABLE extractions (document_id TEXT, source_positions TEXT)"))
-        c.execute(text("INSERT INTO documents VALUES ('1', :t, :t, 'completed', 'realtime', 'h1', 'acme', 'invoice')"),
+        c.execute(text("INSERT INTO documents VALUES ('1', :t, :t, 'completed', 'realtime', 'h1', 'acme', 'invoice', 3)"),
                   {"t": datetime(2026, 9, 1)})
         c.execute(text("INSERT INTO stage_runs VALUES ('1', 'extraction', 'success', :a, :b, 1),"
                        " ('1', 'highlighting', 'success', :b, :b, NULL)"),
@@ -102,7 +102,8 @@ def test_sql_source_reads_the_reference_schema(tmp_path):
     assert src.calls(Window(datetime(2026, 1, 1), datetime(2026, 2, 1))) == []
     assert [x.has_positions for x in src.indexed(None)] == [True, False]
     doc, runs, doc_calls = src.document_detail("1")
-    assert doc.document_type == "invoice" and len(doc_calls) == 2
+    assert doc.document_type == "invoice" and doc.page_count == 3 and len(doc_calls) == 2
+    assert src.reviews(None) is None  # not configured: people cost is "not recorded"
     assert [(r.stage, r.did_work) for r in runs] == [("extraction", True), ("highlighting", False)]
     assert all(err is None for fields in src.check().values() for err in fields.values())
 
@@ -122,7 +123,8 @@ def test_sql_source_with_a_custom_mapping(tmp_path):
     path.write_text(json.dumps({
         "documents": {"from": "jobs j", "columns": {
             "document_id": "j.id", "received_at": "j.created", "completed_at": "NULL", "status": "NULL",
-            "processing_mode": "NULL", "file_hash": "NULL", "segment": "j.customer", "document_type": "j.kind"}},
+            "processing_mode": "NULL", "file_hash": "NULL", "segment": "j.customer", "document_type": "j.kind",
+            "page_count": "NULL"}},
         "calls": {"from": "llm_log l LEFT JOIN jobs j ON j.id = l.job_id", "columns": {
             "call_id": "l.id", "stage": "l.step", "ts": "l.at", "document_id": "l.job_id",
             "model_declared": "NULL", "model_served": "l.model", "resolving_layer": "NULL", "gate_reason": "NULL",

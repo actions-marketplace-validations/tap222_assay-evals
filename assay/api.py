@@ -14,7 +14,7 @@ from sqlalchemy import and_, delete, desc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from assay import alerts, gates, runner, store, trace
+from assay import alerts, cost, gates, runner, store, trace
 from assay.config import Settings
 from assay.measures import GROUPS, REGISTRY
 from assay.scheduler import Scheduler
@@ -51,6 +51,7 @@ class DocumentEvent(BaseModel):
     segment: Optional[str] = None
     document_type: Optional[str] = None
     delivered_downstream: Optional[bool] = None
+    page_count: Optional[int] = None
 
 
 class StageRunEvent(BaseModel):
@@ -67,6 +68,22 @@ class IndexedEvent(BaseModel):
     has_positions: bool
     segment: Optional[str] = None
     document_type: Optional[str] = None
+
+
+class ReviewEvent(BaseModel):
+    review_id: str
+    document_id: str
+    ts: datetime
+    kind: str = Field("review", description="review, or rework for fixing an error")
+    minutes: Optional[float] = Field(None, description="Priced at the rate card's hourly rate")
+    cost_usd: Optional[float] = Field(None, description="Use instead of minutes if you know the cost")
+    reviewer: Optional[str] = None
+    stage: Optional[str] = None
+
+
+class RateIn(BaseModel):
+    source: str = Field("*", description='A source name, or "*" for every source')
+    rates: Dict[str, Optional[float]] = Field(..., description="Rate key → value; null removes it")
 
 
 class RunRequest(BaseModel):
@@ -329,6 +346,56 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         scheduler.run_once()
         return scheduler.status()
 
+    # ---------- cost ----------
+
+    @app.get("/v1/cost/rates", dependencies=[Depends(auth)])
+    def get_rates(source: str = "*"):
+        return {"source": source, "rates": runner.load_rates(engine, source) if source != "*" else
+                {r.key: r.value for r in _rate_rows("*")},
+                "keys": cost.RATE_KEYS}
+
+    def _rate_rows(src):
+        with engine.connect() as conn:
+            return conn.execute(select(store.cost_rates).where(store.cost_rates.c.source == src)).all()
+
+    @app.put("/v1/cost/rates", dependencies=[Depends(auth)])
+    def put_rates(body: RateIn):
+        unknown = [k for k in body.rates if k not in cost.RATE_KEYS]
+        if unknown:
+            raise HTTPException(422, f"Unknown rate {', '.join(unknown)}. Known: {', '.join(cost.RATE_KEYS)}.")
+        if any(v is not None and v < 0 for v in body.rates.values()):
+            raise HTTPException(422, "Rates can't be negative.")
+        t = store.cost_rates
+        with engine.begin() as conn:
+            for k, v in body.rates.items():
+                conn.execute(delete(t).where(and_(t.c.source == body.source, t.c.key == k)))
+                if v is not None:
+                    conn.execute(t.insert().values(source=body.source, key=k, value=v, updated_at=datetime.utcnow()))
+        return get_rates(body.source)
+
+    @app.get("/v1/cost/breakdown", dependencies=[Depends(auth)])
+    def cost_breakdown(source: str, by: str = "document_type", days: float = 7):
+        """Cost per document by component for each value of `by`, computed live."""
+        if by not in ("document_type", "segment", "processing_mode"):
+            raise HTTPException(422, "by must be document_type, segment or processing_mode")
+        try:
+            src = runner.resolve_source(source, engine, settings)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        ledger = cost.build_ledger(src, runner.window_for_days(days), runner.load_rates(engine, source))
+        if ledger is None or not ledger.documents:
+            raise HTTPException(404, "No documents in this window.")
+        n = len(ledger.documents)
+        totals = {k: 0.0 for k, _, _ in cost.COMPONENTS}
+        for ln in ledger.lines:
+            totals[ln.component] += ln.usd
+        return {"by": by, "days": days, "documents": n,
+                "components": [{"key": k, "label": label, "group": g} for k, label, g in cost.COMPONENTS],
+                "overall": {"per_document": {k: v / n for k, v in totals.items()},
+                            "total_per_document": sum(totals.values()) / n, "total_usd": sum(totals.values())},
+                "rows": cost.breakdown(ledger, by), "models": cost.spend_by_model(ledger),
+                "coverage": ledger.coverage, "notes": ledger.notes()}
+
     @app.get("/v1/scheduler", dependencies=[Depends(auth)])
     def scheduler_status():
         return scheduler.status()
@@ -379,6 +446,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 conn.execute(store.event_stage_runs.insert(),
                              [e.model_dump() | {"tenant": tenant} for e in events])
         return {"ingested": len(events)}
+
+    @app.post("/v1/events/reviews", dependencies=[Depends(auth)])
+    def ingest_reviews(events: List[ReviewEvent], tenant: str = Depends(tenant_of)):
+        bad = [e.review_id for e in events if e.kind not in ("review", "rework")]
+        if bad:
+            raise HTTPException(422, f"kind must be review or rework (review_id {', '.join(bad[:5])}).")
+        return {"ingested": upsert(store.event_reviews,
+                                   [e.model_dump() | {"tenant": tenant} for e in events], "review_id")}
 
     @app.post("/v1/events/indexed", dependencies=[Depends(auth)])
     def ingest_indexed(events: List[IndexedEvent], tenant: str = Depends(tenant_of)):

@@ -49,6 +49,22 @@ class CachedSource:
     def indexed(self, w): return self._get("indexed", w)
     def downstream_hashes(self): return self._get("downstream_hashes")
 
+    def reviews(self, w):
+        return self._get("reviews", w) if hasattr(self._source, "reviews") else None
+
+    def document_detail(self, document_id):
+        return self._source.document_detail(document_id)
+
+
+def load_rates(engine: Engine, source_name: str) -> dict:
+    """The rate card for a source: its own rates over the "*" defaults."""
+    t = store.cost_rates
+    with engine.connect() as conn:
+        rows = conn.execute(select(t).where(t.c.source.in_([source_name, "*"]))).all()
+    rates = {r.key: r.value for r in rows if r.source == "*"}
+    rates.update({r.key: r.value for r in rows if r.source != "*"})
+    return rates
+
 
 def window_for_days(days: float, now: Optional[datetime] = None) -> Window:
     end = now or datetime.utcnow()
@@ -63,6 +79,7 @@ def run_measures(engine: Engine, source, window: Window,
     """Compute and store measures, then evaluate alerts. `as_of` backdates the run (for backfills)."""
     ids = list(measure_ids or REGISTRY)
     cached = CachedSource(source)
+    cached.cost_rates = load_rates(engine, source.name)
     outputs: List[MeasureOutput] = []
     for mid in ids:
         try:
@@ -80,12 +97,12 @@ def run_measures(engine: Engine, source, window: Window,
             if out.status == "unmeasured":
                 rows.append(dict(run_id=run_id, measure_id=out.measure_id, status=out.status,
                                  reason=out.reason, dimension=None, slice_value=None, value=None,
-                                 numerator=None, denominator=None, n=0, note=None))
+                                 numerator=None, denominator=None, n=0, note=None, stderr=None))
             for r in out.results:
                 rows.append(dict(run_id=run_id, measure_id=out.measure_id, status=out.status,
                                  reason=out.reason, dimension=r.dimension, slice_value=r.slice_value,
                                  value=r.value, numerator=r.numerator, denominator=r.denominator,
-                                 n=r.n, note=r.note))
+                                 n=r.n, note=r.note, stderr=r.stderr))
         if rows:
             conn.execute(store.measure_results.insert(), rows)
 
@@ -127,16 +144,20 @@ def history(engine: Engine, source_name: str, measure_id: str,
     cond.append(res.c.dimension == dimension if dimension else res.c.dimension.is_(None))
     if dimension:
         cond.append(res.c.slice_value == slice_value)
-    q = (select(runs.c.started_at, res.c.value, res.c.n, res.c.status)
+    q = (select(runs.c.started_at, res.c.value, res.c.n, res.c.status, res.c.stderr)
          .join(res, res.c.run_id == runs.c.id).where(and_(*cond))
          .order_by(desc(runs.c.id)).limit(limit))
     with engine.connect() as conn:
         rows = list(reversed(conn.execute(q).all()))
         slo = alerts.slo_for(alerts.load_slos(conn, source_name), measure_id, dimension, slice_value)
-    points = [{"at": r.started_at.isoformat(), "value": r.value, "n": r.n, "status": r.status} for r in rows]
+    points = [{"at": r.started_at.isoformat(), "value": r.value, "n": r.n, "status": r.status,
+               "stderr": r.stderr} for r in rows]
     # Band from the runs before the latest, i.e. the band the latest point was judged against.
-    band = alerts.learn_band([p["value"] for p in points[:-1]], REGISTRY[measure_id].unit,
-                             points[-1]["n"] if points else None)
+    past = points[:-1][-alerts.LOOKBACK:]
+    past_se = sorted(p["stderr"] for p in past if p["stderr"] is not None)
+    band = alerts.learn_band([p["value"] for p in past], REGISTRY[measure_id].unit,
+                             points[-1]["n"] if points else None,
+                             past_se[len(past_se) // 2] if past_se else None)
     return {"points": points,
             "band": None if band is None else {"low": band.low, "high": band.high,
                                                "center": band.center, "points": band.points},
@@ -172,9 +193,9 @@ def changes(engine: Engine, source_name: str, min_n: int = 30, limit: int = 12) 
         if m.unit != "count" and min(cur.n or 0, prev.n or 0) < min_n:
             continue
         delta = cur.value - prev.value
-        if m.unit in ("ratio", "count"):
-            se = (alerts.sampling_error(prev.value, prev.n, m.unit) ** 2
-                  + alerts.sampling_error(cur.value, cur.n, m.unit) ** 2) ** 0.5
+        if m.unit in ("ratio", "count") or (cur.stderr is not None and prev.stderr is not None):
+            se_of = lambda r: r.stderr if r.stderr is not None else alerts.sampling_error(r.value, r.n, m.unit)
+            se = (se_of(prev) ** 2 + se_of(cur) ** 2) ** 0.5
             size = abs(delta) / se if se else 0.0
             if size < 3:
                 continue
@@ -193,5 +214,5 @@ def changes(engine: Engine, source_name: str, min_n: int = 30, limit: int = 12) 
 
 
 def _row(r) -> dict:
-    return {"slice": r.slice_value, "value": r.value, "n": r.n,
+    return {"slice": r.slice_value, "value": r.value, "n": r.n, "stderr": r.stderr,
             "numerator": r.numerator, "denominator": r.denominator, "note": r.note}

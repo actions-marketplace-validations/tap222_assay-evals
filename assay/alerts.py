@@ -10,9 +10,13 @@ Two independent conditions are checked for every measured slice after a run:
 
 A condition seen once makes the alert *pending*; it only *opens* (and
 notifies) when it holds on `after_runs` consecutive runs, so a one-run blip
-never pages anyone. An open alert stays open while the condition holds and
-resolves on the first run where the slice is measured and the condition no
-longer holds. A slice that stops being measured does not resolve its alert.
+never pages anyone. It resolves the same way: only once the slice is measured
+and clear on `after_runs` consecutive runs, so one good run doesn't flap it.
+While open, an anomaly is judged against the range it opened with, so a
+sustained shift can't quietly become the new normal. The band's width comes
+from the slice's normal noise in history, not the current run's, because an
+incident often raises the spread as well. A slice that stops being measured
+does not resolve its alert.
 """
 from __future__ import annotations
 
@@ -66,7 +70,8 @@ def sampling_error(center: float, n: Optional[int], unit: str) -> float:
     return 0.0
 
 
-def learn_band(history: List[Optional[float]], unit: str, n: Optional[int] = None) -> Optional[Band]:
+def learn_band(history: List[Optional[float]], unit: str, n: Optional[int] = None,
+               stderr: Optional[float] = None) -> Optional[Band]:
     """Expected range for the next value: the widest of run-to-run spread,
     sampling error at this sample size, and a minimum width."""
     vals = [v for v in history if v is not None][-LOOKBACK:]
@@ -74,7 +79,7 @@ def learn_band(history: List[Optional[float]], unit: str, n: Optional[int] = Non
         return None
     med = median(vals)
     mad = median(abs(v - med) for v in vals)
-    half = max(K * 1.4826 * mad, K * sampling_error(med, n, unit),
+    half = max(K * 1.4826 * mad, K * sampling_error(med, n, unit), K * (stderr or 0.0),
                REL_FLOOR.get(unit, 0.1) * abs(med), MIN_WIDTH.get(unit, 0.0))
     return Band(med - half, med + half, med, len(vals))
 
@@ -125,19 +130,22 @@ def load_slos(conn, source: str) -> List[dict]:
 
 # ---------- history ----------
 
-def history_by_key(conn, source: str, before_run_id: int, limit_runs: int = LOOKBACK) -> Dict[Key, List[Optional[float]]]:
+def history_by_key(conn, source: str, before_run_id: int,
+                   limit_runs: int = LOOKBACK) -> Dict[Key, List[Tuple[Optional[float], Optional[float]]]]:
+    """(value, stderr) per slice over the previous runs, oldest first."""
     runs, res = store.measure_runs, store.measure_results
     run_ids = [r[0] for r in conn.execute(
         select(runs.c.id).where(and_(runs.c.source == source, runs.c.id < before_run_id))
         .order_by(desc(runs.c.id)).limit(limit_runs))]
-    out: Dict[Key, List[Optional[float]]] = defaultdict(list)
+    out: Dict[Key, List[Tuple[Optional[float], Optional[float]]]] = defaultdict(list)
     if not run_ids:
         return out
-    rows = conn.execute(select(res.c.run_id, res.c.measure_id, res.c.dimension, res.c.slice_value, res.c.value)
+    rows = conn.execute(select(res.c.run_id, res.c.measure_id, res.c.dimension, res.c.slice_value, res.c.value,
+                               res.c.stderr)
                         .where(and_(res.c.run_id.in_(run_ids), res.c.status == "measured"))
                         .order_by(res.c.run_id)).all()
     for r in rows:
-        out[(r.measure_id, r.dimension, r.slice_value)].append(r.value)
+        out[(r.measure_id, r.dimension, r.slice_value)].append((r.value, r.stderr))
     return out
 
 
@@ -168,7 +176,18 @@ def evaluate_run(engine: Engine, run_id: int, min_n: int = 30,
             key = (r.measure_id, r.dimension, r.slice_value)
             where = slice_label(r.dimension, r.slice_value)
             checks = {}
-            band = learn_band(hist.get(key, []), m.unit, r.n)
+            past = hist.get(key, [])
+            # Normal noise comes from history, not this run: an incident often raises the
+            # spread too, and must not widen the band it's judged against.
+            past_se = [se for _, se in past if se is not None]
+            band = learn_band([v for v, _ in past], m.unit, r.n,
+                              median(past_se) if past_se else None) if m.anomaly_alerts else None
+            held = open_rows.get(key + ("anomaly",))
+            if band and held is not None and held.expected_low is not None and held.expected_high is not None:
+                # Judge an open anomaly against the range it opened with. Re-learning would let a
+                # sustained shift become the new normal and resolve an incident that's still going on.
+                band = Band(held.expected_low, held.expected_high, (held.expected_low + held.expected_high) / 2,
+                            band.points)
             if band and outside(r.value, band, m.higher_is_better):
                 checks["anomaly"] = dict(
                     expected_low=band.low, expected_high=band.high, target=None,
@@ -184,7 +203,8 @@ def evaluate_run(engine: Engine, run_id: int, min_n: int = 30,
                 evaluated.add(key + (kind,))
                 existing = open_rows.get(key + (kind,))
                 if kind in checks:
-                    fields = dict(last_seen_at=now, run_id=run_id, value=r.value, n=r.n, **checks[kind])
+                    fields = dict(last_seen_at=now, run_id=run_id, value=r.value, n=r.n, clear_streak=0,
+                                  **checks[kind])
                     if existing is None:
                         streak = 1
                         row = dict(source=run.source, measure_id=r.measure_id, dimension=r.dimension,
@@ -203,9 +223,15 @@ def evaluate_run(engine: Engine, run_id: int, min_n: int = 30,
                 elif existing is not None and existing.state == "pending":
                     conn.execute(alerts.delete().where(alerts.c.id == existing.id))  # blip, never fired
                 elif existing is not None:
-                    conn.execute(alerts.update().where(alerts.c.id == existing.id)
-                                 .values(state="resolved", resolved_at=now, value=r.value, run_id=run_id))
-                    resolved.append(dict(existing._mapping) | {"value": r.value, "resolved_at": now})
+                    clear = (existing.clear_streak or 0) + 1
+                    if clear >= after_runs:  # recovered on enough runs in a row: not a one-run dip
+                        conn.execute(alerts.update().where(alerts.c.id == existing.id)
+                                     .values(state="resolved", resolved_at=now, value=r.value, run_id=run_id,
+                                             clear_streak=clear))
+                        resolved.append(dict(existing._mapping) | {"value": r.value, "resolved_at": now})
+                    else:
+                        conn.execute(alerts.update().where(alerts.c.id == existing.id)
+                                     .values(clear_streak=clear, value=r.value, run_id=run_id))
 
     if notify:
         for a in opened:

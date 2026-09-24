@@ -19,6 +19,9 @@ class SliceResult:
     numerator: Optional[float] = None
     denominator: Optional[float] = None
     note: Optional[str] = None
+    # Standard error of `value`, when the measure can compute one (e.g. a mean
+    # of skewed per-document costs). Alert bands widen to at least 3x this.
+    stderr: Optional[float] = None
 
 
 @dataclass
@@ -54,6 +57,9 @@ class Measure:
     # anomaly in either direction is worth a look.
     higher_is_better: Optional[bool] = True
     dimensions: Sequence[str] = ("stage",)
+    # False for reporting measures whose moves mostly track volume (e.g. total
+    # spend): they're charted and can't raise anomaly alerts.
+    anomaly_alerts: bool = True
 
     def compute(self, source, window: Window) -> MeasureOutput:  # pragma: no cover
         raise NotImplementedError

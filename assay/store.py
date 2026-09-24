@@ -34,6 +34,7 @@ measure_results = Table(
     Column("denominator", Float),
     Column("n", Integer),
     Column("note", String(512)),
+    Column("stderr", Float),
 )
 
 gate_decisions = Table(
@@ -71,6 +72,7 @@ alerts = Table(
     Column("kind", String(16), nullable=False),  # anomaly | slo
     Column("state", String(16), nullable=False, index=True),  # pending | open | resolved
     Column("streak", Integer, nullable=False, default=1),  # consecutive runs the condition held
+    Column("clear_streak", Integer, nullable=False, default=0),  # consecutive runs it hasn't, while open
     Column("opened_at", DateTime, nullable=False),
     Column("last_seen_at", DateTime, nullable=False),
     Column("resolved_at", DateTime),
@@ -116,6 +118,7 @@ event_documents = Table(
     Column("segment", String(128)),
     Column("document_type", String(128)),
     Column("delivered_downstream", Boolean),
+    Column("page_count", Integer),
 )
 
 event_stage_runs = Table(
@@ -138,6 +141,31 @@ event_indexed = Table(
     Column("has_positions", Boolean, nullable=False),
     Column("segment", String(128)),
     Column("document_type", String(128)),
+)
+
+
+event_reviews = Table(
+    "event_reviews", metadata,
+    Column("review_id", String(128), primary_key=True),
+    Column("tenant", String(64), nullable=False, index=True),
+    Column("document_id", String(128), nullable=False, index=True),
+    Column("ts", DateTime, nullable=False, index=True),
+    Column("kind", String(16), nullable=False),
+    Column("minutes", Float),
+    Column("cost_usd", Float),
+    Column("reviewer", String(128)),
+    Column("stage", String(64)),
+)
+
+# Prices Assay can't read from the pipeline: people time and platform overhead.
+cost_rates = Table(
+    "cost_rates", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("source", String(64), nullable=False),  # "*" = every source
+    Column("key", String(64), nullable=False),
+    Column("value", Float, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+    UniqueConstraint("source", "key", name="uq_cost_rate"),
 )
 
 

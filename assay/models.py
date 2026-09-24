@@ -45,6 +45,7 @@ class DocumentRecord:
     file_hash: Optional[str] = None
     segment: Optional[str] = None
     document_type: Optional[str] = None
+    page_count: Optional[int] = None
 
 
 @dataclass
@@ -67,6 +68,19 @@ class IndexedRecord:
     has_positions: bool
     segment: Optional[str] = None
     document_type: Optional[str] = None
+
+
+@dataclass
+class ReviewRecord:
+    """Time a person spent on a document: a review, or rework after an error."""
+    review_id: str
+    document_id: str
+    ts: datetime
+    kind: str = "review"  # review | rework
+    minutes: Optional[float] = None
+    cost_usd: Optional[float] = None  # if set, used as-is instead of minutes x rate
+    reviewer: Optional[str] = None
+    stage: Optional[str] = None
 
 
 @dataclass(frozen=True)

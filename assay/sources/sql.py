@@ -1,7 +1,7 @@
 """Read-only adapter over any SQL database a document pipeline writes to.
 
 Assay needs four kinds of records: documents, stage runs, model calls and
-extraction rows. A *mapping* says where each lives in your schema: the FROM
+extraction rows, plus, optionally, review time (for people cost). A *mapping* says where each lives in your schema: the FROM
 clause and one SQL expression per field. Nothing else about your schema is
 assumed, so any pipeline that records these things can be connected.
 
@@ -25,7 +25,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from assay.models import CallRecord, DocumentRecord, IndexedRecord, StageRun, Window
+from assay.models import CallRecord, DocumentRecord, IndexedRecord, ReviewRecord, StageRun, Window
 
 DEFAULT_MAPPING: Dict = {
     "documents": {
@@ -39,6 +39,7 @@ DEFAULT_MAPPING: Dict = {
             "file_hash": "d.file_hash",
             "segment": "d.segment",
             "document_type": "d.document_type",
+            "page_count": "d.page_count",
         },
     },
     "stage_runs": {
@@ -82,14 +83,19 @@ DEFAULT_MAPPING: Dict = {
             "document_type": "d.document_type",
         },
     },
+    # Time people spent on documents. Off by default: set it to
+    # {"from": ..., "columns": {review_id, document_id, ts, kind, minutes,
+    # cost_usd, reviewer, stage}} to include review and rework in cost.
+    "reviews": None,
     # Stages known to report success without processing anything (placeholders
     # wired into the pipeline but not implemented). Marks them did_work = false.
     "noop_stages": [],
 }
 
 # Field each record type is filtered on for a time window.
-TIME_FIELD = {"calls": "ts", "documents": "received_at", "stage_runs": "started_at", "indexed": None}
-RECORD_TYPES = ("documents", "stage_runs", "calls", "indexed")
+TIME_FIELD = {"calls": "ts", "documents": "received_at", "stage_runs": "started_at", "indexed": None,
+              "reviews": "ts"}
+RECORD_TYPES = ("documents", "stage_runs", "calls", "indexed", "reviews")
 
 
 def load_mapping(path: Optional[str] = None) -> Dict:
@@ -103,8 +109,11 @@ def load_mapping(path: Optional[str] = None) -> Dict:
             if key == "noop_stages":
                 mapping[key] = list(spec)
             elif key in RECORD_TYPES:
-                mapping[key]["from"] = spec.get("from", mapping[key]["from"])
-                mapping[key]["columns"].update(spec.get("columns", {}))
+                if spec is None or mapping[key] is None:
+                    mapping[key] = copy.deepcopy(spec)  # switching an optional record type on or off
+                else:
+                    mapping[key]["from"] = spec.get("from", mapping[key]["from"])
+                    mapping[key]["columns"].update(spec.get("columns", {}))
             else:
                 raise ValueError(f"Unknown mapping key '{key}'. Expected one of "
                                  f"{', '.join(RECORD_TYPES + ('noop_stages',))}.")
@@ -173,6 +182,14 @@ class SQLSource:
                                  "has_positions": bool(r["has_positions"])})
                 for r in self._select("indexed", None)]
 
+    def reviews(self, window: Window) -> Optional[Iterable[ReviewRecord]]:
+        if not self.mapping.get("reviews"):
+            return None
+        num = lambda v: None if v is None else float(v)
+        return [ReviewRecord(**{**r, "review_id": str(r["review_id"]), "document_id": str(r["document_id"]),
+                                "minutes": num(r.get("minutes")), "cost_usd": num(r.get("cost_usd"))})
+                for r in self._select("reviews", window)]
+
     def document_detail(self, document_id: str) -> Optional[Tuple[DocumentRecord, List[StageRun], List[CallRecord]]]:
         docs = self._select("documents", None, document_id)
         if not docs:
@@ -202,6 +219,8 @@ class SQLSource:
         report: Dict[str, Dict[str, Optional[str]]] = {}
         for table in RECORD_TYPES:
             spec = self.mapping[table]
+            if not spec:
+                continue  # optional record type, not configured
             report[table] = {}
             for name, expr in spec["columns"].items():
                 try:

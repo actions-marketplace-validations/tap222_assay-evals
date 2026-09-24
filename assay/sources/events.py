@@ -7,7 +7,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.engine import Engine
 
 from assay import store
-from assay.models import CallRecord, DocumentRecord, IndexedRecord, StageRun, Window
+from assay.models import CallRecord, DocumentRecord, IndexedRecord, ReviewRecord, StageRun, Window
 
 
 class EventsSource:
@@ -42,6 +42,16 @@ class EventsSource:
         t = store.event_indexed
         return [IndexedRecord(**{k: v for k, v in r.items() if k not in ("tenant", "id")})
                 for r in self._rows(t)]
+
+    def reviews(self, window: Window) -> Optional[Iterable[ReviewRecord]]:
+        """None if the tenant has never sent a review, so people cost reads as
+        "not recorded" rather than "zero"."""
+        t = store.event_reviews
+        with self.engine.connect() as conn:
+            if conn.execute(select(t.c.review_id).where(t.c.tenant == self.tenant).limit(1)).first() is None:
+                return None
+        return [ReviewRecord(**{k: v for k, v in r.items() if k != "tenant"})
+                for r in self._rows(t, t.c.ts, window)]
 
     def document_detail(self, document_id: str) -> Optional[Tuple[DocumentRecord, List[StageRun], List[CallRecord]]]:
         d, r, c = store.event_documents, store.event_stage_runs, store.event_calls

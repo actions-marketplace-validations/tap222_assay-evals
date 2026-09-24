@@ -7,7 +7,8 @@
       "completed_at": "(SELECT max(e.finished_at) FROM pipeline.stage_executions e WHERE e.document_id = d.id AND e.stage = 'publish')",
       "document_type": "d.document_type",
       "segment": "d.jurisdiction",
-      "file_hash": "d.sha256"
+      "file_hash": "d.sha256",
+      "page_count": "d.pages"
     }
   },
   "stage_runs": {
@@ -42,6 +43,19 @@
       "has_positions": "(x.bbox IS NOT NULL)",
       "segment": "d.jurisdiction",
       "document_type": "d.document_type"
+    }
+  },
+  "reviews": {
+    "from": "review.tasks t",
+    "columns": {
+      "review_id": "t.id",
+      "document_id": "t.document_id",
+      "ts": "t.completed_at",
+      "kind": "CASE WHEN t.type = 'correction' THEN 'rework' ELSE 'review' END",
+      "minutes": "t.active_seconds / 60.0",
+      "cost_usd": "NULL",
+      "reviewer": "t.assignee",
+      "stage": "t.queue"
     }
   },
   "noop_stages": ["redaction_placeholder"]

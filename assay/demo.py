@@ -9,6 +9,12 @@ incidents so alerting has something to catch:
 - last 3 days: classification calls get slow (alert stays open)
 - last 4 days: a new customer starts sending a large share of traffic (drift)
 - last 5 days: Globex Logistics documents stop reaching the downstream system
+- last 4 days: Globex field extraction escalates to a pricier fallback model,
+  so its cost per document jumps
+
+Cost comes from per-page model prices, review and rework minutes for about a
+fifth of documents (more for long contracts and claims), and an example rate
+card for people time and platform overhead.
 
 All of it is generated. Nothing here is real pipeline data.
 """
@@ -38,6 +44,15 @@ LATENCY_MS = {"document_splitting": 4000, "text_extraction": 6000, "classificati
 PIPELINE = ["file_prep", "pre_processing", "text_extraction", "classification", "field_extraction",
             "validation", "highlighting", "redaction"]
 STUBS = {"highlighting", "redaction"}  # placeholder stages: report success, do nothing
+FALLBACK = {"document_splitting": "gemini-3.5-flash-lite", "field_extraction": "claude-opus-5-5"}
+PRICE_PER_PAGE = {"gemini-3-flash-preview": 0.0006, "gemini-3.5-flash-lite": 0.0003,
+                  "claude-haiku-4-5": 0.0009, "claude-sonnet-5": 0.004, "claude-opus-5-5": 0.02}
+PAGES = {"invoice": (1, 3), "bank_statement": (3, 12), "contract": (8, 40), "id_document": (1, 2),
+         "insurance_claim": (4, 20), None: (1, 10)}
+TOUCH = {"invoice": 0.10, "bank_statement": 0.20, "contract": 0.45, "id_document": 0.08,
+         "insurance_claim": 0.35, None: 0.25}
+EXAMPLE_RATES = {"review_per_hour": 36.0, "rework_per_hour": 36.0,
+                 "platform_per_document": 0.004, "platform_per_page": 0.0008}
 
 EXAMPLE_SLOS = [
     ("fallback_attribution", None, None, 0.95, "Example target: every call says which tier answered"),
@@ -58,7 +73,8 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
     rollout = 14  # pretend tier attribution for splitting shipped two weeks ago
 
     with engine.begin() as conn:
-        for t in (store.event_calls, store.event_documents, store.event_stage_runs, store.event_indexed):
+        for t in (store.event_calls, store.event_documents, store.event_stage_runs, store.event_indexed,
+                  store.event_reviews):
             conn.execute(delete(t).where(t.c.tenant == TENANT))
         run_ids = [r[0] for r in conn.execute(select(store.measure_runs.c.id)
                                               .where(store.measure_runs.c.source == SOURCE))]
@@ -67,11 +83,14 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
             conn.execute(delete(store.measure_runs).where(store.measure_runs.c.id.in_(run_ids)))
         conn.execute(delete(store.alerts).where(store.alerts.c.source == SOURCE))
         conn.execute(delete(store.slos).where(store.slos.c.source == SOURCE))
+        conn.execute(delete(store.cost_rates).where(store.cost_rates.c.source == SOURCE))
+        conn.execute(store.cost_rates.insert(), [dict(source=SOURCE, key=k, value=v, updated_at=now)
+                                                 for k, v in EXAMPLE_RATES.items()])
         conn.execute(store.slos.insert(), [dict(source=SOURCE, measure_id=m, dimension=d, slice_value=v,
                                                 target=t, note=n, updated_at=now)
                                            for m, d, v, t, n in EXAMPLE_SLOS])
 
-    calls, docs, runs, indexed = [], [], [], []
+    calls, docs, runs, indexed, reviews = [], [], [], [], []
     for day in range(days):
         for k in range(docs_per_day):
             received = now - timedelta(days=days - day) + timedelta(minutes=rng.randint(0, 1439))
@@ -89,7 +108,8 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                 completed = None
             lost_rate = 0.45 if (segment == "Globex Logistics" and age < 5) else 0.02
             fh = f"sha256:{rng.getrandbits(64):016x}"
-            docs.append(dict(tenant=TENANT, document_id=did, received_at=received, completed_at=completed,
+            pages = rng.randint(*PAGES[itype])
+            docs.append(dict(tenant=TENANT, document_id=did, received_at=received, completed_at=completed, page_count=pages,
                              status="completed" if completed else "processing", processing_mode=mode,
                              file_hash=fh, segment=segment, document_type=itype,
                              delivered_downstream=(rng.random() >= lost_rate) if completed else None))
@@ -105,20 +125,38 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                 ts = received + timedelta(seconds=rng.randint(10, 600))
                 attributed = rng.random() < (0.97 if (stage == "document_splitting" and ago(ts) < rollout) else 0.6)
                 served = MODELS[stage]
-                if stage == "document_splitting" and rng.random() < 0.05:
-                    served = "gemini-3.5-flash-lite"
+                escalate = 0.6 if (stage == "field_extraction" and segment == "Globex Logistics"
+                                   and ago(ts) < 4) else 0.05 if stage == "document_splitting" else 0.03 \
+                    if stage == "field_extraction" else 0.0
+                if rng.random() < escalate:
+                    served = FALLBACK[stage]
+                    attributed = True if stage == "field_extraction" else attributed
+                billed_pages = min(pages, 2) if stage == "classification" else pages
+                price = round(PRICE_PER_PAGE[served] * billed_pages * rng.lognormvariate(0, 0.2), 5)
                 slow = 3.5 if (stage == "classification" and ago(ts) < 3) else 1.0
                 calls.append(dict(
                     tenant=TENANT, call_id=f"{did}-{stage}", stage=stage, ts=ts, document_id=did,
                     model_declared=MODELS[stage], model_served=served,
                     resolving_layer=("primary" if served == MODELS[stage] else "fallback_1") if attributed else None,
                     gate_reason=("ok" if served == MODELS[stage] else "low_confidence") if attributed else None,
-                    cost_usd=None if (stage == "text_extraction" or served != MODELS[stage] or rng.random() < 0.05)
-                    else round(rng.uniform(0.002, 0.03), 4),
+                    # text extraction isn't priced at all, flash-lite fallbacks never are, and 5% of
+                    # other calls lose their price: the ledger estimates what it can and says so.
+                    cost_usd=None if (stage == "text_extraction" or served == "gemini-3.5-flash-lite"
+                                      or rng.random() < 0.05) else price,
                     code_revision=None if rng.random() < 0.03 else "a1b2c3d",
                     segment=segment, document_type=itype,
                     latency_ms=round(LATENCY_MS[stage] * slow * rng.lognormvariate(0, 0.35)),
                     status="error" if rng.random() < 0.008 else "success"))
+            if rng.random() < TOUCH[itype]:
+                rts = received + timedelta(minutes=rng.randint(15, 240))
+                reviews.append(dict(tenant=TENANT, review_id=f"{did}-r", document_id=did, ts=rts, kind="review",
+                                    minutes=round(rng.lognormvariate(1.1, 0.5) * (1 + pages / 10), 1),
+                                    reviewer=f"reviewer-{rng.randint(1, 6)}", stage="field_extraction"))
+                if rng.random() < 0.3:
+                    reviews.append(dict(tenant=TENANT, review_id=f"{did}-w", document_id=did,
+                                        ts=rts + timedelta(minutes=30), kind="rework",
+                                        minutes=round(rng.lognormvariate(1.8, 0.5), 1),
+                                        reviewer=f"reviewer-{rng.randint(1, 6)}", stage="field_extraction"))
             indexed.append(dict(tenant=TENANT, document_id=did, has_positions=rng.random() < 0.85,
                                 segment=segment, document_type=itype))
 
@@ -127,6 +165,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
         conn.execute(store.event_stage_runs.insert(), runs)
         conn.execute(store.event_calls.insert(), calls)
         conn.execute(store.event_indexed.insert(), indexed)
+        conn.execute(store.event_reviews.insert(), reviews)
 
     # Backfill one run per day over a rolling window, oldest first, so alerts
     # open and resolve in the order they would have live.
@@ -139,5 +178,6 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
         a = store.alerts
         open_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "open"))).all())
         resolved_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "resolved"))).all())
-    return {"documents": len(docs), "calls": len(calls), "stage_runs": len(runs), "runs": len(run_ids),
+    return {"documents": len(docs), "calls": len(calls), "stage_runs": len(runs), "reviews": len(reviews),
+            "runs": len(run_ids),
             "alerts_open": open_n, "alerts_resolved": resolved_n}

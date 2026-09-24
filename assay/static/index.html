@@ -12,6 +12,7 @@
   --accent:#3346a8;--accent-soft:#e6e9f8;--accent-ink:#24348a;
   --good:#2f6e56;--good-bg:#e2f2ea;--warn:#9a6512;--warn-bg:#fbf1dd;--bad:#b23b2e;--bad-bg:#fbe7e4;
   --band:rgba(51,70,168,.10);
+  --c-ai:#3346a8;--c-est:#8f9be0;--c-fb:#c27c0e;--c-rev:#2f7d60;--c-rew:#85c2a6;--c-plat:#9097a8;
   --display:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif;
   --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
@@ -20,7 +21,8 @@
   --page:#12141b;--surface:#1b1e28;--sunk:#171a23;--line:#2d3140;--line-strong:#454b5e;
   --ink:#e8eaf1;--ink-2:#c3c7d4;--muted:#9398aa;--accent:#8c9cf0;--accent-soft:#252b4a;--accent-ink:#b9c3f7;
   --good:#5fbf95;--good-bg:#183329;--warn:#e0a948;--warn-bg:#3a2c12;--bad:#ec8173;--bad-bg:#3d1f1b;
-  --band:rgba(140,156,240,.14)}}
+  --band:rgba(140,156,240,.14);
+  --c-ai:#8c9cf0;--c-est:#4d5aa3;--c-fb:#e0a948;--c-rev:#5fbf95;--c-rew:#2f6e56;--c-plat:#6b7183}}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 body{margin:0;background:var(--page);color:var(--ink);font:14.5px/1.5 var(--body)}
@@ -126,6 +128,8 @@ svg.chart text{fill:var(--muted);font:11px var(--mono)}
 .facts dd{margin:2px 0 0;font-weight:500;overflow-wrap:anywhere}
 svg.timeline text{fill:var(--ink-2);font:11px var(--mono)}
 .keybox{display:flex;gap:8px;align-items:center}
+span.costbar{display:flex;height:12px;border-radius:3px;overflow:hidden;background:var(--sunk)}
+span.costbar i{display:block;height:100%}
 @media (max-width:600px){main{padding:16px}header{padding:10px 16px}.bar-row{grid-template-columns:90px 1fr 100px}}
 </style>
 </head>
@@ -143,6 +147,7 @@ svg.timeline text{fill:var(--ink-2);font:11px var(--mono)}
   <nav class="tabs">
     <a href="#overview" data-tab="overview">Overview</a>
     <a href="#measures" data-tab="measures">Measures</a>
+    <a href="#cost" data-tab="cost">Cost</a>
     <a href="#trace" data-tab="trace">Trace</a>
     <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
     <a href="#gates" data-tab="gates">Release gates</a>
@@ -154,6 +159,7 @@ svg.timeline text{fill:var(--ink-2);font:11px var(--mono)}
   </div>
   <section id="tab-overview" class="stack"></section>
   <section id="tab-measures" class="stack" hidden></section>
+  <section id="tab-cost" class="stack" hidden></section>
   <section id="tab-trace" class="stack" hidden></section>
   <section id="tab-alerts" class="stack" hidden></section>
   <section id="tab-gates" class="stack" hidden></section>
@@ -246,7 +252,7 @@ async function refresh(){
 }
 function renderEmpty(msg){
   const html=`<div class="empty">${msg?esc(msg)+"<br><br>":""}No data yet. Load the demo with <code>python -m assay demo</code>, or set <code>ASSAY_SOURCE_URL</code> and press “Run now”.</div>`;
-  ["overview","measures","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
+  ["overview","measures","cost","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
 }
 
 /* ---------- overview ---------- */
@@ -387,6 +393,87 @@ async function renderMeasureDetail(){
   const del=$("#slo-del");if(del)del.onclick=async()=>{await api(`/v1/slos/${del.dataset.id}`,{method:"DELETE"});S.overview=await api(`/v1/overview?${q({source:src()})}`);renderMeasureDetail()};
 }
 
+/* ---------- cost ---------- */
+const COMP_COLOR={"ai_inference":"var(--c-ai)","ai_estimated":"var(--c-est)","fallback":"var(--c-fb)","review":"var(--c-rev)","rework":"var(--c-rew)","platform":"var(--c-plat)"};
+const COMP_KEYS=["ai_inference","ai_estimated","fallback","review","rework","platform"];
+const COMP_LABEL={"ai_inference":"AI inference","ai_estimated":"AI inference, estimated","fallback":"Fallback escalation","review":"Human review","rework":"Rework","platform":"Platform"};
+function money(v){if(v==null)return"—";const a=Math.abs(v);return a>=1000?"$"+Math.round(v).toLocaleString():a>=10?"$"+v.toFixed(0):a>=1?"$"+v.toFixed(2):a>=0.01?"$"+v.toFixed(3):"$"+v.toFixed(4)}
+function stackBar(per,total,max){
+  return `<span class="costbar" style="width:${Math.max(2,total/max*100)}%">${COMP_KEYS.filter(k=>per[k]>0).map(k=>`<i style="width:${per[k]/total*100}%;background:${COMP_COLOR[k]}" title="${esc(COMP_LABEL[k])} ${esc(money(per[k]))}"></i>`).join("")}</span>`;
+}
+function stackedChart(series,points){
+  // series: {key: [value per run]}, points: run timestamps
+  const n=points.length;if(n<2)return`<p class="note">Not enough history yet.</p>`;
+  const totals=points.map((_,i)=>COMP_KEYS.reduce((s,k)=>s+(series[k]?.[i]||0),0));
+  // Round the axis to a 1/2/5 step so ticks read as $0.50, $1.00, ...
+  const raw=Math.max(...totals)/4||1,mag=10**Math.floor(Math.log10(raw)),step=[1,2,5,10].map(m=>m*mag).find(s=>s>=raw);
+  const max=step*4,W=900,H=220,L=60,R=12,T=10,B=26,bw=(W-L-R)/n;
+  const y=v=>T+(1-v/max)*(H-T-B);let g="";
+  for(let i=0;i<=4;i++){const v=step*i,yy=y(v);g+=`<line x1="${L}" x2="${W-R}" y1="${yy}" y2="${yy}" stroke="var(--line)"/><text x="${L-8}" y="${yy+4}" text-anchor="end">${esc(money(v))}</text>`}
+  points.forEach((at,i)=>{let base=0;const x=L+i*bw+bw*0.12,w=bw*0.76;
+    COMP_KEYS.forEach(k=>{const v=series[k]?.[i]||0;if(!v)return;g+=`<rect x="${x}" y="${y(base+v)}" width="${w}" height="${y(base)-y(base+v)}" fill="${COMP_COLOR[k]}"><title>${esc(at.slice(0,10))} · ${esc(COMP_LABEL[k])} ${esc(money(v))}</title></rect>`;base+=v});
+    const every=Math.ceil(n/7);
+    if(i%every===0&&(n-1-i>=every/2||i===n-1)||i===n-1)g+=`<text x="${x+w/2}" y="${H-8}" text-anchor="middle">${at.slice(5,10)}</text>`});
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Cost per document by component over time">${g}</svg>`;
+}
+async function renderCost(){
+  const days=+(store.get("assay-cost-days")||7),by=store.get("assay-cost-by")||"document_type";
+  const L=S.latest?.measures||{};
+  const [bd,rates,hists]=await Promise.all([
+    api(`/v1/cost/breakdown?${q({source:src(),by,days})}`).catch(e=>({error:e.message})),
+    api(`/v1/cost/rates?${q({source:src()})}`).catch(()=>({rates:{},keys:{}})),
+    Promise.all(COMP_KEYS.map(k=>api(`/v1/measures/cost_per_document/history?${q({source:src(),dimension:"component",slice_value:COMP_LABEL[k]})}`).catch(()=>({points:[]}))))]);
+  const series={},pts=hists.find(h=>h.points.length)?.points.map(p=>p.at)||[];
+  COMP_KEYS.forEach((k,i)=>series[k]=hists[i].points.map(p=>p.value||0));
+  const cpd=L.cost_per_document,cpp=L.cost_per_page,spend=L.total_spend,touch=L.human_touch_rate;
+  const val=(m,f)=>m?.status==="measured"&&m.overall?f(m.overall.value):"—";
+  const hc=await api(`/v1/measures/cost_per_document/history?${q({source:src()})}`).catch(()=>({points:[]}));
+  const hp=hc.points.filter(p=>p.value!=null);let tr="";
+  if(hp.length>1){const d=hp[hp.length-1].value-hp[hp.length-2].value;tr=`<span class="trend ${d>0?"worse":d<0?"better":"flat"}">${d>0?"▲":d<0?"▼":""} ${money(Math.abs(d))} vs previous run</span>`}
+  const rows=bd.rows||[],maxRow=Math.max(...rows.map(r=>r.total_per_document),0.0001);
+  const ov=bd.overall;
+  $("#tab-cost").innerHTML=`
+  <div class="strip">
+    <div><b>${val(cpd,money)}</b><span>cost per document, fully loaded</span>${tr?`<div>${tr}</div>`:""}</div>
+    <div><b>${val(cpp,money)}</b><span>cost per page</span></div>
+    <div><b>${val(spend,money)}</b><span>spend in the last run's window</span></div>
+    <div><b>${val(touch,v=>(v*100).toFixed(1)+"%")}</b><span>of documents needed a person</span></div>
+  </div>
+  ${(bd.notes||[]).length?`<div class="panel flags">${bd.notes.map(n=>`<div class="flag"><span class="chip neutral">note</span>${esc(n)}</div>`).join("")}</div>`:""}
+  <div class="panel stack">
+    <div class="panel-head"><div><h2>Where the money goes</h2><p class="sub">Cost per document at each run, by component. Alerts fire when a component's cost per document rises beyond its normal range.</p></div></div>
+    ${stackedChart(series,pts)}
+    <div class="legend">${COMP_KEYS.map(k=>`<span><i style="background:${COMP_COLOR[k]}"></i>${esc(COMP_LABEL[k])}${ov?` · ${esc(money(ov.per_document[k]))}`:""}</span>`).join("")}</div>
+  </div>
+  <div class="two">
+    <div class="panel"><div class="panel-head"><div><h2>Cost by category</h2><p class="sub">Per document, computed live over the last ${days} days.</p></div>
+      <div class="picker"><select id="cost-by" aria-label="Break down by">${[["document_type","Document type"],["segment","Segment"],["processing_mode","Mode"]].map(([v,l])=>`<option value="${v}" ${v===by?"selected":""}>${l}</option>`).join("")}</select>
+      <select id="cost-days" aria-label="Window">${[1,3,7,30].map(d=>`<option value="${d}" ${d===days?"selected":""}>${d} day${d>1?"s":""}</option>`).join("")}</select></div></div>
+      ${bd.error?`<p class="reason">${esc(bd.error)}</p>`:`<div class="scroll"><table><tr><th>${esc(by.replace(/_/g," "))}</th><th style="width:40%">Mix</th><th class="num">Per doc</th><th class="num">Docs</th><th class="num">Total</th></tr>
+        ${rows.map(r=>`<tr><td>${esc(r.value)}</td><td>${stackBar(r.per_document,r.total_per_document,maxRow)}</td><td class="num">${esc(money(r.total_per_document))}</td><td class="num">${r.documents.toLocaleString()}</td><td class="num">${esc(money(r.total_usd))}</td></tr>`).join("")}
+        ${ov?`<tr><td><b>All</b></td><td>${stackBar(ov.per_document,ov.total_per_document,maxRow)}</td><td class="num"><b>${esc(money(ov.total_per_document))}</b></td><td class="num">${bd.documents.toLocaleString()}</td><td class="num">${esc(money(ov.total_usd))}</td></tr>`:""}</table></div>`}
+    </div>
+    <div class="stack">
+      <div class="panel"><div class="panel-head"><h2>AI spend by model</h2><span class="ref">last ${days} days</span></div>
+        ${(bd.models||[]).length?`<div class="scroll"><table><tr><th>Model</th><th class="num">Spend</th><th class="num">As fallback</th></tr>
+          ${bd.models.map(m=>`<tr><td class="mono">${esc(m.model)}</td><td class="num">${esc(money(m.usd))}</td><td class="num ${m.fallback_usd>0?"worse":""}">${m.fallback_usd?esc(money(m.fallback_usd)):"—"}</td></tr>`).join("")}</table></div>`:`<p class="note">No priced AI calls.</p>`}
+      </div>
+      <div class="panel"><div class="panel-head"><div><h2>Rate card</h2><p class="sub">Prices for what the pipeline can't record itself. Applies from the next run.</p></div></div>
+        <form id="rate-form" class="stack" style="gap:8px">
+          ${Object.entries(rates.keys||{}).map(([k,label])=>`<label class="slo-form" style="justify-content:space-between"><span>${esc(label)}</span><input id="rate-${k}" name="${k}" type="number" step="any" min="0" value="${rates.rates?.[k]??""}"></label>`).join("")}
+          <div class="slo-form"><button type="submit">Save rates</button><span class="note" id="rate-msg"></span></div>
+        </form>
+      </div>
+    </div>
+  </div>
+  <p class="note">Estimated AI cost is priced from the median of priced calls to the same model at the same stage, and is always shown as its own component. Review and rework come from review records (minutes × rate, or cost as recorded).</p>`;
+  $("#cost-by").onchange=e=>{store.set("assay-cost-by",e.target.value);renderCost()};
+  $("#cost-days").onchange=e=>{store.set("assay-cost-days",e.target.value);renderCost()};
+  $("#rate-form").onsubmit=async e=>{e.preventDefault();
+    const body={source:src(),rates:{}};new FormData(e.target).forEach((v,k)=>body.rates[k]=v===""?null:parseFloat(v));
+    try{await api("/v1/cost/rates",{method:"PUT",body:JSON.stringify(body)});$("#rate-msg").textContent="Saved. Run now to see the effect."}catch(err){$("#rate-msg").textContent=err.message}};
+}
+
 /* ---------- trace ---------- */
 async function renderTrace(){
   const T=S.trace;
@@ -473,7 +560,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","measures","trace","alerts","gates"];
+const TABS=["overview","measures","cost","trace","alerts","gates"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -488,6 +575,7 @@ async function render(){
   try{
     if(t==="overview")renderOverview();
     if(t==="measures")await (S.measure?renderMeasureDetail():renderMeasureGrid());
+    if(t==="cost")await renderCost();
     if(t==="trace")await renderTrace();
     if(t==="alerts")await renderAlerts();
     if(t==="gates")await renderGates();
