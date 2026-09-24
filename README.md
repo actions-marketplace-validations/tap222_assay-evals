@@ -73,7 +73,23 @@ opened `READ ONLY`.
 
 ### 2. Push events
 
-If you can't expose a database, send the same records over HTTP:
+If you can't expose a database, send the same records from your code. `assay/client.py` is
+one file with no dependencies beyond the standard library, so you can copy it into your project:
+
+```python
+from client import Assay   # or: from assay.client import Assay
+assay = Assay("https://assay.example.com", tenant="acme", api_key="...")
+assay.document(doc_id, received_at=start, document_type="invoice", segment=customer, page_count=2)
+with assay.stage(doc_id, "field_extraction"):      # timing, status, and failures
+    result = extract(doc)
+assay.call(doc_id, stage="field_extraction", model_declared="claude-sonnet-5",
+           model_served=resp.model, latency_ms=ms, cost_usd=price, status="success")
+assay.review(doc_id, minutes=4.5)                  # people time, for cost
+assay.document(doc_id, received_at=start, completed_at=datetime.utcnow())  # only sent fields change
+```
+
+It batches, retries, and never raises into your pipeline unless `strict=True`. Or send the
+records over HTTP directly:
 
 ```
 POST /v1/events/documents | /v1/events/stage-runs | /v1/events/calls | /v1/events/indexed | /v1/events/reviews
@@ -82,6 +98,16 @@ X-Tenant: acme
 
 Then run or schedule the source `events:acme`. Each tenant's data is isolated. Set
 `ASSAY_API_KEY` to require an `X-API-Key` header.
+
+### 3. See what you get, and backfill
+
+- The **Connect** tab (or `python -m assay coverage --source …`) checks the last 7 days of your
+  data. For every measure it says whether it's *live*, *partial* (works, but a field would make
+  it more useful) or *blocked*, and names the exact field that would unlock it.
+- **Backfill** (`python -m assay backfill --source … --days 30`, or the button) replays past
+  days so every slice has a baseline and anything already wrong is flagged on day one. It
+  notifies nobody about history, skips days that already have a run, and never disturbs
+  current alerts.
 
 ## What you get
 
@@ -93,6 +119,7 @@ Then run or schedule the source `events:acme`. Each tenant's data is isolated. S
 | **Trace** | Why was *this* document slow, lost or wrong? A timeline of every stage and model call, with problems flagged. Lists the slowest, stuck and lost documents to start from. |
 | **Alerts** | Pending, open and resolved alerts, with how long each lasted. |
 | **Release gates** | Every advance, hold or rollback decision, with its lineage. |
+| **Connect** | Setup snippets, what your data can answer measure by measure, and one-click backfill. |
 
 Every alert has an **Investigate** link to its slice. `#measures/<id>` and
 `#trace/<document_id>` are shareable links.
@@ -209,6 +236,8 @@ measures/     operations.py, cost.py, pipeline.py, ground_truth.py; each a class
 cost.py       cost ledger: components, estimates, breakdowns
 alerts.py     bands, SLO matching, pending → open → resolved, webhook
 trace.py      per-document trace and flags; slowest / stuck / lost finders
+coverage.py   what a source can answer, and which field unlocks the rest
+client.py     standard-library SDK for pushing events
 gates.py      noise floor, paired bootstrap CI, advance / hold / rollback
 runner.py     compute + persist a run (one fetch per window), history, what-changed
 scheduler.py  in-process periodic runs

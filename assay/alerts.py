@@ -130,21 +130,26 @@ def load_slos(conn, source: str) -> List[dict]:
 
 # ---------- history ----------
 
-def history_by_key(conn, source: str, before_run_id: int,
-                   limit_runs: int = LOOKBACK) -> Dict[Key, List[Tuple[Optional[float], Optional[float]]]]:
-    """(value, stderr) per slice over the previous runs, oldest first."""
+def history_by_key(conn, source: str, before, limit_runs: int = LOOKBACK
+                   ) -> Dict[Key, List[Tuple[Optional[float], Optional[float]]]]:
+    """(value, stderr) per slice over the runs before time `before`, oldest first.
+
+    Ordered by when each run's window ended, not by insertion order, so a
+    backfill of older days slots into history where it belongs.
+    """
     runs, res = store.measure_runs, store.measure_results
-    run_ids = [r[0] for r in conn.execute(
-        select(runs.c.id).where(and_(runs.c.source == source, runs.c.id < before_run_id))
-        .order_by(desc(runs.c.id)).limit(limit_runs))]
+    rows_ = conn.execute(
+        select(runs.c.id).where(and_(runs.c.source == source, runs.c.started_at < before))
+        .order_by(desc(runs.c.started_at)).limit(limit_runs)).all()
+    run_ids = [r[0] for r in rows_]
+    order = {rid: i for i, rid in enumerate(reversed(run_ids))}
     out: Dict[Key, List[Tuple[Optional[float], Optional[float]]]] = defaultdict(list)
     if not run_ids:
         return out
     rows = conn.execute(select(res.c.run_id, res.c.measure_id, res.c.dimension, res.c.slice_value, res.c.value,
                                res.c.stderr)
-                        .where(and_(res.c.run_id.in_(run_ids), res.c.status == "measured"))
-                        .order_by(res.c.run_id)).all()
-    for r in rows:
+                        .where(and_(res.c.run_id.in_(run_ids), res.c.status == "measured"))).all()
+    for r in sorted(rows, key=lambda r: order[r.run_id]):
         out[(r.measure_id, r.dimension, r.slice_value)].append((r.value, r.stderr))
     return out
 
@@ -161,7 +166,7 @@ def evaluate_run(engine: Engine, run_id: int, min_n: int = 30,
         now = run.started_at
         current = conn.execute(select(res).where(and_(res.c.run_id == run_id, res.c.status == "measured",
                                                       res.c.value.is_not(None)))).all()
-        hist = history_by_key(conn, run.source, run_id)
+        hist = history_by_key(conn, run.source, run.started_at)
         slos = load_slos(conn, run.source)
         open_rows = {(a.measure_id, a.dimension, a.slice_value, a.kind): a for a in conn.execute(
             select(alerts).where(and_(alerts.c.source == run.source, alerts.c.state.in_(("open", "pending")))))}

@@ -14,7 +14,7 @@ from sqlalchemy import and_, delete, desc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from assay import alerts, cost, gates, runner, store, trace
+from assay import alerts, cost, coverage, gates, runner, store, trace
 from assay.config import Settings
 from assay.measures import GROUPS, REGISTRY
 from assay.scheduler import Scheduler
@@ -84,6 +84,12 @@ class ReviewEvent(BaseModel):
 class RateIn(BaseModel):
     source: str = Field("*", description='A source name, or "*" for every source')
     rates: Dict[str, Optional[float]] = Field(..., description="Rate key → value; null removes it")
+
+
+class BackfillRequest(BaseModel):
+    source: str
+    days: int = Field(30, ge=1, le=180, description="How many past days to replay, one run per day")
+    window_days: float = Field(1.0, gt=0, le=30)
 
 
 class RunRequest(BaseModel):
@@ -161,14 +167,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return x_tenant or "default"
 
     def upsert(table, rows: List[dict], key: str):
+        """Insert, or update only the fields each row actually sent, so a later
+        event (say, a completion) doesn't blank fields an earlier one set."""
         if not rows:
             return 0
         insert = sqlite_insert if engine.dialect.name == "sqlite" else pg_insert
-        stmt = insert(table)
-        stmt = stmt.on_conflict_do_update(index_elements=[key],
-                                          set_={c: stmt.excluded[c] for c in rows[0] if c != key})
+        groups: Dict[tuple, List[dict]] = {}
+        for r in rows:
+            groups.setdefault(tuple(sorted(r)), []).append(r)
         with engine.begin() as conn:
-            conn.execute(stmt, rows)
+            for cols, batch in groups.items():
+                stmt = insert(table)
+                updates = {c: stmt.excluded[c] for c in cols if c not in (key, "tenant")}
+                stmt = stmt.on_conflict_do_update(index_elements=[key], set_=updates) if updates \
+                    else stmt.on_conflict_do_nothing(index_elements=[key])
+                conn.execute(stmt, batch)
         return len(rows)
 
     # ---------- dashboard ----------
@@ -191,7 +204,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def list_sources():
         with engine.connect() as conn:
             seen = [r[0] for r in conn.execute(select(store.measure_runs.c.source).distinct())]
-        available = (["sql"] if settings.source_url else [])
+            tenants = set()
+            for t in (store.event_documents, store.event_calls):
+                tenants |= {r[0] for r in conn.execute(select(t.c.tenant).distinct())}
+        available = (["sql"] if settings.source_url else []) + sorted(f"events:{t}" for t in tenants)
         return {"configured": available, "with_results": sorted(seen)}
 
     @app.post("/v1/runs", dependencies=[Depends(auth)])
@@ -254,7 +270,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         counts = {"measured": 0, "unmeasured": 0}
         for m in latest["measures"].values():
             counts[m["status"]] += 1
-        return {"run": {k: latest[k] for k in ("run_id", "source", "started_at", "window")},
+        with engine.connect() as conn:
+            run_count = len(conn.execute(select(store.measure_runs.c.id)
+                                         .where(store.measure_runs.c.source == source)).all())
+        return {"run": {k: latest[k] for k in ("run_id", "source", "started_at", "window")}, "run_count": run_count,
                 "counts": counts, "open_alerts": open_alerts, "slos": slo_status,
                 "changes": runner.changes(engine, source, settings.alert_min_n),
                 "scheduler": scheduler.status()}
@@ -345,6 +364,27 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(422, "Set ASSAY_SCHEDULE_SOURCES to the sources to run.")
         scheduler.run_once()
         return scheduler.status()
+
+    # ---------- onboarding ----------
+
+    @app.get("/v1/coverage", dependencies=[Depends(auth)])
+    def get_coverage(source: str, days: float = 7):
+        """Which measures this source can answer, and which field would unlock the rest."""
+        try:
+            src = runner.resolve_source(source, engine, settings)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        return coverage.compute(src, runner.window_for_days(days), runner.load_rates(engine, source))
+
+    @app.post("/v1/backfill", dependencies=[Depends(auth)])
+    def post_backfill(req: BackfillRequest):
+        """Replay past days so baselines and alerts work from day one."""
+        try:
+            src = runner.resolve_source(req.source, engine, settings)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        return runner.backfill(engine, src, req.days, req.window_days, settings.alert_min_n,
+                               settings.alert_after_runs)
 
     # ---------- cost ----------
 
@@ -437,7 +477,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.post("/v1/events/documents", dependencies=[Depends(auth)])
     def ingest_documents(events: List[DocumentEvent], tenant: str = Depends(tenant_of)):
         return {"ingested": upsert(store.event_documents,
-                                   [e.model_dump() | {"tenant": tenant} for e in events], "document_id")}
+                                   [e.model_dump(exclude_unset=True) | {"tenant": tenant} for e in events],
+                                   "document_id")}
 
     @app.post("/v1/events/stage-runs", dependencies=[Depends(auth)])
     def ingest_stage_runs(events: List[StageRunEvent], tenant: str = Depends(tenant_of)):

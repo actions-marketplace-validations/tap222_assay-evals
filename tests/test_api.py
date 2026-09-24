@@ -211,3 +211,49 @@ def test_cron_requires_secret_and_runs_sources(tmp_path):
     assert c.get("/v1/cron", headers={"Authorization": "Bearer wrong"}).status_code == 401
     out = c.get("/v1/cron", headers={"Authorization": "Bearer shh"}).json()
     assert out["last"]["events:x"]["ok"] is True
+
+
+def test_document_update_keeps_fields_it_does_not_send(client):
+    now = datetime.utcnow()
+    h = {"X-Tenant": "u"}
+    client.post("/v1/events/documents", headers=h, json=[
+        {"document_id": "d1", "received_at": now.isoformat(), "document_type": "invoice", "segment": "acme"}])
+    client.post("/v1/events/documents", headers=h, json=[
+        {"document_id": "d1", "received_at": now.isoformat(), "completed_at": now.isoformat()}])
+    from assay.sources.events import EventsSource
+    from assay.models import Window
+    [d] = EventsSource(client.app.state.engine, "u").documents(Window(now - timedelta(1), now + timedelta(1)))
+    assert d.document_type == "invoice" and d.segment == "acme" and d.completed_at is not None
+
+
+def test_coverage_says_what_to_add(client):
+    now = datetime.utcnow()
+    client.post("/v1/events/documents", headers={"X-Tenant": "c"}, json=[
+        {"document_id": f"d{i}", "received_at": now.isoformat()} for i in range(5)])
+    client.post("/v1/events/calls", headers={"X-Tenant": "c"}, json=[
+        {"call_id": "x", "stage": "ocr", "ts": now.isoformat(), "document_id": "d0"}])
+    rep = client.get("/v1/coverage", params={"source": "events:c", "days": 1}).json()
+    m = {x["id"]: x for x in rep["measures"]}
+    assert m["document_volume"]["status"] == "partial"  # works, but no segment / document type
+    assert any(i["field"] == "documents.segment" for i in m["document_volume"]["improve"])
+    assert m["call_latency_p95"]["status"] == "blocked" and m["call_latency_p95"]["missing"] == ["calls.latency_ms"]
+    assert m["human_touch_rate"]["missing"] == ["reviews"]
+    assert m["handoff_loss"]["status"] == "blocked"
+    assert rep["records"]["documents"]["rows"] == 5
+
+
+def test_backfill_builds_history_once_and_quietly(tmp_path):
+    notified = []
+    s = Settings(store_url=f"sqlite:///{tmp_path / 'b.db'}")
+    c = TestClient(create_app(s))
+    now = datetime.utcnow()
+    c.post("/v1/events/documents", headers={"X-Tenant": "b"}, json=[
+        {"document_id": f"d{i}", "received_at": (now - timedelta(days=i % 10, hours=1)).isoformat()}
+        for i in range(200)])
+    out = c.post("/v1/backfill", json={"source": "events:b", "days": 10}).json()
+    assert out["runs_created"] == 10
+    again = c.post("/v1/backfill", json={"source": "events:b", "days": 10}).json()
+    assert again["runs_created"] == 0 and again["skipped"] == 10
+    hist = c.get("/v1/measures/document_volume/history", params={"source": "events:b"}).json()
+    assert len(hist["points"]) == 10 and hist["band"] is not None  # a baseline exists on day one
+    assert hist["points"] == sorted(hist["points"], key=lambda p: p["at"])

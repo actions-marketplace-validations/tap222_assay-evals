@@ -29,6 +29,15 @@ def main(argv=None) -> int:
     r.add_argument("--days", type=int, default=7)
 
     sub.add_parser("check-source", help="Test every mapped field against your pipeline database")
+
+    b = sub.add_parser("backfill", help="Replay past days so baselines and alerts work from day one")
+    b.add_argument("--source", default="sql", help="sql or events:<tenant>")
+    b.add_argument("--days", type=int, default=30)
+    b.add_argument("--window-days", type=float, default=1.0)
+
+    c = sub.add_parser("coverage", help="Which measures your data can answer, and what would unlock the rest")
+    c.add_argument("--source", default="sql", help="sql or events:<tenant>")
+    c.add_argument("--days", type=float, default=7)
     sub.add_parser("demo", help="Load a synthetic demo tenant and backfill 7 weeks of daily runs")
 
     args = p.parse_args(argv)
@@ -68,6 +77,32 @@ def main(argv=None) -> int:
         print(f"run {run_id} stored · {len(live)} open alerts")
         for r in live:
             print(f"  [{r.kind}] {r.message}")
+        return 0
+
+    if args.cmd in ("backfill", "coverage"):
+        try:
+            source = runner.resolve_source(args.source, engine, settings)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        if args.cmd == "backfill":
+            out = runner.backfill(engine, source, args.days, args.window_days,
+                                  settings.alert_min_n, settings.alert_after_runs)
+            print(f"{out['runs_created']} runs created, {out['skipped']} days already had one.")
+            return 0
+        from assay.coverage import compute
+        rep = compute(source, runner.window_for_days(args.days), runner.load_rates(engine, source.name))
+        for name, p in rep["records"].items():
+            print(f"{name:11} {'%d rows' % p['rows'] if p['available'] else 'not provided'}")
+        print()
+        for m in rep["measures"]:
+            print(f"{m['status']:8} {m['name']}")
+            for f in m["missing"]:
+                print(f"         needs {f}")
+            for i in m["improve"]:
+                print(f"         better with {i['field']}: {i['why']}")
+        c = rep["counts"]
+        print(f"\n{c['live']} live, {c['partial']} partial, {c['blocked']} blocked")
         return 0
 
     if args.cmd == "check-source":

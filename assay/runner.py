@@ -75,7 +75,8 @@ def run_measures(engine: Engine, source, window: Window,
                  measure_ids: Optional[Iterable[str]] = None,
                  as_of: Optional[datetime] = None,
                  notify: Optional[Callable[[str, dict], None]] = None,
-                 alert_min_n: int = 30, alert_after_runs: int = 2) -> int:
+                 alert_min_n: int = 30, alert_after_runs: int = 2,
+                 evaluate_alerts: bool = True) -> int:
     """Compute and store measures, then evaluate alerts. `as_of` backdates the run (for backfills)."""
     ids = list(measure_ids or REGISTRY)
     cached = CachedSource(source)
@@ -106,14 +107,44 @@ def run_measures(engine: Engine, source, window: Window,
         if rows:
             conn.execute(store.measure_results.insert(), rows)
 
-    alerts.evaluate_run(engine, run_id, min_n=alert_min_n, notify=notify, after_runs=alert_after_runs)
+    if evaluate_alerts:
+        alerts.evaluate_run(engine, run_id, min_n=alert_min_n, notify=notify, after_runs=alert_after_runs)
     return run_id
+
+
+def backfill(engine: Engine, source, days: int = 30, window_days: float = 1.0,
+             alert_min_n: int = 30, alert_after_runs: int = 2) -> dict:
+    """Replay the last `days` as if Assay had been running all along.
+
+    One run per day, oldest first, each over a `window_days` window, so a newly
+    connected pipeline has baselines (and open alerts for anything already
+    wrong) on day one instead of after a week. Days that already have a run for
+    the same window are skipped, so it's safe to repeat. On a fresh source,
+    alerts are evaluated in order (without notifying anyone about history); on
+    a source that already has runs they aren't, so replaying old days can't
+    reopen or resolve today's alerts.
+    """
+    runs = store.measure_runs
+    now = datetime.utcnow().replace(microsecond=0)
+    with engine.connect() as conn:
+        existing = [r.window_end for r in conn.execute(select(runs.c.window_end).where(runs.c.source == source.name))]
+    fresh = not existing
+    made, skipped = [], 0
+    for d in range(days - 1, -1, -1):
+        end = now - timedelta(days=d)
+        if any(abs((e - end).total_seconds()) < 3600 for e in existing):
+            skipped += 1
+            continue
+        made.append(run_measures(engine, source, Window(end - timedelta(days=window_days), end), as_of=end,
+                                 notify=None, alert_min_n=alert_min_n, alert_after_runs=alert_after_runs,
+                                 evaluate_alerts=fresh))
+    return {"runs_created": len(made), "skipped": skipped, "run_ids": made}
 
 
 def _last_runs(conn, source_name: str, k: int):
     runs = store.measure_runs
     return conn.execute(select(runs).where(runs.c.source == source_name)
-                        .order_by(desc(runs.c.id)).limit(k)).all()
+                        .order_by(desc(runs.c.started_at), desc(runs.c.id)).limit(k)).all()
 
 
 def latest_run(engine: Engine, source_name: str) -> Optional[dict]:
@@ -146,7 +177,7 @@ def history(engine: Engine, source_name: str, measure_id: str,
         cond.append(res.c.slice_value == slice_value)
     q = (select(runs.c.started_at, res.c.value, res.c.n, res.c.status, res.c.stderr)
          .join(res, res.c.run_id == runs.c.id).where(and_(*cond))
-         .order_by(desc(runs.c.id)).limit(limit))
+         .order_by(desc(runs.c.started_at), desc(runs.c.id)).limit(limit))
     with engine.connect() as conn:
         rows = list(reversed(conn.execute(q).all()))
         slo = alerts.slo_for(alerts.load_slos(conn, source_name), measure_id, dimension, slice_value)

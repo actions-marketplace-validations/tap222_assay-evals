@@ -128,6 +128,8 @@ svg.chart text{fill:var(--muted);font:11px var(--mono)}
 .facts dd{margin:2px 0 0;font-weight:500;overflow-wrap:anywhere}
 svg.timeline text{fill:var(--ink-2);font:11px var(--mono)}
 .keybox{display:flex;gap:8px;align-items:center}
+pre.code{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font:12.5px/1.55 var(--mono);overflow-x:auto;white-space:pre}
+details summary{cursor:pointer}
 span.costbar{display:flex;height:12px;border-radius:3px;overflow:hidden;background:var(--sunk)}
 span.costbar i{display:block;height:100%}
 @media (max-width:600px){main{padding:16px}header{padding:10px 16px}.bar-row{grid-template-columns:90px 1fr 100px}}
@@ -151,6 +153,7 @@ span.costbar i{display:block;height:100%}
     <a href="#trace" data-tab="trace">Trace</a>
     <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
     <a href="#gates" data-tab="gates">Release gates</a>
+    <a href="#connect" data-tab="connect">Connect</a>
   </nav>
   <div id="keybox" class="panel keybox" hidden>
     <label for="apikey">This server requires an API key:</label>
@@ -163,6 +166,7 @@ span.costbar i{display:block;height:100%}
   <section id="tab-trace" class="stack" hidden></section>
   <section id="tab-alerts" class="stack" hidden></section>
   <section id="tab-gates" class="stack" hidden></section>
+  <section id="tab-connect" class="stack" hidden></section>
 </main>
 <script>
 const $=s=>document.querySelector(s);
@@ -251,7 +255,8 @@ async function refresh(){
   render();
 }
 function renderEmpty(msg){
-  const html=`<div class="empty">${msg?esc(msg)+"<br><br>":""}No data yet. Load the demo with <code>python -m assay demo</code>, or set <code>ASSAY_SOURCE_URL</code> and press “Run now”.</div>`;
+  const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
+    :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
   ["overview","measures","cost","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
 }
 
@@ -279,7 +284,8 @@ function renderOverview(){
   const open=o.open_alerts,breached=o.slos.filter(s=>s.state==="breached"),judged=o.slos.filter(s=>s.state!=="unmeasured");
   const anomalies=open.filter(a=>a.kind==="anomaly"),sloAlerts=open.filter(a=>a.kind==="slo");
   const sched=o.scheduler;
-  $("#tab-overview").innerHTML=`
+  const learning=o.run_count<4?`<div class="panel flags"><div class="flag"><span class="chip warn">learning</span>Alerts compare each slice with its recent past and need 4 runs; this source has ${o.run_count}. <a href="#connect">Backfill history</a> to get baselines now.</div></div>`:"";
+  $("#tab-overview").innerHTML=learning+`
   <div class="strip">
     <div class="${anomalies.length?"bad":"good"}"><b>${anomalies.length}</b><span>open anomalies</span></div>
     <div class="${breached.length?"warn":"good"}"><b>${judged.length?`${judged.length-breached.length}/${judged.length}`:"—"}</b><span>SLOs met${o.slos.length>judged.length?` · ${o.slos.length-judged.length} unmeasured`:""}</span></div>
@@ -474,6 +480,65 @@ async function renderCost(){
     try{await api("/v1/cost/rates",{method:"PUT",body:JSON.stringify(body)});$("#rate-msg").textContent="Saved. Run now to see the effect."}catch(err){$("#rate-msg").textContent=err.message}};
 }
 
+/* ---------- connect ---------- */
+async function renderConnect(){
+  const host=location.origin,tenant=(src()||"events:acme").startsWith("events:")?src().slice(7):"acme";
+  let cov=null,err="";
+  if(src()){try{cov=await api(`/v1/coverage?${q({source:src(),days:7})}`)}catch(e){err=e.message}}
+  const runs=(await api(`/v1/measures/document_volume/history?${q({source:src()})}`).catch(()=>({points:[]}))).points.length;
+  const py=`# copy assay/client.py into your project: one file, standard library only
+from client import Assay
+assay = Assay("${host}", tenant="${tenant}")
+
+assay.document(doc_id, received_at=start, document_type="invoice",
+               segment=customer, page_count=pages)
+with assay.stage(doc_id, "field_extraction"):
+    result = extract(doc)
+assay.call(doc_id, stage="field_extraction", model_declared="claude-sonnet-5",
+           model_served=resp.model, latency_ms=ms, cost_usd=price, status="success")
+assay.review(doc_id, minutes=4.5, reviewer="sam")      # people time, for cost
+assay.document(doc_id, received_at=start, completed_at=datetime.utcnow())`;
+  const curl=`curl -X POST ${host}/v1/events/documents \\
+  -H "Content-Type: application/json" -H "X-Tenant: ${tenant}" \\
+  -d '[{"document_id":"inv-1","received_at":"2026-09-24T10:00:00","document_type":"invoice"}]'`;
+  const sql=`export ASSAY_SOURCE_URL=postgresql+psycopg://readonly:***@db:5432/pipeline
+export ASSAY_SOURCE_MAPPING=./mappings/mine.json   # see mappings/example.json
+python -m assay check-source      # tests every mapped field
+python -m assay backfill --days 30  # history, so alerts work today
+python -m assay serve --every 60 --source sql`;
+  const statusChip={live:"good",partial:"warn",blocked:"neutral"};
+  const byStatus=s=>(cov?.measures||[]).filter(m=>m.status===s);
+  $("#tab-connect").innerHTML=`
+  <div class="panel"><div class="panel-head"><div><h2>Connect your pipeline</h2>
+    <p class="sub">Two ways in, same measures. Send events from your code, or give Assay read-only access to the database your pipeline already writes. Then backfill, and the alerts work from the first day.</p></div></div>
+    <div class="two">
+      <div class="stack" style="gap:8px;align-content:start"><h3>Send events from your code</h3><p class="note">Fastest. Five record types, batched, never blocks your pipeline.</p>
+        <pre class="code">${esc(py)}</pre><details><summary class="note">Or with curl</summary><pre class="code">${esc(curl)}</pre></details></div>
+      <div class="stack" style="gap:8px;align-content:start"><h3>Or read your database</h3><p class="note">No code changes. Map your tables once in a JSON file; fields you don't have can be "NULL".</p>
+        <pre class="code">${esc(sql)}</pre></div>
+    </div></div>
+  ${!src()?`<div class="empty">Nothing connected yet. Send a first event and it appears in the source list.</div>`:`
+  <div class="panel stack">
+    <div class="panel-head"><div><h2>What <span class="mono">${esc(src())}</span> can answer</h2><p class="sub">Checked against the last 7 days of its data.</p></div>
+      ${cov?`<div class="picker"><span class="chip good">${cov.counts.live} live</span><span class="chip warn">${cov.counts.partial} partial</span><span class="chip neutral">${cov.counts.blocked} blocked</span></div>`:""}</div>
+    ${err?`<p class="reason">${esc(err)}</p>`:""}
+    ${cov?`<div class="facts">${Object.entries(cov.records).map(([k,p])=>`<div><dt>${esc(k.replace("_"," "))}</dt><dd>${p.available?p.rows.toLocaleString()+" rows":`<span class="warn">${esc(p.error?"error":"not provided")}</span>`}</dd></div>`).join("")}</div>
+    <div class="two">
+      <div><h3 style="margin-bottom:6px">Needs something to switch on</h3>${byStatus("blocked").map(m=>`<div class="alert pending"><span class="stripe"></span><div><div class="msg">${esc(m.name)}</div><div class="meta">needs ${m.missing.map(esc).join(" · ")}</div></div><span></span></div>`).join("")||`<p class="note">Nothing blocked.</p>`}</div>
+      <div><h3 style="margin-bottom:6px">Working, and better with</h3>${byStatus("partial").map(m=>`<div class="alert slo"><span class="stripe"></span><div><div class="msg">${esc(m.name)}</div><div class="meta">${m.improve.map(i=>`${esc(i.field)}: ${esc(i.why)}`).join("<br>")}</div></div><span></span></div>`).join("")||`<p class="note">Nothing to add.</p>`}
+        <p class="note" style="margin-top:10px">Fully live: ${byStatus("live").map(m=>esc(m.name)).join(", ")||"none yet"}.</p></div>
+    </div>
+    <details><summary class="note">Field fill rates</summary><div class="dims" style="margin-top:10px">${Object.entries(cov.records).filter(([,p])=>p.available&&p.rows).map(([k,p])=>`<div class="dim"><h4>${esc(k.replace("_"," "))}</h4>${Object.entries(p.fields).map(([f,v])=>`<div class="bar-row ${v===0?"breach":""}" style="cursor:default"><span class="lbl">${esc(f)}</span><span class="track"><span class="fill" style="width:${v*100}%"></span></span><span class="num">${(v*100).toFixed(0)}%</span></div>`).join("")}</div>`).join("")}</div></details>`:""}
+  </div>
+  <div class="panel"><div class="panel-head"><div><h2>Build history</h2><p class="sub">Alerts compare each slice with its own recent past. Backfill replays the last 30 days, one run per day, so baselines exist now. Nobody is notified about history, and days that already have a run are skipped.</p></div>
+    <div class="picker"><span class="ref">${runs} run${runs===1?"":"s"} so far</span><button type="button" id="backfill" class="primary">Backfill 30 days</button></div></div>
+    <p class="note" id="backfill-msg"></p></div>`}`;
+  const b=$("#backfill");if(b)b.onclick=async()=>{b.disabled=true;b.textContent="Backfilling…";
+    try{const r=await api("/v1/backfill",{method:"POST",body:JSON.stringify({source:src(),days:30})});
+      $("#backfill-msg").textContent=`${r.runs_created} runs created${r.skipped?`, ${r.skipped} days already had one`:""}. Baselines are ready.`;await refresh()}
+    catch(e){$("#backfill-msg").textContent=e.message;b.disabled=false;b.textContent="Backfill 30 days"}};
+}
+
 /* ---------- trace ---------- */
 async function renderTrace(){
   const T=S.trace;
@@ -560,7 +625,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","measures","cost","trace","alerts","gates"];
+const TABS=["overview","measures","cost","trace","alerts","gates","connect"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -571,7 +636,7 @@ async function render(){
   const hp=location.hash.slice(1).split("/");if(t==="trace"&&hp[1])S.trace.doc=decodeURIComponent(hp[1]);
   document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
-  if(!S.overview&&t!=="gates")return;
+  if(!S.overview&&t!=="gates"&&t!=="connect")return;
   try{
     if(t==="overview")renderOverview();
     if(t==="measures")await (S.measure?renderMeasureDetail():renderMeasureGrid());
@@ -579,6 +644,7 @@ async function render(){
     if(t==="trace")await renderTrace();
     if(t==="alerts")await renderAlerts();
     if(t==="gates")await renderGates();
+    if(t==="connect")await renderConnect();
   }catch(e){$("#tab-"+t).innerHTML=`<div class="empty">${esc(e.message)}</div>`}
 }
 document.addEventListener("click",e=>{
