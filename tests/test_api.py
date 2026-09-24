@@ -59,9 +59,10 @@ def test_gate_decision_is_recorded(client):
 
 
 def test_api_key_enforced(tmp_path):
-    c = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path / 's.db'}", api_key="k")))
+    c = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path / 's.db'}", admin_key="k")))
     assert c.get("/v1/measures").status_code == 401
     assert c.get("/v1/measures", headers={"X-API-Key": "k"}).status_code == 200
+    assert c.get("/v1/measures", headers={"Authorization": "Bearer k"}).status_code == 200
 
 
 def _reference_db(path):

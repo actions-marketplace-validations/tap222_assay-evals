@@ -30,6 +30,18 @@ def main(argv=None) -> int:
 
     sub.add_parser("check-source", help="Test every mapped field against your pipeline database")
 
+    k = sub.add_parser("keys", help="Create, list and revoke API keys")
+    ks = k.add_subparsers(dest="keys_cmd", required=True)
+    kc = ks.add_parser("create", help="Create a key; the secret is printed once")
+    kc.add_argument("--tenant", required=True, help="Tenant the key belongs to, or '*' for a platform key")
+    kc.add_argument("--scopes", required=True, help="Comma-separated: ingest, read, manage, admin")
+    kc.add_argument("--name", required=True, help="What uses it, e.g. 'invoice pipeline (prod)'")
+    kc.add_argument("--expires-in-days", type=int)
+    kl = ks.add_parser("list", help="List keys (never shows secrets)")
+    kl.add_argument("--tenant")
+    kr = ks.add_parser("revoke", help="Revoke a key immediately")
+    kr.add_argument("id", type=int)
+
     b = sub.add_parser("backfill", help="Replay past days so baselines and alerts work from day one")
     b.add_argument("--source", default="sql", help="sql or events:<tenant>")
     b.add_argument("--days", type=int, default=30)
@@ -78,6 +90,31 @@ def main(argv=None) -> int:
         for r in live:
             print(f"  [{r.kind}] {r.message}")
         return 0
+
+    if args.cmd == "keys":
+        from assay import auth
+        if args.keys_cmd == "create":
+            try:
+                row, secret = auth.create_key(engine, args.tenant, args.name,
+                                              [s.strip() for s in args.scopes.split(",") if s.strip()],
+                                              args.expires_in_days)
+            except ValueError as exc:
+                print(exc, file=sys.stderr)
+                return 2
+            print(f"Created key {row['id']} for tenant {row['tenant']} with scopes {', '.join(row['scopes'])}.")
+            print(f"\n  {secret}\n\nStore it now: it isn't shown again. Send it as 'Authorization: Bearer <key>'.")
+            print("Authentication is now required on this server." if not settings.admin_key else "")
+            return 0
+        if args.keys_cmd == "list":
+            for r in auth.list_keys(engine, args.tenant):
+                state = "revoked" if r["revoked_at"] else "active"
+                print(f"{r['id']:>4}  {r['prefix']}…  {r['tenant']:12} {','.join(r['scopes']):22} {state:8} "
+                      f"last used {r['last_used_at'] or 'never'}  {r['name']}")
+            return 0
+        if args.keys_cmd == "revoke":
+            ok = auth.revoke_key(engine, args.id)
+            print("Revoked." if ok else f"No active key {args.id}.")
+            return 0 if ok else 1
 
     if args.cmd in ("backfill", "coverage"):
         try:

@@ -20,6 +20,8 @@ does not resolve its alert.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -248,8 +250,14 @@ def evaluate_run(engine: Engine, run_id: int, min_n: int = 30,
 
 # ---------- notification ----------
 
-def webhook_notifier(url: str, fmt_kind: str = "slack", public_url: Optional[str] = None) -> Callable[[str, dict], None]:
-    """Build a notifier that POSTs each alert change. Failures are logged, never raised."""
+def webhook_notifier(url: str, fmt_kind: str = "slack", public_url: Optional[str] = None,
+                     secret: Optional[str] = None) -> Callable[[str, dict], None]:
+    """Build a notifier that POSTs each alert change. Failures are logged, never raised.
+
+    With a secret, each request carries X-Assay-Timestamp and
+    X-Assay-Signature: sha256=HMAC(secret, "<timestamp>.<body>"), so the
+    receiver can check it came from Assay and isn't a replay.
+    """
 
     def send(event: str, alert: dict) -> None:
         icon = ":red_circle:" if event == "opened" else ":white_check_mark:"
@@ -265,8 +273,13 @@ def webhook_notifier(url: str, fmt_kind: str = "slack", public_url: Optional[str
         else:
             body = {"event": event, "text": text,
                     "alert": {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in alert.items()}}
-        req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
-                                     headers={"Content-Type": "application/json"})
+        data = json.dumps(body).encode()
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            stamp = str(int(datetime.utcnow().timestamp()))
+            sig = hmac.new(secret.encode(), stamp.encode() + b"." + data, hashlib.sha256).hexdigest()
+            headers |= {"X-Assay-Timestamp": stamp, "X-Assay-Signature": f"sha256={sig}"}
+        req = urllib.request.Request(url, data=data, method="POST", headers=headers)
         try:
             urllib.request.urlopen(req, timeout=5).close()
         except Exception:

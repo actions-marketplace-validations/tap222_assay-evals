@@ -40,6 +40,7 @@ measure_results = Table(
 gate_decisions = Table(
     "gate_decisions", metadata,
     Column("id", Integer, primary_key=True),
+    Column("tenant", String(64), nullable=False, default="*", index=True),
     Column("created_at", DateTime, nullable=False),
     Column("outcome", String(16), nullable=False),  # advance | hold | rollback
     Column("lineage", JSON, nullable=False),
@@ -89,8 +90,8 @@ alerts = Table(
 
 event_calls = Table(
     "event_calls", metadata,
+    Column("tenant", String(64), primary_key=True),
     Column("call_id", String(128), primary_key=True),
-    Column("tenant", String(64), nullable=False, index=True),
     Column("stage", String(64), nullable=False),
     Column("ts", DateTime, nullable=False, index=True),
     Column("document_id", String(128)),
@@ -108,8 +109,8 @@ event_calls = Table(
 
 event_documents = Table(
     "event_documents", metadata,
+    Column("tenant", String(64), primary_key=True),
     Column("document_id", String(128), primary_key=True),
-    Column("tenant", String(64), nullable=False, index=True),
     Column("received_at", DateTime, nullable=False, index=True),
     Column("completed_at", DateTime),
     Column("status", String(64)),
@@ -123,8 +124,10 @@ event_documents = Table(
 
 event_stage_runs = Table(
     "event_stage_runs", metadata,
-    Column("id", Integer, primary_key=True),
-    Column("tenant", String(64), nullable=False, index=True),
+    Column("tenant", String(64), primary_key=True),
+    # Sent by the caller, or derived from document, stage and start time, so a
+    # retried batch updates rather than duplicates.
+    Column("run_id", String(128), primary_key=True),
     Column("document_id", String(128), nullable=False),
     Column("stage", String(64), nullable=False),
     Column("status", String(32), nullable=False),
@@ -135,8 +138,9 @@ event_stage_runs = Table(
 
 event_indexed = Table(
     "event_indexed", metadata,
-    Column("id", Integer, primary_key=True),
-    Column("tenant", String(64), nullable=False, index=True),
+    Column("tenant", String(64), primary_key=True),
+    Column("extraction_id", String(128), primary_key=True),
+    Column("field", String(128)),
     Column("document_id", String(128), nullable=False),
     Column("has_positions", Boolean, nullable=False),
     Column("segment", String(128)),
@@ -146,8 +150,8 @@ event_indexed = Table(
 
 event_reviews = Table(
     "event_reviews", metadata,
+    Column("tenant", String(64), primary_key=True),
     Column("review_id", String(128), primary_key=True),
-    Column("tenant", String(64), nullable=False, index=True),
     Column("document_id", String(128), nullable=False, index=True),
     Column("ts", DateTime, nullable=False, index=True),
     Column("kind", String(16), nullable=False),
@@ -166,6 +170,21 @@ cost_rates = Table(
     Column("value", Float, nullable=False),
     Column("updated_at", DateTime, nullable=False),
     UniqueConstraint("source", "key", name="uq_cost_rate"),
+)
+
+
+api_keys = Table(
+    "api_keys", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("key_hash", String(64), nullable=False, unique=True),  # sha256; the key itself is never stored
+    Column("prefix", String(16), nullable=False),  # first characters, to recognise a key in lists
+    Column("name", String(128), nullable=False),
+    Column("tenant", String(64), nullable=False, index=True),
+    Column("scopes", String(128), nullable=False),
+    Column("created_at", DateTime, nullable=False),
+    Column("expires_at", DateTime),
+    Column("last_used_at", DateTime),
+    Column("revoked_at", DateTime),
 )
 
 

@@ -78,7 +78,7 @@ one file with no dependencies beyond the standard library, so you can copy it in
 
 ```python
 from client import Assay   # or: from assay.client import Assay
-assay = Assay("https://assay.example.com", tenant="acme", api_key="...")
+assay = Assay("https://assay.example.com", api_key="ak_...")   # an ingest key; it sets the tenant
 assay.document(doc_id, received_at=start, document_type="invoice", segment=customer, page_count=2)
 with assay.stage(doc_id, "field_extraction"):      # timing, status, and failures
     result = extract(doc)
@@ -91,13 +91,9 @@ assay.document(doc_id, received_at=start, completed_at=datetime.utcnow())  # onl
 It batches, retries, and never raises into your pipeline unless `strict=True`. Or send the
 records over HTTP directly:
 
-```
-POST /v1/events/documents | /v1/events/stage-runs | /v1/events/calls | /v1/events/indexed | /v1/events/reviews
-X-Tenant: acme
-```
-
-Then run or schedule the source `events:acme`. Each tenant's data is isolated. Set
-`ASSAY_API_KEY` to require an `X-API-Key` header.
+`POST /v1/events` with `Authorization: Bearer <ingest key>`. Or, if your pipeline already emits
+OpenTelemetry traces, add an exporter and change no code. See
+[API and authentication](#api-and-authentication).
 
 ### 3. See what you get, and backfill
 
@@ -108,6 +104,91 @@ Then run or schedule the source `events:acme`. Each tenant's data is isolated. S
   days so every slice has a baseline and anything already wrong is flagged on day one. It
   notifies nobody about history, skips days that already have a run, and never disturbs
   current alerts.
+
+## API and authentication
+
+The full reference, with an **Authorize** button, is at `/docs` (OpenAPI at `/openapi.json`).
+
+### Keys
+
+Send a key as `Authorization: Bearer <key>` (or `X-API-Key: <key>`). A key belongs to one
+**tenant** and only ever sees that tenant: its data is the source `events:<tenant>`, and a
+different `X-Tenant` header is refused. Scopes:
+
+| Scope | Can |
+|---|---|
+| `ingest` | send events: give this to a pipeline |
+| `read` | dashboards, measures, alerts, traces, cost, coverage |
+| `manage` | everything in `read`, plus runs, backfill, SLOs, the rate card and release-gate decisions |
+| `admin` | everything, plus create and revoke that tenant's keys |
+
+A key with tenant `*` is a platform key: it sees every tenant and may pass `X-Tenant` to
+write on a tenant's behalf. Keys are stored as SHA-256 hashes, shown once at creation, and can
+expire (`expires_in_days`) or be revoked instantly. Each key is rate-limited
+(`ASSAY_RATE_LIMIT_PER_MIN`, default 1,200 per minute per instance) and answers `429` with
+`Retry-After` when over the limit.
+
+```bash
+# first key, on the server (switches authentication on)
+python -m assay keys create --tenant acme --scopes admin --name "acme admin"
+# then, over the API, with that key
+curl -X POST $ASSAY/v1/keys -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+     -d '{"name": "invoice pipeline (prod)", "scopes": ["ingest"]}'
+python -m assay keys list
+python -m assay keys revoke 3
+```
+
+The **Connect** tab lists, creates and revokes keys for admin keys too. `ASSAY_ADMIN_KEY` sets
+a break-glass platform key from the environment.
+
+**Open mode:** with no keys and no `ASSAY_ADMIN_KEY`, the server runs without authentication,
+for local use and demos. `/v1/whoami` and the dashboard header say so. Open mode never grants
+`admin`, so nobody can mint keys over the API on an open server. Set `ASSAY_AUTH=required`
+to refuse to run open.
+
+### Sending data
+
+| Endpoint | Use |
+|---|---|
+| `POST /v1/events` | any mix of `documents`, `stage_runs`, `calls`, `reviews`, `extractions` in one request (up to 5,000 records) |
+| `POST /v1/events/{documents,stage-runs,calls,reviews,extractions}` | one record type per request |
+| `POST /v1/otlp/v1/traces` | OpenTelemetry traces (OTLP/HTTP, JSON). Point a collector's `otlphttp` exporter at `/v1/otlp` |
+
+The ingest contract:
+- **Idempotent.** Every write is an upsert by `(tenant, id)`. Stage runs without a `run_id`
+  get one derived from document, stage and start time; extractions without an `extraction_id`
+  get one from document and `field`. Retrying a batch never duplicates anything.
+- **Strict.** Unknown fields are refused (`422`, naming the field), so a typo like
+  `documentType` doesn't silently drop data. Costs, latencies and page counts can't be negative.
+- **Partial updates.** Sending a document again only changes the fields you send, so a
+  completion event doesn't erase the document type.
+- **Timezones.** Timestamps may carry any offset. They're stored as UTC.
+
+**OpenTelemetry mapping:** one trace is one document, unless a span sets `assay.document_id`.
+The root span gives received and completed times, plus `assay.document_type`, `assay.segment`
+and `assay.page_count`. Spans with `gen_ai.*` attributes become model calls: requested and
+served model, latency, and error status. Their stage comes from `assay.stage` on the span or
+its parent. Other spans with `assay.stage` become stage runs. `service.version` becomes the
+code revision.
+
+```yaml
+exporters:
+  otlphttp/assay:
+    endpoint: https://assay.example.com/v1/otlp
+    encoding: json
+    headers: { Authorization: "Bearer ${env:ASSAY_KEY}" }
+```
+
+### Alert webhooks
+
+With `ASSAY_WEBHOOK_SECRET` set, each webhook carries `X-Assay-Timestamp` and
+`X-Assay-Signature: sha256=<hex>`, the HMAC-SHA256 of `"<timestamp>.<body>"` with the secret.
+Check it, and reject stale timestamps, to know a request came from Assay:
+
+```python
+expected = hmac.new(secret, f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
+assert hmac.compare_digest(f"sha256={expected}", signature) and abs(time.time() - int(ts)) < 300
+```
 
 ## What you get
 
@@ -224,7 +305,8 @@ because Vercel detects the FastAPI `app` in the root `app.py`.
 - **Scheduled runs:** serverless has no background process. Set `CRON_SECRET` and
   `ASSAY_SCHEDULE_SOURCES`, then add a `vercel.json` with
   `"crons": [{"path": "/v1/cron", "schedule": "0 6 * * *"}]`.
-- Set `ASSAY_API_KEY` before sharing the URL.
+- Create keys (`python -m assay keys create …`) or set `ASSAY_ADMIN_KEY` before sharing the URL.
+  Until then the server is in open mode.
 
 All settings are listed in `.env.example`.
 
@@ -238,6 +320,8 @@ alerts.py     bands, SLO matching, pending → open → resolved, webhook
 trace.py      per-document trace and flags; slowest / stuck / lost finders
 coverage.py   what a source can answer, and which field unlocks the rest
 client.py     standard-library SDK for pushing events
+auth.py       API keys, scopes, tenant isolation, rate limits
+ingest.py     event contract: validation, idempotent upserts, OpenTelemetry mapping
 gates.py      noise floor, paired bootstrap CI, advance / hold / rollback
 runner.py     compute + persist a run (one fetch per window), history, what-changed
 scheduler.py  in-process periodic runs
@@ -247,7 +331,10 @@ api.py        FastAPI; dashboard in static/index.html
 ## Not built yet
 
 - **Ground-truth ingest:** the accuracy measures need a way to load labelled values.
-- **Auth:** there is one shared API key, with no per-tenant keys, users or roles.
+- **Users and SSO:** keys are the only identity. There are no user accounts, SSO or audit log
+  of who changed what.
+- **Shared rate limits:** limits are per instance, in memory. Use a shared store (such as
+  Redis) when running several replicas.
 - **Alert routing:** there is no per-team routing, silencing, acknowledgement or on-call
   paging (PagerDuty).
 - **Scale:** measures compute in Python over fetched rows. That is fine for tens of thousands

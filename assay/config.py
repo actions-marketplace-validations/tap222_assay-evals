@@ -15,7 +15,13 @@ class Settings:
     source_url: Optional[str] = None  # the pipeline database, read-only
     downstream_url: Optional[str] = None
     downstream_hash_sql: Optional[str] = None
-    api_key: Optional[str] = None
+    # Platform admin key from the environment: every tenant, every scope. Use it
+    # to create the first real keys, then keep it for break-glass use.
+    admin_key: Optional[str] = None
+    auth_mode: str = "auto"  # auto (on once any key exists) | required | off
+    rate_limit_per_min: int = 1200  # per key, per instance; 0 = no limit
+    cors_origins: List[str] = field(default_factory=list)
+    webhook_secret: Optional[str] = None  # signs alert webhooks (X-Assay-Signature)
 
     # alerting
     webhook_url: Optional[str] = None
@@ -43,7 +49,11 @@ class Settings:
             source_url=e("ASSAY_SOURCE_URL"),
             downstream_url=e("ASSAY_DOWNSTREAM_URL"),
             downstream_hash_sql=e("ASSAY_DOWNSTREAM_HASH_SQL"),
-            api_key=e("ASSAY_API_KEY"),
+            admin_key=e("ASSAY_ADMIN_KEY") or e("ASSAY_API_KEY"),
+            auth_mode=e("ASSAY_AUTH", "auto"),
+            rate_limit_per_min=int(e("ASSAY_RATE_LIMIT_PER_MIN", "1200")),
+            cors_origins=_list(e("ASSAY_CORS_ORIGINS")),
+            webhook_secret=e("ASSAY_WEBHOOK_SECRET"),
             webhook_url=e("ASSAY_WEBHOOK_URL"),
             webhook_format=e("ASSAY_WEBHOOK_FORMAT", "slack"),
             public_url=e("ASSAY_PUBLIC_URL"),
@@ -60,4 +70,4 @@ class Settings:
         if not self.webhook_url:
             return None
         from assay.alerts import webhook_notifier
-        return webhook_notifier(self.webhook_url, self.webhook_format, self.public_url)
+        return webhook_notifier(self.webhook_url, self.webhook_format, self.public_url, self.webhook_secret)

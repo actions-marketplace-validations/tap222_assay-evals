@@ -14,8 +14,8 @@ def server(tmp_path):
 
 
 def through(server, tenant="sdk"):
-    def send(path, batch):
-        r = server.post(path, json=batch, headers={"X-Tenant": tenant})
+    def send(path, payload):
+        r = server.post(path, json=payload, headers={"X-Tenant": tenant})
         r.raise_for_status()
     return send
 
@@ -44,21 +44,22 @@ def test_client_records_a_document_end_to_end(server):
 def test_failed_send_is_kept_for_the_next_flush():
     calls = []
 
-    def flaky(path, batch):
-        calls.append(len(batch))
+    def flaky(path, payload):
+        calls.append(sum(len(v) for v in payload.values()))
         if len(calls) == 1:
             raise OSError("network down")
 
     a = Assay("http://unused", transport=flaky)
     a.call("d", stage="ocr")
+    a.document("d", received_at=datetime.utcnow())
     a.flush()           # fails quietly
-    a.flush()           # retried
-    assert calls == [1, 1]
+    a.flush()           # retried, nothing lost
+    assert calls == [2, 2]
 
 
 def test_batches_flush_automatically():
     sent = []
-    a = Assay("http://unused", batch_size=3, transport=lambda p, b: sent.append((p, len(b))))
+    a = Assay("http://unused", batch_size=3, transport=lambda p, b: sent.append((p, sum(map(len, b.values())))))
     for i in range(7):
         a.call(f"d{i}", stage="ocr")
-    assert sent == [("/v1/events/calls", 3), ("/v1/events/calls", 3)]
+    assert sent == [("/v1/events", 3), ("/v1/events", 3)]

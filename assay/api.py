@@ -1,21 +1,28 @@
-"""HTTP API and dashboard."""
-from __future__ import annotations
+"""HTTP API and dashboard.
 
+Authenticate with `Authorization: Bearer <key>` (or `X-API-Key: <key>`).
+See assay/auth.py for scopes and tenant isolation.
+"""
+# No `from __future__ import annotations` here: the per-record-type ingest
+# endpoints are built in a loop, and FastAPI needs their body types as real
+# objects rather than strings to resolve later.
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Security
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, desc, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import alerts, cost, coverage, gates, runner, store, trace
+from assay import alerts, auth, cost, coverage, gates, ingest, runner, store, trace
+from assay.auth import Principal
 from assay.config import Settings
+from assay.ingest import CallEvent, DocumentEvent, EventBatch, ExtractionEvent, ReviewEvent, StageRunEvent
 from assay.measures import GROUPS, REGISTRY
 from assay.scheduler import Scheduler
 
@@ -24,65 +31,8 @@ STATIC = Path(__file__).parent / "static"
 
 # ---------- request bodies ----------
 
-class CallEvent(BaseModel):
-    call_id: str
-    stage: str
-    ts: datetime
-    document_id: Optional[str] = None
-    model_declared: Optional[str] = None
-    model_served: Optional[str] = None
-    resolving_layer: Optional[str] = None
-    gate_reason: Optional[str] = None
-    cost_usd: Optional[float] = None
-    code_revision: Optional[str] = None
-    segment: Optional[str] = None
-    document_type: Optional[str] = None
-    latency_ms: Optional[float] = None
-    status: Optional[str] = None
-
-
-class DocumentEvent(BaseModel):
-    document_id: str
-    received_at: datetime
-    completed_at: Optional[datetime] = None
-    status: Optional[str] = None
-    processing_mode: Optional[str] = None
-    file_hash: Optional[str] = None
-    segment: Optional[str] = None
-    document_type: Optional[str] = None
-    delivered_downstream: Optional[bool] = None
-    page_count: Optional[int] = None
-
-
-class StageRunEvent(BaseModel):
-    document_id: str
-    stage: str
-    status: str
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
-    did_work: Optional[bool] = None
-
-
-class IndexedEvent(BaseModel):
-    document_id: str
-    has_positions: bool
-    segment: Optional[str] = None
-    document_type: Optional[str] = None
-
-
-class ReviewEvent(BaseModel):
-    review_id: str
-    document_id: str
-    ts: datetime
-    kind: str = Field("review", description="review, or rework for fixing an error")
-    minutes: Optional[float] = Field(None, description="Priced at the rate card's hourly rate")
-    cost_usd: Optional[float] = Field(None, description="Use instead of minutes if you know the cost")
-    reviewer: Optional[str] = None
-    stage: Optional[str] = None
-
-
 class RateIn(BaseModel):
-    source: str = Field("*", description='A source name, or "*" for every source')
+    source: Optional[str] = Field(None, description='Defaults to your own source (all sources for a platform key); "*" needs a platform key')
     rates: Dict[str, Optional[float]] = Field(..., description="Rate key → value; null removes it")
 
 
@@ -116,7 +66,7 @@ class GateRequest(BaseModel):
 
 
 class SLOIn(BaseModel):
-    source: str = Field("*", description='A source name, or "*" for every source')
+    source: Optional[str] = Field(None, description='Defaults to your own source; "*" needs a platform key')
     measure_id: str
     dimension: Optional[str] = Field(None, description="Omit for the overall value")
     slice_value: Optional[str] = Field(None, description="Omit to require every slice of the dimension")
@@ -124,14 +74,30 @@ class SLOIn(BaseModel):
     note: Optional[str] = None
 
 
+class KeyIn(BaseModel):
+    name: str = Field(..., max_length=128, description="What uses it, e.g. 'invoice pipeline (prod)'")
+    tenant: Optional[str] = Field(None, description="Defaults to your own tenant; '*' needs a platform key")
+    scopes: List[str] = Field(..., examples=[["ingest"], ["read"], ["manage"]])
+    expires_in_days: Optional[int] = Field(None, ge=1, le=3650)
+
+
 REQUIRED_LINEAGE = ("prompt", "model", "build", "corpus")
 GROUP_OF = {mid: g for g, ids in GROUPS.items() for mid in ids}
+
+TAGS = [
+    {"name": "ingest", "description": "Send pipeline events. Scope: `ingest`. Every write is idempotent by id."},
+    {"name": "results", "description": "Measures, runs, alerts, traces, cost. Scope: `read`."},
+    {"name": "operate", "description": "Runs, backfill, SLOs, rates and release gates. Scope: `manage`."},
+    {"name": "keys", "description": "Create and revoke API keys. Scope: `admin`."},
+]
 
 
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or Settings.from_env()
     engine = store.make_engine(settings.store_url)
     scheduler = Scheduler(engine, settings)
+    authn = auth.Authenticator(engine, settings.admin_key, settings.auth_mode)
+    limiter = auth.RateLimiter(settings.rate_limit_per_min)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -139,8 +105,20 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         yield
         scheduler.stop()
 
-    app = FastAPI(title="Assay", version="0.2.0", lifespan=lifespan,
-                  description="Evaluation and observability for document-intelligence pipelines.")
+    app = FastAPI(
+        title="Assay API", version="1.0.0", lifespan=lifespan, openapi_tags=TAGS,
+        description=(
+            "Evaluation and observability for document-intelligence pipelines.\n\n"
+            "**Authentication:** send `Authorization: Bearer <key>` (or `X-API-Key`). Keys belong to one "
+            "tenant and carry scopes: `ingest`, `read`, `manage` (includes read), `admin` (everything). "
+            "A tenant key can only see and write its own tenant (source `events:<tenant>`).\n\n"
+            "**Connecting:** send events to `POST /v1/events` (all record types in one request, up to "
+            f"{ingest.MAX_BATCH} records), or point an OpenTelemetry collector at `/v1/otlp` "
+            "(OTLP/HTTP, JSON encoding). Writes are upserts by id, so retrying a batch is always safe."))
+
+    if settings.cors_origins:
+        app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["*"],
+                           allow_headers=["Authorization", "X-API-Key", "X-Tenant", "Content-Type"])
 
     if settings.auto_demo:
         demo_lock, demo_state = threading.Lock(), {"ready": False}
@@ -159,32 +137,60 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                         demo_state["ready"] = True
             return await call_next(request)
 
-    def auth(x_api_key: Optional[str] = Header(None)):
-        if settings.api_key and x_api_key != settings.api_key:
-            raise HTTPException(401, "Missing or wrong X-API-Key header.")
+    # ---------- auth ----------
 
-    def tenant_of(x_tenant: Optional[str] = Header(None)) -> str:
-        return x_tenant or "default"
+    bearer = HTTPBearer(auto_error=False, description="Assay API key")
+    header_key = APIKeyHeader(name="X-API-Key", auto_error=False, description="Assay API key (alternative header)")
 
-    def upsert(table, rows: List[dict], key: str):
-        """Insert, or update only the fields each row actually sent, so a later
-        event (say, a completion) doesn't blank fields an earlier one set."""
-        if not rows:
-            return 0
-        insert = sqlite_insert if engine.dialect.name == "sqlite" else pg_insert
-        groups: Dict[tuple, List[dict]] = {}
-        for r in rows:
-            groups.setdefault(tuple(sorted(r)), []).append(r)
-        with engine.begin() as conn:
-            for cols, batch in groups.items():
-                stmt = insert(table)
-                updates = {c: stmt.excluded[c] for c in cols if c not in (key, "tenant")}
-                stmt = stmt.on_conflict_do_update(index_elements=[key], set_=updates) if updates \
-                    else stmt.on_conflict_do_nothing(index_elements=[key])
-                conn.execute(stmt, batch)
-        return len(rows)
+    def principal(request: Request, cred: Optional[HTTPAuthorizationCredentials] = Security(bearer),
+                  key: Optional[str] = Security(header_key)) -> Principal:
+        token = cred.credentials if cred else key
+        p = authn.authenticate(token)
+        if p is None:
+            raise HTTPException(401, "Missing, invalid, revoked or expired API key. Send it as "
+                                     "'Authorization: Bearer <key>'.", headers={"WWW-Authenticate": "Bearer"})
+        who = f"key:{p.key_id}" if p.key_id else f"{p.mode}:{request.client.host if request.client else '?'}"
+        retry = limiter.check(who)
+        if retry:
+            raise HTTPException(429, "Rate limit reached for this key; slow down or ask for a higher limit.",
+                                headers={"Retry-After": str(retry)})
+        return p
 
-    # ---------- dashboard ----------
+    def require(scope: str):
+        def dep(p: Principal = Depends(principal)) -> Principal:
+            if not p.can(scope):
+                raise HTTPException(403, f"This key lacks the '{scope}' scope (it has: {', '.join(sorted(p.scopes))}).")
+            return p
+        return dep
+
+    def check_source(p: Principal, source: str) -> None:
+        if not p.can_source(source):
+            raise HTTPException(403, f"This key can only access events:{p.tenant}.")
+
+    def own_source(p: Principal, source: Optional[str]) -> str:
+        """Resolve a settings scope: default to the key's own source; '*' only for platform keys."""
+        if source in (None, ""):
+            return "*" if p.platform else f"events:{p.tenant}"
+        if source == "*" and not p.platform:
+            raise HTTPException(403, "Only a platform key can change settings for every source.")
+        if source != "*":
+            check_source(p, source)
+        return source
+
+    def resolve(p: Principal, source: str):
+        check_source(p, source)
+        try:
+            return runner.resolve_source(source, engine, settings)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+
+    def tenant_for(p: Principal, x_tenant: Optional[str]) -> str:
+        try:
+            return p.write_tenant(x_tenant)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+
+    # ---------- dashboard and health ----------
 
     @app.get("/", include_in_schema=False)
     def dashboard():
@@ -194,62 +200,57 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def healthz():
         return {"ok": True}
 
+    @app.get("/v1/whoami", tags=["results"], summary="The key you're using, and whether auth is on")
+    def whoami(p: Principal = Depends(principal)):
+        return p.public() | {"auth_required": authn.required()}
+
     # ---------- catalog and results ----------
 
-    @app.get("/v1/measures", dependencies=[Depends(auth)])
-    def list_measures():
+    @app.get("/v1/measures", tags=["results"])
+    def list_measures(p: Principal = Depends(require("read"))):
         return [m.describe() | {"group": GROUP_OF.get(m.id)} for m in REGISTRY.values()]
 
-    @app.get("/v1/sources", dependencies=[Depends(auth)])
-    def list_sources():
+    @app.get("/v1/sources", tags=["results"])
+    def list_sources(p: Principal = Depends(require("read"))):
         with engine.connect() as conn:
             seen = [r[0] for r in conn.execute(select(store.measure_runs.c.source).distinct())]
             tenants = set()
             for t in (store.event_documents, store.event_calls):
                 tenants |= {r[0] for r in conn.execute(select(t.c.tenant).distinct())}
         available = (["sql"] if settings.source_url else []) + sorted(f"events:{t}" for t in tenants)
+        if not p.platform:
+            available, seen = [f"events:{p.tenant}"], [s for s in seen if s == f"events:{p.tenant}"]
         return {"configured": available, "with_results": sorted(seen)}
 
-    @app.post("/v1/runs", dependencies=[Depends(auth)])
-    def create_run(req: RunRequest):
-        unknown = [m for m in (req.measures or []) if m not in REGISTRY]
-        if unknown:
-            raise HTTPException(422, f"Unknown measures: {', '.join(unknown)}")
-        try:
-            source = runner.resolve_source(req.source, engine, settings)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-        run_id = runner.run_measures(engine, source, runner.window_for_days(req.days), req.measures,
-                                     notify=settings.notifier(), alert_min_n=settings.alert_min_n,
-                                     alert_after_runs=settings.alert_after_runs)
-        return runner.latest_run(engine, source.name) | {"run_id": run_id}
-
-    @app.get("/v1/runs/latest", dependencies=[Depends(auth)])
-    def get_latest(source: str):
+    @app.get("/v1/runs/latest", tags=["results"])
+    def get_latest(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
         out = runner.latest_run(engine, source)
         if not out:
-            raise HTTPException(404, f"No runs yet for source '{source}'. POST /v1/runs first.")
+            raise HTTPException(404, f"No runs yet for source '{source}'. POST /v1/runs or /v1/backfill first.")
         return out
 
-    @app.get("/v1/measures/{measure_id}/history", dependencies=[Depends(auth)])
+    @app.get("/v1/measures/{measure_id}/history", tags=["results"])
     def get_history(measure_id: str, source: str, dimension: Optional[str] = None,
-                    slice_value: Optional[str] = None):
+                    slice_value: Optional[str] = None, p: Principal = Depends(require("read"))):
+        check_source(p, source)
         if measure_id not in REGISTRY:
             raise HTTPException(404, f"Unknown measure '{measure_id}'.")
         return runner.history(engine, source, measure_id, dimension, slice_value)
 
-
-    @app.get("/v1/overview", dependencies=[Depends(auth)])
-    def overview(source: str):
-        """Everything the landing page needs in one call."""
+    @app.get("/v1/overview", tags=["results"], summary="Everything the landing page needs in one call")
+    def overview(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
         latest = runner.latest_run(engine, source)
         if not latest:
-            raise HTTPException(404, f"No runs yet for source '{source}'. POST /v1/runs first.")
+            raise HTTPException(404, f"No runs yet for source '{source}'. POST /v1/runs or /v1/backfill first.")
         a = store.alerts
         with engine.connect() as conn:
             open_alerts = [_alert(r) for r in conn.execute(
                 select(a).where(and_(a.c.source == source, a.c.state == "open")).order_by(desc(a.c.opened_at)))]
             slos = alerts.load_slos(conn, source)
+            run_count = len(conn.execute(select(store.measure_runs.c.id)
+                                         .where(store.measure_runs.c.source == source)).all())
         slo_status = []
         for s_ in slos:
             m, res = REGISTRY.get(s_["measure_id"]), latest["measures"].get(s_["measure_id"])
@@ -270,159 +271,58 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         counts = {"measured": 0, "unmeasured": 0}
         for m in latest["measures"].values():
             counts[m["status"]] += 1
-        with engine.connect() as conn:
-            run_count = len(conn.execute(select(store.measure_runs.c.id)
-                                         .where(store.measure_runs.c.source == source)).all())
         return {"run": {k: latest[k] for k in ("run_id", "source", "started_at", "window")}, "run_count": run_count,
                 "counts": counts, "open_alerts": open_alerts, "slos": slo_status,
                 "changes": runner.changes(engine, source, settings.alert_min_n),
-                "scheduler": scheduler.status()}
+                "scheduler": scheduler.status() if p.platform else {"enabled": scheduler.enabled}}
 
-    @app.get("/v1/changes", dependencies=[Depends(auth)])
-    def get_changes(source: str, limit: int = 12):
+    @app.get("/v1/changes", tags=["results"])
+    def get_changes(source: str, limit: int = 12, p: Principal = Depends(require("read"))):
+        check_source(p, source)
         return runner.changes(engine, source, settings.alert_min_n, limit)
 
-    # ---------- alerts and SLOs ----------
-
-    @app.get("/v1/alerts", dependencies=[Depends(auth)])
-    def list_alerts(source: Optional[str] = None, state: str = "all", limit: int = 100):
+    @app.get("/v1/alerts", tags=["results"])
+    def list_alerts(source: Optional[str] = None, state: str = "all", limit: int = 100,
+                    p: Principal = Depends(require("read"))):
         a = store.alerts
         cond = []
         if source:
+            check_source(p, source)
             cond.append(a.c.source == source)
-        if state in ("open", "resolved"):
+        elif not p.platform:
+            cond.append(a.c.source == f"events:{p.tenant}")
+        if state in ("open", "resolved", "pending"):
             cond.append(a.c.state == state)
-        q = select(a).order_by(desc(a.c.last_seen_at)).limit(limit)
+        q = select(a).order_by(desc(a.c.last_seen_at)).limit(min(int(limit), 1000))
         if cond:
             q = q.where(and_(*cond))
         with engine.connect() as conn:
             return [_alert(r) for r in conn.execute(q)]
 
-    @app.get("/v1/slos", dependencies=[Depends(auth)])
-    def list_slos():
-        with engine.connect() as conn:
-            return [dict(r._mapping) for r in conn.execute(select(store.slos).order_by(store.slos.c.measure_id))]
-
-    @app.put("/v1/slos", dependencies=[Depends(auth)])
-    def put_slo(slo: SLOIn):
-        m = REGISTRY.get(slo.measure_id)
-        if not m:
-            raise HTTPException(404, f"Unknown measure '{slo.measure_id}'.")
-        if m.higher_is_better is None:
-            raise HTTPException(422, f"{m.name} has no good direction, so it can't take an SLO. "
-                                     "Its anomaly band still alerts on moves either way.")
-        if slo.dimension and slo.dimension not in m.dimensions:
-            raise HTTPException(422, f"{m.name} is sliced by {', '.join(m.dimensions)}, not {slo.dimension}.")
-        t = store.slos
-        scope = and_(t.c.source == slo.source, t.c.measure_id == slo.measure_id,
-                     t.c.dimension.is_(None) if slo.dimension is None else t.c.dimension == slo.dimension,
-                     t.c.slice_value.is_(None) if slo.slice_value is None else t.c.slice_value == slo.slice_value)
-        with engine.begin() as conn:
-            conn.execute(delete(t).where(scope))
-            sid = conn.execute(t.insert().values(**slo.model_dump(), updated_at=datetime.utcnow())).inserted_primary_key[0]
-        return {"id": sid, **slo.model_dump()}
-
-    @app.delete("/v1/slos/{slo_id}", dependencies=[Depends(auth)])
-    def delete_slo(slo_id: int):
-        with engine.begin() as conn:
-            gone = conn.execute(delete(store.slos).where(store.slos.c.id == slo_id)).rowcount
-        if not gone:
-            raise HTTPException(404, f"No SLO with id {slo_id}.")
-        return {"deleted": slo_id}
-
-    # ---------- tracing ----------
-
-    @app.get("/v1/documents", dependencies=[Depends(auth)])
+    @app.get("/v1/documents", tags=["results"], summary="Documents to investigate: slowest, stuck, lost, recent")
     def list_documents(source: str, view: str = "slowest", days: float = 7, segment: Optional[str] = None,
-                       limit: int = 25):
+                       limit: int = 25, p: Principal = Depends(require("read"))):
         if view not in trace.VIEWS:
             raise HTTPException(422, f"view must be one of {', '.join(trace.VIEWS)}")
-        try:
-            src = runner.resolve_source(source, engine, settings)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-        return trace.find_documents(src, runner.window_for_days(days), view, limit, segment)
+        return trace.find_documents(resolve(p, source), runner.window_for_days(days), view, min(limit, 500), segment)
 
-    @app.get("/v1/trace/{document_id}", dependencies=[Depends(auth)])
-    def get_trace(document_id: str, source: str):
-        try:
-            src = runner.resolve_source(source, engine, settings)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-        out = trace.build_trace(src, document_id)
+    @app.get("/v1/trace/{document_id}", tags=["results"], summary="One document through every stage and call")
+    def get_trace(document_id: str, source: str, p: Principal = Depends(require("read"))):
+        out = trace.build_trace(resolve(p, source), document_id)
         if out is None:
             raise HTTPException(404, f"No document '{document_id}' in {source}.")
         return out
 
-    @app.get("/v1/cron", include_in_schema=False)
-    def cron(authorization: Optional[str] = Header(None)):
-        """Run every scheduled source once. For hosts without a long-running
-        process (Vercel Cron). Requires CRON_SECRET."""
-        if not settings.cron_secret or authorization != f"Bearer {settings.cron_secret}":
-            raise HTTPException(401, "Set CRON_SECRET and send it as a Bearer token.")
-        if not settings.schedule_sources:
-            raise HTTPException(422, "Set ASSAY_SCHEDULE_SOURCES to the sources to run.")
-        scheduler.run_once()
-        return scheduler.status()
+    @app.get("/v1/coverage", tags=["results"], summary="Which measures your data can answer, and what unlocks the rest")
+    def get_coverage(source: str, days: float = 7, p: Principal = Depends(require("read"))):
+        return coverage.compute(resolve(p, source), runner.window_for_days(days), runner.load_rates(engine, source))
 
-    # ---------- onboarding ----------
-
-    @app.get("/v1/coverage", dependencies=[Depends(auth)])
-    def get_coverage(source: str, days: float = 7):
-        """Which measures this source can answer, and which field would unlock the rest."""
-        try:
-            src = runner.resolve_source(source, engine, settings)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-        return coverage.compute(src, runner.window_for_days(days), runner.load_rates(engine, source))
-
-    @app.post("/v1/backfill", dependencies=[Depends(auth)])
-    def post_backfill(req: BackfillRequest):
-        """Replay past days so baselines and alerts work from day one."""
-        try:
-            src = runner.resolve_source(req.source, engine, settings)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-        return runner.backfill(engine, src, req.days, req.window_days, settings.alert_min_n,
-                               settings.alert_after_runs)
-
-    # ---------- cost ----------
-
-    @app.get("/v1/cost/rates", dependencies=[Depends(auth)])
-    def get_rates(source: str = "*"):
-        return {"source": source, "rates": runner.load_rates(engine, source) if source != "*" else
-                {r.key: r.value for r in _rate_rows("*")},
-                "keys": cost.RATE_KEYS}
-
-    def _rate_rows(src):
-        with engine.connect() as conn:
-            return conn.execute(select(store.cost_rates).where(store.cost_rates.c.source == src)).all()
-
-    @app.put("/v1/cost/rates", dependencies=[Depends(auth)])
-    def put_rates(body: RateIn):
-        unknown = [k for k in body.rates if k not in cost.RATE_KEYS]
-        if unknown:
-            raise HTTPException(422, f"Unknown rate {', '.join(unknown)}. Known: {', '.join(cost.RATE_KEYS)}.")
-        if any(v is not None and v < 0 for v in body.rates.values()):
-            raise HTTPException(422, "Rates can't be negative.")
-        t = store.cost_rates
-        with engine.begin() as conn:
-            for k, v in body.rates.items():
-                conn.execute(delete(t).where(and_(t.c.source == body.source, t.c.key == k)))
-                if v is not None:
-                    conn.execute(t.insert().values(source=body.source, key=k, value=v, updated_at=datetime.utcnow()))
-        return get_rates(body.source)
-
-    @app.get("/v1/cost/breakdown", dependencies=[Depends(auth)])
-    def cost_breakdown(source: str, by: str = "document_type", days: float = 7):
-        """Cost per document by component for each value of `by`, computed live."""
+    @app.get("/v1/cost/breakdown", tags=["results"], summary="Cost per document by component, per category")
+    def cost_breakdown(source: str, by: str = "document_type", days: float = 7,
+                       p: Principal = Depends(require("read"))):
         if by not in ("document_type", "segment", "processing_mode"):
             raise HTTPException(422, "by must be document_type, segment or processing_mode")
-        try:
-            src = runner.resolve_source(source, engine, settings)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-        ledger = cost.build_ledger(src, runner.window_for_days(days), runner.load_rates(engine, source))
+        ledger = cost.build_ledger(resolve(p, source), runner.window_for_days(days), runner.load_rates(engine, source))
         if ledger is None or not ledger.documents:
             raise HTTPException(404, "No documents in this window.")
         n = len(ledger.documents)
@@ -436,14 +336,108 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "rows": cost.breakdown(ledger, by), "models": cost.spend_by_model(ledger),
                 "coverage": ledger.coverage, "notes": ledger.notes()}
 
-    @app.get("/v1/scheduler", dependencies=[Depends(auth)])
-    def scheduler_status():
-        return scheduler.status()
+    @app.get("/v1/cost/rates", tags=["results"])
+    def get_rates(source: Optional[str] = None, p: Principal = Depends(require("read"))):
+        src = own_source(p, source)
+        if src == "*":
+            with engine.connect() as conn:
+                rates = {r.key: r.value for r in conn.execute(
+                    select(store.cost_rates).where(store.cost_rates.c.source == "*"))}
+        else:
+            rates = runner.load_rates(engine, src)
+        return {"source": src, "rates": rates, "keys": cost.RATE_KEYS}
 
-    # ---------- release gates ----------
+    @app.get("/v1/slos", tags=["results"])
+    def list_slos(p: Principal = Depends(require("read"))):
+        t = store.slos
+        q = select(t).order_by(t.c.measure_id)
+        if not p.platform:
+            q = q.where(or_(t.c.source == f"events:{p.tenant}", t.c.source == "*"))
+        with engine.connect() as conn:
+            return [dict(r._mapping) for r in conn.execute(q)]
 
-    @app.post("/v1/gates/evaluate", dependencies=[Depends(auth)])
-    def evaluate_gate(req: GateRequest):
+    @app.get("/v1/gates", tags=["results"])
+    def list_gates(limit: int = 20, p: Principal = Depends(require("read"))):
+        g = store.gate_decisions
+        q = select(g).order_by(desc(g.c.id)).limit(min(limit, 500))
+        if not p.platform:
+            q = q.where(g.c.tenant == p.tenant)
+        with engine.connect() as conn:
+            rows = conn.execute(q).all()
+        return [{"id": r.id, "created_at": r.created_at.isoformat(), "outcome": r.outcome,
+                 "lineage": r.lineage, **r.detail} for r in rows]
+
+    # ---------- operate ----------
+
+    @app.post("/v1/runs", tags=["operate"], summary="Compute every measure now")
+    def create_run(req: RunRequest, p: Principal = Depends(require("manage"))):
+        unknown = [m for m in (req.measures or []) if m not in REGISTRY]
+        if unknown:
+            raise HTTPException(422, f"Unknown measures: {', '.join(unknown)}")
+        source = resolve(p, req.source)
+        run_id = runner.run_measures(engine, source, runner.window_for_days(req.days), req.measures,
+                                     notify=settings.notifier(), alert_min_n=settings.alert_min_n,
+                                     alert_after_runs=settings.alert_after_runs)
+        return runner.latest_run(engine, source.name) | {"run_id": run_id}
+
+    @app.post("/v1/backfill", tags=["operate"], summary="Replay past days so baselines work from day one")
+    def post_backfill(req: BackfillRequest, p: Principal = Depends(require("manage"))):
+        return runner.backfill(engine, resolve(p, req.source), req.days, req.window_days, settings.alert_min_n,
+                               settings.alert_after_runs)
+
+    @app.put("/v1/slos", tags=["operate"])
+    def put_slo(slo: SLOIn, p: Principal = Depends(require("manage"))):
+        source = own_source(p, slo.source)
+        m = REGISTRY.get(slo.measure_id)
+        if not m:
+            raise HTTPException(404, f"Unknown measure '{slo.measure_id}'.")
+        if m.higher_is_better is None:
+            raise HTTPException(422, f"{m.name} has no good direction, so it can't take an SLO. "
+                                     "Its anomaly band still alerts on moves either way.")
+        if slo.dimension and slo.dimension not in m.dimensions:
+            raise HTTPException(422, f"{m.name} is sliced by {', '.join(m.dimensions)}, not {slo.dimension}.")
+        t = store.slos
+        body = slo.model_dump() | {"source": source}
+        scope = and_(t.c.source == source, t.c.measure_id == slo.measure_id,
+                     t.c.dimension.is_(None) if slo.dimension is None else t.c.dimension == slo.dimension,
+                     t.c.slice_value.is_(None) if slo.slice_value is None else t.c.slice_value == slo.slice_value)
+        with engine.begin() as conn:
+            conn.execute(delete(t).where(scope))
+            sid = conn.execute(t.insert().values(**body, updated_at=datetime.utcnow())).inserted_primary_key[0]
+        return {"id": sid, **body}
+
+    @app.delete("/v1/slos/{slo_id}", tags=["operate"])
+    def delete_slo(slo_id: int, p: Principal = Depends(require("manage"))):
+        t = store.slos
+        cond = [t.c.id == slo_id]
+        if not p.platform:
+            cond.append(t.c.source == f"events:{p.tenant}")
+        with engine.begin() as conn:
+            gone = conn.execute(delete(t).where(and_(*cond))).rowcount
+        if not gone:
+            raise HTTPException(404, f"No SLO with id {slo_id} that this key can change.")
+        return {"deleted": slo_id}
+
+    @app.put("/v1/cost/rates", tags=["operate"])
+    def put_rates(body: RateIn, p: Principal = Depends(require("manage"))):
+        source = own_source(p, body.source)
+        unknown = [k for k in body.rates if k not in cost.RATE_KEYS]
+        if unknown:
+            raise HTTPException(422, f"Unknown rate {', '.join(unknown)}. Known: {', '.join(cost.RATE_KEYS)}.")
+        if any(v is not None and v < 0 for v in body.rates.values()):
+            raise HTTPException(422, "Rates can't be negative.")
+        t = store.cost_rates
+        with engine.begin() as conn:
+            for k, v in body.rates.items():
+                conn.execute(delete(t).where(and_(t.c.source == source, t.c.key == k)))
+                if v is not None:
+                    conn.execute(t.insert().values(source=source, key=k, value=v, updated_at=datetime.utcnow()))
+        return get_rates(source, p)
+
+    @app.post("/v1/gates/evaluate", tags=["operate"], summary="Advance, hold or roll back a release")
+    def evaluate_gate(req: GateRequest, x_tenant: Optional[str] = Header(None),
+                      p: Principal = Depends(require("manage"))):
+        tenant = tenant_for(p, x_tenant) if not p.platform or x_tenant else "*"
         missing = [k for k in REQUIRED_LINEAGE if not req.lineage.get(k)]
         if missing:
             raise HTTPException(422, f"Lineage must record: {', '.join(missing)}. "
@@ -455,54 +449,92 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         body = decision.to_dict()
         with engine.begin() as conn:
             gid = conn.execute(store.gate_decisions.insert().values(
-                created_at=datetime.utcnow(), outcome=decision.outcome,
+                created_at=datetime.utcnow(), outcome=decision.outcome, tenant=tenant,
                 lineage=req.lineage, detail=body)).inserted_primary_key[0]
         return {"id": gid, "lineage": req.lineage, **body}
 
-    @app.get("/v1/gates", dependencies=[Depends(auth)])
-    def list_gates(limit: int = 20):
-        g = store.gate_decisions
-        with engine.connect() as conn:
-            rows = conn.execute(select(g).order_by(desc(g.c.id)).limit(limit)).all()
-        return [{"id": r.id, "created_at": r.created_at.isoformat(), "outcome": r.outcome,
-                 "lineage": r.lineage, **r.detail} for r in rows]
+    @app.get("/v1/scheduler", tags=["operate"])
+    def scheduler_status(p: Principal = Depends(require("manage"))):
+        if not p.platform:
+            raise HTTPException(403, "The scheduler is instance-wide; only a platform key can see it.")
+        return scheduler.status()
 
-    # ---------- event ingest (multi-tenant path) ----------
+    @app.get("/v1/cron", include_in_schema=False)
+    def cron(authorization: Optional[str] = Header(None)):
+        """Run every scheduled source once. For hosts without a long-running
+        process (Vercel Cron). Requires CRON_SECRET."""
+        if not settings.cron_secret or authorization != f"Bearer {settings.cron_secret}":
+            raise HTTPException(401, "Set CRON_SECRET and send it as a Bearer token.")
+        if not settings.schedule_sources:
+            raise HTTPException(422, "Set ASSAY_SCHEDULE_SOURCES to the sources to run.")
+        scheduler.run_once()
+        return scheduler.status()
 
-    @app.post("/v1/events/calls", dependencies=[Depends(auth)])
-    def ingest_calls(events: List[CallEvent], tenant: str = Depends(tenant_of)):
-        return {"ingested": upsert(store.event_calls,
-                                   [e.model_dump() | {"tenant": tenant} for e in events], "call_id")}
+    # ---------- keys ----------
 
-    @app.post("/v1/events/documents", dependencies=[Depends(auth)])
-    def ingest_documents(events: List[DocumentEvent], tenant: str = Depends(tenant_of)):
-        return {"ingested": upsert(store.event_documents,
-                                   [e.model_dump(exclude_unset=True) | {"tenant": tenant} for e in events],
-                                   "document_id")}
+    @app.post("/v1/keys", tags=["keys"], status_code=201,
+              summary="Create a key. The secret is returned once; store it now.")
+    def create_key(body: KeyIn, p: Principal = Depends(require("admin"))):
+        tenant = body.tenant or p.tenant
+        if not p.platform and tenant != p.tenant:
+            raise HTTPException(403, f"This key can only create keys for tenant '{p.tenant}'.")
+        try:
+            row, secret = auth.create_key(engine, tenant, body.name, body.scopes, body.expires_in_days)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        return row | {"key": secret}
 
-    @app.post("/v1/events/stage-runs", dependencies=[Depends(auth)])
-    def ingest_stage_runs(events: List[StageRunEvent], tenant: str = Depends(tenant_of)):
-        with engine.begin() as conn:
-            if events:
-                conn.execute(store.event_stage_runs.insert(),
-                             [e.model_dump() | {"tenant": tenant} for e in events])
-        return {"ingested": len(events)}
+    @app.get("/v1/keys", tags=["keys"])
+    def get_keys(p: Principal = Depends(require("admin"))):
+        return auth.list_keys(engine, p.tenant)
 
-    @app.post("/v1/events/reviews", dependencies=[Depends(auth)])
-    def ingest_reviews(events: List[ReviewEvent], tenant: str = Depends(tenant_of)):
-        bad = [e.review_id for e in events if e.kind not in ("review", "rework")]
-        if bad:
-            raise HTTPException(422, f"kind must be review or rework (review_id {', '.join(bad[:5])}).")
-        return {"ingested": upsert(store.event_reviews,
-                                   [e.model_dump() | {"tenant": tenant} for e in events], "review_id")}
+    @app.delete("/v1/keys/{key_id}", tags=["keys"], summary="Revoke a key immediately")
+    def delete_key(key_id: int, p: Principal = Depends(require("admin"))):
+        if not auth.revoke_key(engine, key_id, p.tenant):
+            raise HTTPException(404, f"No active key {key_id} that this key can revoke.")
+        return {"revoked": key_id}
 
-    @app.post("/v1/events/indexed", dependencies=[Depends(auth)])
-    def ingest_indexed(events: List[IndexedEvent], tenant: str = Depends(tenant_of)):
-        with engine.begin() as conn:
-            if events:
-                conn.execute(store.event_indexed.insert(),
-                             [e.model_dump() | {"tenant": tenant} for e in events])
-        return {"ingested": len(events)}
+    # ---------- ingest ----------
+
+    def too_big(n: int):
+        if n > ingest.MAX_BATCH:
+            raise HTTPException(413, f"{n} records in one request; the limit is {ingest.MAX_BATCH}. Split the batch.")
+
+    @app.post("/v1/events", tags=["ingest"], summary="Send any mix of record types in one request")
+    def ingest_batch(batch: EventBatch, x_tenant: Optional[str] = Header(None),
+                     p: Principal = Depends(require("ingest"))):
+        too_big(sum(len(getattr(batch, k)) for k in ingest.TABLES))
+        return {"tenant": (t := tenant_for(p, x_tenant)), "ingested": ingest.write_batch(engine, batch, t)}
+
+    def one_kind(kind: str, model):
+        def endpoint(events: List[model], x_tenant: Optional[str] = Header(None),
+                     p: Principal = Depends(require("ingest"))):
+            too_big(len(events))
+            return {"ingested": ingest.write(engine, kind, events, tenant_for(p, x_tenant))}
+        return endpoint
+
+    for path, kind, model in [("documents", "documents", DocumentEvent), ("stage-runs", "stage_runs", StageRunEvent),
+                              ("calls", "calls", CallEvent), ("reviews", "reviews", ReviewEvent),
+                              ("extractions", "extractions", ExtractionEvent),
+                              ("indexed", "extractions", ExtractionEvent)]:
+        app.add_api_route(f"/v1/events/{path}", one_kind(kind, model), methods=["POST"], tags=["ingest"],
+                          summary=f"Send {path.replace('-', ' ')}", include_in_schema=path != "indexed")
+
+    @app.post("/v1/otlp/v1/traces", tags=["ingest"],
+              summary="OpenTelemetry traces (OTLP/HTTP, JSON). Point a collector's otlphttp exporter at /v1/otlp",
+              description=ingest.OTEL_MAPPING)
+    async def otlp_traces(request: Request, x_tenant: Optional[str] = Header(None),
+                          p: Principal = Depends(require("ingest"))):
+        if "json" not in (request.headers.get("content-type") or ""):
+            return JSONResponse({"detail": "Send OTLP/HTTP with JSON encoding (collector: encoding: json)."},
+                                status_code=415)
+        try:
+            batch = ingest.from_otlp(await request.json())
+        except Exception as exc:
+            raise HTTPException(400, f"Couldn't read the OTLP payload: {exc}")
+        too_big(sum(len(getattr(batch, k)) for k in ingest.TABLES))
+        counts = ingest.write_batch(engine, batch, tenant_for(p, x_tenant))
+        return {"partialSuccess": {}, "ingested": counts}
 
     app.state.engine = engine
     app.state.settings = settings

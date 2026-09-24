@@ -117,7 +117,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                 start = received + timedelta(seconds=30 * s)
                 fail_p = 0.12 if (stage == "field_extraction" and 4 <= age < 6) else 0.004
                 failed = stage not in STUBS and rng.random() < fail_p
-                runs.append(dict(tenant=TENANT, document_id=did, stage=stage,
+                runs.append(dict(tenant=TENANT, run_id=f"{did}-{stage}", document_id=did, stage=stage,
                                  status="failed" if failed else "success", started_at=start,
                                  finished_at=start + timedelta(seconds=0.1 if stage in STUBS else 20),
                                  did_work=stage not in STUBS))
@@ -157,7 +157,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                                         ts=rts + timedelta(minutes=30), kind="rework",
                                         minutes=round(rng.lognormvariate(1.8, 0.5), 1),
                                         reviewer=f"reviewer-{rng.randint(1, 6)}", stage="field_extraction"))
-            indexed.append(dict(tenant=TENANT, document_id=did, has_positions=rng.random() < 0.85,
+            indexed.append(dict(tenant=TENANT, extraction_id=f"{did}-x", document_id=did, has_positions=rng.random() < 0.85,
                                 segment=segment, document_type=itype))
 
     with engine.begin() as conn:

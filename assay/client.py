@@ -2,7 +2,7 @@
 
     from assay.client import Assay   # or copy this file and: from client import Assay
 
-    assay = Assay("https://assay.example.com", tenant="acme", api_key="...")
+    assay = Assay("https://assay.example.com", api_key="ak_...")   # an `ingest` key for your tenant
     assay.document("inv-123", received_at=start, document_type="invoice", segment="Northwind", page_count=2)
     with assay.stage("inv-123", "field_extraction") as run:   # records timing, status, failures
         result = extract(doc)
@@ -12,8 +12,11 @@
     assay.review("inv-123", minutes=4.5, reviewer="sam")
     assay.flush()   # also happens automatically every `batch_size` records and at exit
 
-Records are buffered and sent in batches. A failed send is retried on the next
-flush and never raises into your pipeline unless you pass strict=True.
+Records are buffered and sent together to POST /v1/events, one request per
+flush. Every record has an id, so a retried batch never duplicates anything.
+A failed send is kept and retried on the next flush, and never raises into
+your pipeline unless you pass strict=True. The key decides the tenant; pass
+`tenant` only with a platform key.
 """
 from __future__ import annotations
 
@@ -30,8 +33,8 @@ from typing import Callable, Dict, List, Optional
 
 log = logging.getLogger("assay.client")
 
-PATHS = {"documents": "/v1/events/documents", "stage_runs": "/v1/events/stage-runs",
-         "calls": "/v1/events/calls", "reviews": "/v1/events/reviews", "indexed": "/v1/events/indexed"}
+KINDS = ("documents", "stage_runs", "calls", "reviews", "extractions")
+MAX_PER_REQUEST = 5000
 
 
 def _jsonable(v):
@@ -39,12 +42,12 @@ def _jsonable(v):
 
 
 class Assay:
-    def __init__(self, url: str, tenant: str = "default", api_key: Optional[str] = None,
-                 batch_size: int = 200, timeout: float = 10.0, strict: bool = False,
-                 transport: Optional[Callable[[str, list], None]] = None):
+    def __init__(self, url: str, api_key: Optional[str] = None, tenant: Optional[str] = None,
+                 batch_size: int = 500, timeout: float = 10.0, strict: bool = False,
+                 transport: Optional[Callable[[str, dict], None]] = None):
         self.url, self.tenant, self.api_key = url.rstrip("/"), tenant, api_key
         self.batch_size, self.timeout, self.strict = batch_size, timeout, strict
-        self._buf: Dict[str, List[dict]] = {k: [] for k in PATHS}
+        self._buf: Dict[str, List[dict]] = {k: [] for k in KINDS}
         self._lock = threading.Lock()
         self._send = transport or self._http
         atexit.register(self.flush)
@@ -58,6 +61,7 @@ class Assay:
 
     def stage_run(self, document_id: str, stage: str, status: str, **fields) -> None:
         """started_at, finished_at, did_work."""
+        fields.setdefault("run_id", uuid.uuid4().hex)
         self._add("stage_runs", dict(document_id=document_id, stage=stage, status=status, **fields))
 
     @contextmanager
@@ -86,41 +90,50 @@ class Assay:
         self._add("reviews", dict(review_id=review_id or uuid.uuid4().hex, document_id=document_id, kind=kind,
                                   minutes=minutes, ts=ts or datetime.utcnow(), **fields))
 
-    def extraction(self, document_id: str, has_positions: bool, **fields) -> None:
+    def extraction(self, document_id: str, has_positions: bool, field: Optional[str] = None, **fields) -> None:
         """One extracted value; has_positions if it carries a source location."""
-        self._add("indexed", dict(document_id=document_id, has_positions=has_positions, **fields))
+        self._add("extractions", dict(document_id=document_id, has_positions=has_positions, field=field, **fields))
 
     # ---------- sending ----------
 
     def _add(self, kind: str, record: dict) -> None:
         with self._lock:
             self._buf[kind].append({k: _jsonable(v) for k, v in record.items()})
-            full = len(self._buf[kind]) >= self.batch_size
+            full = sum(len(b) for b in self._buf.values()) >= self.batch_size
         if full:
             self.flush()
 
     def flush(self) -> None:
-        # Documents first so calls and reviews always have something to attach to.
-        for kind in ("documents", "stage_runs", "calls", "reviews", "indexed"):
-            with self._lock:
-                batch, self._buf[kind] = self._buf[kind], []
-            if not batch:
-                continue
+        with self._lock:
+            pending, self._buf = self._buf, {k: [] for k in KINDS}
+        # Send in chunks under the server's per-request limit; documents go first
+        # because the server writes each request's documents before its other records.
+        while any(pending.values()):
+            payload, room = {}, MAX_PER_REQUEST
+            for k in KINDS:
+                take, pending[k] = pending[k][:room], pending[k][room:]
+                if take:
+                    payload[k] = take
+                    room -= len(take)
             try:
-                self._send(PATHS[kind], batch)
+                self._send("/v1/events", payload)
             except Exception:
-                with self._lock:
-                    self._buf[kind] = batch + self._buf[kind]  # keep for the next flush
+                with self._lock:  # keep everything unsent for the next flush
+                    for k in KINDS:
+                        self._buf[k] = payload.get(k, []) + pending[k] + self._buf[k]
                 if self.strict:
                     raise
-                log.warning("Assay: couldn't send %d %s; will retry on next flush", len(batch), kind,
-                            exc_info=True)
+                log.warning("Assay: couldn't send %d records; will retry on next flush",
+                            sum(len(v) for v in payload.values()), exc_info=True)
+                return
 
-    def _http(self, path: str, batch: list) -> None:
-        headers = {"Content-Type": "application/json", "X-Tenant": self.tenant}
+    def _http(self, path: str, payload: dict) -> None:
+        headers = {"Content-Type": "application/json"}
         if self.api_key:
-            headers["X-API-Key"] = self.api_key
-        req = urllib.request.Request(self.url + path, data=json.dumps(batch).encode(), headers=headers,
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.tenant:
+            headers["X-Tenant"] = self.tenant
+        req = urllib.request.Request(self.url + path, data=json.dumps(payload).encode(), headers=headers,
                                      method="POST")
         for attempt in range(3):
             try:

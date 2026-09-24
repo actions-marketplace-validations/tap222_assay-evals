@@ -35,12 +35,12 @@ class EventsSource:
 
     def stage_runs(self, window: Window) -> Iterable[StageRun]:
         t = store.event_stage_runs
-        return [StageRun(**{k: v for k, v in r.items() if k not in ("tenant", "id")})
+        return [StageRun(**{k: v for k, v in r.items() if k not in ("tenant", "run_id")})
                 for r in self._rows(t, t.c.started_at, window)]
 
     def indexed(self, window: Window) -> Iterable[IndexedRecord]:
         t = store.event_indexed
-        return [IndexedRecord(**{k: v for k, v in r.items() if k not in ("tenant", "id")})
+        return [IndexedRecord(**{k: v for k, v in r.items() if k not in ("tenant", "extraction_id", "field")})
                 for r in self._rows(t)]
 
     def reviews(self, window: Window) -> Optional[Iterable[ReviewRecord]]:
@@ -63,7 +63,7 @@ class EventsSource:
                                 .order_by(r.c.started_at)).all()
             calls = conn.execute(select(c).where(and_(c.c.tenant == self.tenant, c.c.document_id == document_id))
                                  .order_by(c.c.ts)).all()
-        drop = ("tenant", "id", "delivered_downstream")
+        drop = ("tenant", "run_id", "delivered_downstream")
         clean = lambda row: {k: v for k, v in row._mapping.items() if k not in drop}
         return (DocumentRecord(**clean(doc)), [StageRun(**clean(x)) for x in runs],
                 [CallRecord(**clean(x)) for x in calls])
