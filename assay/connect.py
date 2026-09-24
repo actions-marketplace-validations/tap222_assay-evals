@@ -267,7 +267,7 @@ def handoff(base_url: str, source: str, key: Optional[str], method: str) -> str:
                  "service:\n  pipelines:\n    traces: {{ exporters: [otlphttp/assay] }}\n\n"
                  "Agents: standard gen_ai tool spans become agent steps. Add assay.answer, and for tests\n"
                  "assay.run_id / assay.case_id, on the root span."),
-        "python": ("Install the SDK (standard library only): pip install ./sdk/python from the Assay repo. Then:\n\n"
+        "python": ("Install the SDK (standard library only): pip install assay-evals. Then:\n\n"
                    "import assay_sdk as assay\nassay.init(\"{url}\", key=\"<API key>\")\n\n"
                    "with assay.run(\"refund_request\", input=message) as run:     # one run of the system\n"
                    "    run.llm(model=\"claude-sonnet-5\", cost_usd=0.002)\n"

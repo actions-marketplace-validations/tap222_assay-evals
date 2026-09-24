@@ -292,8 +292,16 @@ to refuse to run open.
 **New integrations should use the event schema.** [`docs/event-schema.md`](docs/event-schema.md)
 describes one contract for runs, steps and outcomes (feedback, test checks, corrections,
 expectations). It streams to `POST /v1/ingest`, and its JSON Schema is at `GET /v1/schema`.
-The Python SDK in [`sdk/python`](sdk/python/README.md) (`pip install ./sdk/python`, no
-dependencies) is the smallest way to send it. The endpoints below keep working.
+The Python SDK, [`assay-evals`](sdk/python/README.md), is the smallest way to send it:
+`pip install assay-evals`, with no dependencies. Until the first release is on PyPI, use
+`pip install ./sdk/python`. The endpoints below keep working.
+
+**Releasing the SDK:** bump `version` in `sdk/python/pyproject.toml` and `__version__` in
+`sdk/python/assay_sdk/__init__.py`, then `git tag sdk-v<version> && git push origin
+sdk-v<version>`. The `Publish SDK` workflow checks that the tag matches both versions, runs
+the SDK tests, publishes to TestPyPI, installs it from there, and then waits for your
+approval before publishing to PyPI. The one-time PyPI setup is described at the top of
+`.github/workflows/publish-sdk.yml`.
 
 | Endpoint | Use |
 |---|---|

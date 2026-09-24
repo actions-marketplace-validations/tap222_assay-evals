@@ -654,7 +654,7 @@ async function renderWay(way,source){
 service:
   pipelines:
     traces: { exporters: [otlphttp/assay] }`,
-    python:`# pip install ./sdk/python   (standard library only)
+    python:`# pip install assay-evals   (standard library only)
 import assay_sdk as assay
 assay.init("${host}", key="<your key>")
 
