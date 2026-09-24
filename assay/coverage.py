@@ -39,6 +39,7 @@ REQUIRES: Dict[str, List[tuple]] = {
     "handoff_loss": [("documents", "completed_at"), ("documents", "file_hash")],
     "reported_error_rate": [("errors", None)],
     "errors_by_origin": [("errors", None), ("stage_runs", "outputs")],
+    "prompt_error_rate": [("errors", None), ("calls", "prompt_version")],
 }
 
 # Fields that make a working measure more useful: (record, field, why).
@@ -49,7 +50,9 @@ IMPROVES: Dict[str, List[tuple]] = {
     "cost_per_document": [("reviews", None, "add review and rework time: people cost is usually most of it"),
                           ("calls", "resolving_layer", "separate fallback escalation from normal inference")],
     "time_to_complete_p90": [("documents", "processing_mode", "compare realtime and batch service levels")],
-    "call_latency_p95": [("calls", "model_served", "see which model is slow")],
+    "call_latency_p95": [("calls", "model_served", "see which model is slow"),
+                         ("calls", "prompt_version", "compare prompt versions")],
+    "call_error_rate": [("calls", "prompt_version", "compare prompt versions")],
     "errors_by_origin": [("stage_runs", "sequence", "order steps exactly instead of by start time")],
 }
 

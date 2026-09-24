@@ -31,6 +31,8 @@ The demo is a generated pipeline serving four customers. It has four staged inci
 - a new customer shifting the input mix
 - one customer's documents going missing downstream
 - one customer's field extraction escalating to a pricier fallback model
+- two prompt releases: `classify_document` v8 (better) and `extract_fields` v13 (misreads dates;
+  flagged as a regression)
 - a bad release of the validation step that corrupts correct totals, plus everyday errors
   (OCR losing totals, misclassification, misread dates) reported by reviewers and customers
 
@@ -252,6 +254,53 @@ origin step. Two measures make this alertable:
 On a document's trace, **Step by step** shows every step's values side by side, with the wrong
 ones marked, plus a form to report another.
 
+## Prompt versions
+
+Every model call and step can say which prompt it ran: `prompt_id` (e.g. `extract_fields`) and
+`prompt_version` (e.g. `v13`). If you don't label versions, use `Assay.prompt_version(template)`,
+a hash of the prompt text, so the same text always gets the same version.
+
+```python
+assay.call(doc_id, stage="field_extraction", prompt_id="extract_fields", prompt_version="v13", ...)
+with assay.stage(doc_id, "field_extraction", prompt_id="extract_fields", prompt_version="v13") as step: ...
+# from CI, on release: the template (for diffs) and what changed
+assay.register_prompt("extract_fields", template=text, version="v13", note="Accept European day-first dates")
+```
+
+The same fields work as OpenTelemetry attributes (`assay.prompt_id`, `assay.prompt_version` on
+a model-call span or its stage span) and in the SQL mapping (`calls.prompt_id`,
+`calls.prompt_version`). `POST /v1/prompts` registers a version over HTTP.
+
+**Registry.** Every version seen in traffic is recorded with when it first and last served;
+registering from CI adds the template, note and author. Nothing needs registering up front.
+For database sources, the registry is filled in during scheduled runs.
+
+**Per-version results.** The **Prompts** tab and `GET /v1/prompts` show, for every version in
+the window: documents handled, error rate, fallback rate, p95 latency and cost per call. Each
+version is compared with the one before it:
+- **Error rate:** documents with a reported error that started at a step running this version.
+  When a wrong earlier decision caused the error, it's charged to that earlier step's prompt.
+  The comparison is adjusted to the new version's document-type mix, so a version that got
+  harder documents isn't blamed for them. It comes with a 95% interval, and a verdict of
+  *worse*, *better*, *no clear difference* or *too few* (under 30 documents per version).
+- Fallback and call-error rates are compared as proportions; latency and cost as relative changes.
+- **Diff** shows exactly what changed between two registered templates.
+
+**Catching a bad release.** A new version has no history of its own, so an anomaly band can't
+judge it. Instead, after every run, each version is compared with its predecessor over the
+last 30 days. A *worse* verdict opens a **prompt regression** alert, which reaches Slack or a
+webhook like any other. It resolves when the version is shown no worse, or stops serving.
+*Too few* keeps an open alert open. In the demo, `extract_fields` v13 was flagged 2 days
+after release.
+
+**Everywhere else:**
+- Charts mark when a prompt version went live, so a jump lines up with its cause.
+- Error diagnoses and the step-by-step view show the prompt each step ran.
+- Call error rate, latency, model mismatch and total spend can be broken down by `prompt`.
+- `prompt_error_rate` alerts per version.
+- Release gates warn when the `prompt` in a decision's lineage (`id@version`) isn't in the
+  registry.
+
 ## What you get
 
 | View | Answers |
@@ -259,6 +308,7 @@ ones marked, plus a form to report another.
 | **Overview** | What's broken right now? Open anomalies, SLO state, and the slices that moved beyond noise since the last run. Refreshes every minute. |
 | **Cost** | Fully loaded cost per document and per page, stacked by component over time; cost by document type, segment or mode; AI spend by model with the fallback share; the rate card. |
 | **Measures** | Each measure over time, with the expected range it's judged against, any SLO line, a breakdown of every slice, and an SLO editor. |
+| **Prompts** | Every prompt version: documents, error rate, fallback, latency, cost, a verdict against the previous version (adjusted for document mix), what changed, and a diff. |
 | **Errors** | Where reported wrong values start: by step in pipeline order, by verdict, field, document type, segment and model; recent errors with their diagnosis; a report form. |
 | **Trace** | Why was *this* document slow, lost or wrong? A timeline of every stage and model call, each step's values side by side with wrong ones marked, and problems flagged. |
 | **Alerts** | Pending, open and resolved alerts, with how long each lasted. |
@@ -275,7 +325,7 @@ Every alert has an **Investigate** link to its slice. `#measures/<id>` and
 | **Operational health** | `document_volume`, `stage_failure_rate`, `call_error_rate`, `call_latency_p95`, `time_to_complete_p90`, `input_mix_drift` |
 | **Cost** | `cost_per_document`, `cost_per_page`, `total_spend`, `human_touch_rate`, `cost_coverage` (see Cost below) |
 | **Pipeline integrity** | `fallback_attribution` (does each call record which model tier answered, and why), `model_mismatch` (served ≠ declared), `revision_coverage`, `noop_stage_rate` (stages that report success without doing work), `source_positions` (values a reviewer can click through to), `handoff_loss` (finished documents missing downstream) |
-| **Errors** | `reported_error_rate`, `errors_by_origin` (see Error analysis) |
+| **Errors** | `reported_error_rate`, `errors_by_origin`, `prompt_error_rate` (see Error analysis and Prompt versions) |
 | **Accuracy** | `split_stp`, `field_accuracy`, `superseded_value_rate`, `escape_rate`: listed as *unmeasured* until labelled ground truth can be ingested |
 
 Every measure reports an overall row plus one row per slice value. A missing dimension is
@@ -383,6 +433,7 @@ cost.py       cost ledger: components, estimates, breakdowns
 alerts.py     bands, SLO matching, pending → open → resolved, webhook
 trace.py      per-document trace and flags; slowest / stuck / lost finders
 rootcause.py  error localization: which step a wrong value started at, and how
+prompts.py    prompt registry, per-version results, version-vs-previous comparison, diffs
 coverage.py   what a source can answer, and which field unlocks the rest
 client.py     standard-library SDK for pushing events
 auth.py       API keys, scopes, tenant isolation, rate limits

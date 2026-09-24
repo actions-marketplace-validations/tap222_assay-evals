@@ -56,6 +56,7 @@ class CostLine:
     processing_mode: Optional[str] = None
     stage: Optional[str] = None
     model_served: Optional[str] = None
+    prompt: Optional[str] = None
 
 
 @dataclass
@@ -139,7 +140,7 @@ def build_ledger(source, window: Window, rates: Optional[Dict[str, float]] = Non
                 component = "ai_estimated"
         else:
             cov["priced_calls"] += 1
-        line(c.document_id, component, usd, stage=c.stage, model_served=c.model_served)
+        line(c.document_id, component, usd, stage=c.stage, model_served=c.model_served, prompt=c.prompt)
 
     for r in reviews or []:
         kind = "rework" if (r.kind or "").lower() == "rework" else "review"

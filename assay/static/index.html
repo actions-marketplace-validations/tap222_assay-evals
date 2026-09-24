@@ -157,6 +157,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
     <a href="#measures" data-tab="measures">Measures</a>
     <a href="#cost" data-tab="cost">Cost</a>
     <a href="#errors" data-tab="errors">Errors</a>
+    <a href="#prompts" data-tab="prompts">Prompts</a>
     <a href="#trace" data-tab="trace">Trace</a>
     <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
     <a href="#gates" data-tab="gates">Release gates</a>
@@ -171,6 +172,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
   <section id="tab-measures" class="stack" hidden></section>
   <section id="tab-cost" class="stack" hidden></section>
   <section id="tab-errors" class="stack" hidden></section>
+  <section id="tab-prompts" class="stack" hidden></section>
   <section id="tab-trace" class="stack" hidden></section>
   <section id="tab-alerts" class="stack" hidden></section>
   <section id="tab-gates" class="stack" hidden></section>
@@ -239,13 +241,15 @@ function chart(h,m){
   for(let i=0;i<=4;i++){const v=lo+(hi-lo)*i/4,yy=y(v);g+=`<line x1="${L}" x2="${W-R}" y1="${yy}" y2="${yy}" stroke="var(--line)" stroke-width="1"/><text x="${L-8}" y="${yy+4}" text-anchor="end">${esc(axis(v))}</text>`}
   const ticks=Math.min(6,pts.length);for(let i=0;i<ticks;i++){const p=pts[Math.round(i*(pts.length-1)/(ticks-1||1))];g+=`<text x="${x(p.at)}" y="${H-8}" text-anchor="middle">${p.at.slice(5,10)}</text>`}
   if(h.band){const bx=x(pts[Math.max(0,pts.length-1-h.band.points)].at);g+=`<rect x="${bx}" y="${y(Math.min(h.band.high,hi))}" width="${W-R-bx}" height="${Math.max(0,y(Math.max(h.band.low,lo))-y(Math.min(h.band.high,hi)))}" fill="var(--band)"/>`}
+  (h.changes||[]).forEach((c,i)=>{const t=new Date(c.at).getTime();if(t<t0||t>t1)return;const xx=x(c.at);
+    g+=`<line x1="${xx}" x2="${xx}" y1="${T}" y2="${H-B}" stroke="var(--next,#7a4fb0)" stroke-width="1.2" stroke-dasharray="3 3"><title>${esc(c.prompt_id)} ${esc(c.version)} went live${c.note?": "+esc(c.note):""}</title></line><text x="${xx>W-R-170?xx-4:xx+4}" text-anchor="${xx>W-R-170?"end":"start"}" y="${T+12+(i%3)*12}" style="fill:var(--accent-ink)">${esc(c.prompt_id)} ${esc(c.version)}</text>`});
   if(h.slo)g+=`<line x1="${L}" x2="${W-R}" y1="${y(h.slo.target)}" y2="${y(h.slo.target)}" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="6 4"/><text x="${W-R}" y="${y(h.slo.target)-5}" text-anchor="end" style="fill:var(--warn)">SLO ${esc(fmt(h.slo.target,m.unit))}</text>`;
   const d=pts.map((p,i)=>(i?"L":"M")+x(p.at).toFixed(1)+","+y(p.value).toFixed(1)).join(" ");
   g+=`<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
   g+=pts.map((p,i)=>{const last=i===pts.length-1,out=last&&h.band&&(p.value<h.band.low||p.value>h.band.high);
     return `<circle cx="${x(p.at)}" cy="${y(p.value)}" r="${last?4.5:2.5}" fill="${out?"var(--bad)":"var(--accent)"}"><title>${esc(p.at.slice(0,16).replace("T"," "))} · ${esc(fmt(p.value,m.unit))} · n=${p.n}</title></circle>`}).join("");
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.name)} over time">${g}</svg>
-    <div class="legend"><span><i style="background:var(--accent)"></i>value per run</span>${h.band?`<span><i style="background:var(--band)"></i>expected range from the last ${h.band.points} runs</span>`:""}${h.slo?`<span><i style="border-top:2px dashed var(--warn);height:0"></i>SLO target</span>`:""}</div>`;
+    <div class="legend"><span><i style="background:var(--accent)"></i>value per run</span>${h.band?`<span><i style="background:var(--band)"></i>expected range from the last ${h.band.points} runs</span>`:""}${h.slo?`<span><i style="border-top:2px dashed var(--warn);height:0"></i>SLO target</span>`:""}${(h.changes||[]).length?`<span><i style="border-top:2px dashed var(--accent-ink);height:0"></i>a prompt version went live</span>`:""}</div>`;
 }
 
 /* ---------- sources, refresh ---------- */
@@ -266,7 +270,7 @@ async function refresh(){
 function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
-  ["overview","measures","cost","errors","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
+  ["overview","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
 }
 
 /* ---------- overview ---------- */
@@ -274,7 +278,7 @@ function alertRow(a,{actions=true}={}){
   const m=S.catalog[a.measure_id]||{name:a.measure_id};
   const since=a.state==="resolved"?`resolved ${ago(a.resolved_at)} · lasted ${dur(a.opened_at,a.resolved_at)}`:`${a.state==="pending"?"pending since":"open for"} ${dur(a.opened_at)} · last seen ${ago(a.last_seen_at)}`;
   return `<div class="alert ${a.kind} ${a.state}"><span class="stripe"></span>
-    <div><div class="msg">${esc(a.message)}</div><div class="meta">${a.kind==="slo"?"SLO breach":"Anomaly"} · ${esc(since)}${a.n?` · n=${a.n}`:""}</div></div>
+    <div><div class="msg">${esc(a.message)}</div><div class="meta">${a.kind==="slo"?"SLO breach":a.kind==="regression"?`Prompt regression · <a href="#prompts">compare versions</a>`:"Anomaly"} · ${esc(since)}${a.n?` · n=${a.n}`:""}</div></div>
     ${actions?`<button class="link" type="button" data-open="${esc(a.measure_id)}" data-dim="${esc(a.dimension||"")}" data-val="${esc(a.slice_value||"")}">Investigate</button>`:""}</div>`;
 }
 // One line per measure and dimension, however many slices breach it.
@@ -291,7 +295,7 @@ function sloGroups(list){
 function renderOverview(){
   const o=S.overview;if(!o)return;
   const open=o.open_alerts,breached=o.slos.filter(s=>s.state==="breached"),judged=o.slos.filter(s=>s.state!=="unmeasured");
-  const anomalies=open.filter(a=>a.kind==="anomaly"),sloAlerts=open.filter(a=>a.kind==="slo");
+  const anomalies=open.filter(a=>a.kind==="anomaly"||a.kind==="regression"),sloAlerts=open.filter(a=>a.kind==="slo");
   const sched=o.scheduler;
   const learning=o.run_count<4?`<div class="panel flags"><div class="flag"><span class="chip warn">learning</span>Alerts compare each slice with its recent past and need 4 runs; this source has ${o.run_count}. <a href="#connect">Backfill history</a> to get baselines now.</div></div>`:"";
   $("#tab-overview").innerHTML=learning+`
@@ -503,10 +507,12 @@ assay.document(doc_id, received_at=start, document_type="invoice",
                segment=customer, page_count=pages)
 with assay.stage(doc_id, "ocr", sequence=1) as step:
     text = ocr(pages); step.output("_text", text)       # what each step produced,
-with assay.stage(doc_id, "field_extraction", sequence=2) as step:
+with assay.stage(doc_id, "field_extraction", sequence=2,
+                 prompt_id="extract_fields", prompt_version="v13") as step:
     fields = extract(text); step.outputs.update(fields)  # so errors can be traced
 assay.call(doc_id, stage="field_extraction", model_declared="claude-sonnet-5",
-           model_served=resp.model, latency_ms=ms, cost_usd=price, status="success")
+           model_served=resp.model, latency_ms=ms, cost_usd=price, status="success",
+           prompt_id="extract_fields", prompt_version="v13")
 assay.review(doc_id, minutes=4.5, reviewer="sam")      # people time, for cost
 assay.report_error(doc_id, "total", expected="1,240.00")  # a wrong value: Assay finds the step
 assay.document(doc_id, received_at=start, completed_at=datetime.utcnow())`;
@@ -607,7 +613,7 @@ const VERDICT={introduced:["Introduced","var(--bad)","The first step to produce 
 const vchip=v=>`<span class="chip" style="color:#fff;background:${VERDICT[v]?.[1]||"var(--muted)"}">${esc(VERDICT[v]?.[0]||v)}</span>`;
 function errorCard(r,{link=true}={}){
   return `<div class="alert"><span class="stripe" style="background:${VERDICT[r.verdict]?.[1]}"></span><div>
-    <div class="msg"><b class="mono">${esc(r.field)}</b> ${r.kind==="missing"?"missing":r.kind==="extra"?"shouldn't exist":r.expected?`should be <b>${esc(r.expected)}</b>${r.observed!=null?`, was <b>${esc(r.observed)}</b>`:""}`:`is wrong${r.observed!=null?`: was <b>${esc(r.observed)}</b>`:""}`} ${vchip(r.verdict)} ${r.origin_stage?`at <b class="mono">${esc(r.origin_stage)}</b>`:""}</div>
+    <div class="msg"><b class="mono">${esc(r.field)}</b> ${r.kind==="missing"?"missing":r.kind==="extra"?"shouldn't exist":r.expected?`should be <b>${esc(r.expected)}</b>${r.observed!=null?`, was <b>${esc(r.observed)}</b>`:""}`:`is wrong${r.observed!=null?`: was <b>${esc(r.observed)}</b>`:""}`} ${vchip(r.verdict)} ${r.origin_stage?`at <b class="mono">${esc(r.origin_stage)}</b>`:""}${r.origin_prompt?` <span class="ref">prompt ${esc(r.origin_prompt)}</span>`:""}</div>
     <div class="meta">${esc(r.explanation)}</div>
     ${r.signals?.length?`<div class="meta" style="color:var(--warn)">At that step: ${r.signals.map(esc).join(" · ")}</div>`:""}
     <div class="meta">${link?`<a href="#trace/${encodeURIComponent(r.document_id)}" class="mono">${esc(r.document_id)}</a> · `:""}${esc(r.source||"reported")}${r.reporter?` by ${esc(r.reporter)}`:""}${r.reported_at?` · ${esc(ago(r.reported_at))}`:""}</div></div><span></span></div>`;
@@ -673,6 +679,43 @@ async function renderErrors(){
   wireReport(renderErrors);
 }
 
+/* ---------- prompts ---------- */
+const VCHIP={worse:"bad","better":"good","no clear difference":"neutral","too few":"neutral"};
+function pct(v,d=2){return v==null?"—":(v*100).toFixed(d)+"%"}
+function change(c){if(!c)return"";const x=c.change;return `<span class="ref ${x>0.05?"worse":x<-0.05?"better":""}">${x>0?"+":""}${(x*100).toFixed(0)}%</span>`}
+async function renderPrompts(){
+  const days=+(store.get("assay-prompt-days")||30);
+  let d=null,err="";try{d=await api(`/v1/prompts?${q({source:src(),days})}`)}catch(e){err=e.message}
+  const regress=(S.overview?.open_alerts||[]).filter(a=>a.kind==="regression");
+  if(!d||!d.prompts.length){$("#tab-prompts").innerHTML=`<div class="panel stack"><div><h2>Prompt versions</h2><p class="sub">${esc(err||"No calls or steps record a prompt version yet.")}</p></div>
+    <p class="note">Send <code>prompt_id</code> and <code>prompt_version</code> with each model call or step (<code>assay.call(..., prompt_id="extract_fields", prompt_version="v13")</code>, span attributes <code>assay.prompt_id</code> / <code>assay.prompt_version</code>, or the SQL mapping). No version labels? Use <code>Assay.prompt_version(template)</code>, a hash of the prompt text. Register releases from CI with <code>POST /v1/prompts</code> to add the template and what changed.</p></div>`;return}
+  $("#tab-prompts").innerHTML=`
+  ${regress.length?`<div class="panel">${regress.map(a=>alertRow(a,{actions:false})).join("")}</div>`:""}
+  <div class="panel-head"><div><h2>Prompt versions</h2><p class="sub">Every version that ran in the last ${days} days, compared with the one before it. The error-rate verdict is adjusted for document-type mix and needs ${30}+ documents per version.</p></div>
+    <select id="prompt-days" aria-label="Window">${[7,30,90].map(x=>`<option value="${x}" ${x===days?"selected":""}>${x} days</option>`).join("")}</select></div>
+  ${d.prompts.map(p=>`<div class="panel stack">
+    <div class="panel-head"><div><h3 class="mono">${esc(p.prompt_id)}</h3><p class="sub">Used by ${p.stages.map(s=>`<span class="mono">${esc(s)}</span>`).join(", ")} · live: <b>${esc(p.live_version)}</b></p></div></div>
+    <div class="scroll"><table><tr><th>Version</th><th>Live from</th><th class="num">Documents</th><th class="num">Error rate</th><th>vs previous</th><th class="num">Fallback</th><th class="num">p95 latency</th><th class="num">Cost / call</th><th>What changed</th><th></th></tr>
+    ${[...p.versions].reverse().map(v=>{const c=v.vs_previous,e=c?.error_rate;
+      return `<tr><td class="mono"><b>${esc(v.version)}</b>${v.version===p.live_version?` <span class="chip good">live</span>`:""}</td>
+        <td class="ref">${esc((v.first_seen||"").slice(0,10))}</td><td class="num">${v.documents.toLocaleString()}</td>
+        <td class="num ${e?.verdict==="worse"?"worse":e?.verdict==="better"?"better":""}">${pct(v.error_rate)}</td>
+        <td>${c?`<span class="chip ${VCHIP[e.verdict]||"neutral"}">${esc(e.verdict)}</span>${e.diff!=null?` <span class="ref">${e.diff>0?"+":""}${(e.diff*100).toFixed(2)} pts [${(e.low*100).toFixed(2)}, ${(e.high*100).toFixed(2)}] vs ${esc(c.previous)}</span>`:""}`:`<span class="ref">first version</span>`}</td>
+        <td class="num">${pct(v.fallback_rate,1)}${c?.fallback_rate?.verdict==="worse"?` <span class="worse">▲</span>`:""}</td>
+        <td class="num">${v.latency_p95_ms!=null?esc(fmt(v.latency_p95_ms,"ms")):"—"} ${change(c?.latency_p95_ms)}</td>
+        <td class="num">${v.cost_per_call!=null?esc(money(v.cost_per_call)):"—"} ${change(c?.cost_per_call)}</td>
+        <td>${esc(v.note||"")}${v.author?` <span class="ref">· ${esc(v.author)}</span>`:""}</td>
+        <td>${c&&v.has_template?`<button class="link" type="button" data-diff="${esc(p.prompt_id)}" data-a="${esc(c.previous)}" data-b="${esc(v.version)}">Diff</button>`:""}</td></tr>`}).join("")}
+    </table></div><div class="diff-out" data-for="${esc(p.prompt_id)}"></div></div>`).join("")}
+  <p class="note">Error rate: of the documents a version handled, the share with a reported error that started at a step running it (or, for errors caused by an earlier wrong decision, at that earlier step). Unreported errors aren't counted.</p>`;
+  $("#prompt-days").onchange=e=>{store.set("assay-prompt-days",e.target.value);renderPrompts()};
+  document.querySelectorAll("[data-diff]").forEach(b=>b.onclick=async()=>{
+    const box=document.querySelector(`.diff-out[data-for="${CSS.escape(b.dataset.diff)}"]`);
+    try{const r=await api(`/v1/prompts/${encodeURIComponent(b.dataset.diff)}/diff?${q({a:b.dataset.a,b:b.dataset.b,source:src()})}`);
+      box.innerHTML=r.available?`<pre class="code">${r.diff.map(l=>`<span style="color:${l.startsWith("+")&&!l.startsWith("+++")?"var(--good)":l.startsWith("-")&&!l.startsWith("---")?"var(--bad)":"inherit"}">${esc(l)}</span>`).join("\n")}</pre>`:`<p class="note">${esc(r.reason)}</p>`}
+    catch(e){box.innerHTML=`<p class="reason">${esc(e.message)}</p>`}});
+}
+
 /* ---------- trace ---------- */
 async function renderTrace(){
   const T=S.trace;
@@ -707,7 +750,7 @@ function stepByStep(ea,id){
   const anyOutputs=steps.some(s=>s.records_outputs);
   const fmtv=v=>v==null?"":typeof v==="object"?JSON.stringify(v):String(v);
   return `<div class="panel stack"><div class="panel-head"><div><h2>Step by step</h2><p class="sub">What each step produced for this document${errs.length?". Red is where a reported value was wrong, green where it was still right":""}.</p></div></div>
-    ${anyOutputs?`<div class="scroll"><table class="lineage"><tr><th>Field</th>${steps.map((s,i)=>`<th>${i+1}. ${esc(s.stage)}${s.status!=="success"?` <span class="worse">(${esc(s.status)})</span>`:""}</th>`).join("")}</tr>
+    ${anyOutputs?`<div class="scroll"><table class="lineage"><tr><th>Field</th>${steps.map((s,i)=>`<th>${i+1}. ${esc(s.stage)}${s.status!=="success"?` <span class="worse">(${esc(s.status)})</span>`:""}${s.prompt?`<br><span class="ref" style="text-transform:none;letter-spacing:0">${esc(s.prompt)}</span>`:""}</th>`).join("")}</tr>
       ${steps.some(s=>s.text)?`<tr><td class="ref">text output</td>${steps.map(s=>`<td class="ref" title="${esc(s.text||"")}">${s.text?esc(s.text.slice(0,28))+"…":""}</td>`).join("")}</tr>`:""}
       ${fields.map(f=>`<tr><td class="mono">${esc(f)}${errs.some(e=>e.field===f)?` <span class="chip bad">reported</span>`:""}</td>${steps.map((s,i)=>{const tl=state[f]?.[i],v=valOf(f)[i];
         const cls=tl?.state==="wrong"||tl?.state==="extra"?"v-wrong":tl?.state==="correct"?"v-correct":tl?.evidence?"v-evidence":"";
@@ -780,7 +823,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","measures","cost","errors","trace","alerts","gates","connect"];
+const TABS=["overview","measures","cost","errors","prompts","trace","alerts","gates","connect"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -797,6 +840,7 @@ async function render(){
     if(t==="measures")await (S.measure?renderMeasureDetail():renderMeasureGrid());
     if(t==="cost")await renderCost();
     if(t==="errors")await renderErrors();
+    if(t==="prompts")await renderPrompts();
     if(t==="trace")await renderTrace();
     if(t==="alerts")await renderAlerts();
     if(t==="gates")await renderGates();

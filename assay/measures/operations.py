@@ -52,7 +52,7 @@ class CallErrorRate(Measure):
     name = "AI call error rate"
     question = "What share of AI calls returned an error or timed out?"
     higher_is_better = False
-    dimensions = ("stage", "model_served")
+    dimensions = ("stage", "model_served", "prompt")
 
     def compute(self, source, window: Window) -> MeasureOutput:
         calls = source.calls(window)
@@ -69,7 +69,7 @@ class CallLatencyP95(Measure):
     question = "How long do the slowest 5% of AI calls take?"
     unit = "ms"
     higher_is_better = False
-    dimensions = ("stage", "model_served")
+    dimensions = ("stage", "model_served", "prompt")
 
     def compute(self, source, window: Window) -> MeasureOutput:
         calls = source.calls(window)

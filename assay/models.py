@@ -15,6 +15,12 @@ from typing import Optional
 UNRECORDED = "(unrecorded)"
 
 
+def prompt_label(prompt_id: Optional[str], version: Optional[str]) -> Optional[str]:
+    if not prompt_id and not version:
+        return None
+    return f"{prompt_id or '(unnamed)'}@{version or '(unversioned)'}"
+
+
 @dataclass
 class CallRecord:
     """One AI model call made by a pipeline stage."""
@@ -32,6 +38,13 @@ class CallRecord:
     document_type: Optional[str] = None
     latency_ms: Optional[float] = None
     status: Optional[str] = None  # e.g. success / error / timeout
+    prompt_id: Optional[str] = None  # which prompt, e.g. "extract_invoice_fields"
+    prompt_version: Optional[str] = None  # a label ("v13") or a content hash
+
+    @property
+    def prompt(self) -> Optional[str]:
+        """"prompt_id@version", the slice used to compare prompt versions."""
+        return prompt_label(self.prompt_id, self.prompt_version)
 
 
 @dataclass
@@ -65,6 +78,13 @@ class StageRun:
     outputs: Optional[dict] = None
     # Position of the step in the pipeline, if known; otherwise start time orders steps.
     sequence: Optional[int] = None
+    # The prompt this step ran, if it's an LLM step (also taken from its calls).
+    prompt_id: Optional[str] = None
+    prompt_version: Optional[str] = None
+
+    @property
+    def prompt(self) -> Optional[str]:
+        return prompt_label(self.prompt_id, self.prompt_version)
 
 
 @dataclass

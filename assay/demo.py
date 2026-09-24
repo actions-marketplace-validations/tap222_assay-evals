@@ -61,6 +61,31 @@ TOUCH = {"invoice": 0.10, "bank_statement": 0.20, "contract": 0.45, "id_document
 VENDORS = ["Acme Supply Co", "Blue Harbor Freight", "Crestline Medical", "Delta Office Partners", "Evergreen Legal LLP"]
 RELEASE_BUG_DAYS = 3  # validation v2.4 shipped 3 days ago and mangles amounts
 
+# Prompt history per AI step: (version, released N days ago, template, what changed).
+PROMPTS = {
+    "document_splitting": ("split_documents", [("v2", None, "Split the file into separate documents. Return page ranges.", None)]),
+    "text_extraction": ("ocr_transcribe", [("v4", None, "Transcribe every page exactly, preserving layout.", None)]),
+    "classification": ("classify_document", [
+        ("v7", None, "Classify the document as one of: invoice, bank_statement, contract, id_document, "
+                     "insurance_claim.\nAnswer with the label only.", None),
+        ("v8", 14, "Classify the document as one of: invoice, bank_statement, contract, id_document, "
+                   "insurance_claim.\nLook at the title and the first table before deciding.\n"
+                   "Answer with the label only.", "Look at the title and first table; fewer contract/claim mix-ups")]),
+    "field_extraction": ("extract_fields", [
+        ("v12", None, "Extract reference, vendor, total and date.\nDates: return ISO 8601 (YYYY-MM-DD).", None),
+        ("v13", 6, "Extract reference, vendor, total and date.\nDates: return ISO 8601 (YYYY-MM-DD).\n"
+                   "Accept European day-first dates (DD/MM/YYYY).", "Accept European day-first dates")]),
+}
+
+
+def prompt_for(stage, age):
+    """(prompt_id, version) a stage ran for a document received `age` days ago."""
+    if stage not in PROMPTS:
+        return None, None
+    pid, versions = PROMPTS[stage]
+    live = [v for v in versions if v[1] is None or age < v[1]]
+    return pid, live[-1][0]
+
 
 def _truth(rng, received, itype):
     total = round(rng.uniform(40, 25000), 2)
@@ -82,8 +107,10 @@ def _step_outputs(rng, truth, itype, pages, age, completed):
     (outputs by stage, [(field, expected, observed, kind)] wrong in the final output)."""
     long_doc = pages >= 10
     garble = long_doc and rng.random() < 0.04                      # OCR loses the total (upstream)
-    misclass = itype is not None and rng.random() < 0.015           # classifier picks the wrong type
-    bad_date = rng.random() < 0.012                                 # extraction misreads the date
+    # classify_document v8 (14 days ago) halves misclassification; extract_fields v13
+    # (6 days ago) starts reading US dates day-first.
+    misclass = itype is not None and rng.random() < (0.008 if age < 14 else 0.022)
+    bad_date = rng.random() < (0.16 if age < 6 else 0.004)
     release_bug = age < RELEASE_BUG_DAYS and rng.random() < 0.10    # validation v2.4 regression
     after = rng.random() < 0.004                                    # right in the pipeline, wrong in delivery
     predicted_type = rng.choice([t for t in TYPES if t and t != itype]) if misclass else itype
@@ -153,6 +180,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
         conn.execute(delete(store.alerts).where(store.alerts.c.source == SOURCE))
         conn.execute(delete(store.slos).where(store.slos.c.source == SOURCE))
         conn.execute(delete(store.cost_rates).where(store.cost_rates.c.source == SOURCE))
+        conn.execute(delete(store.prompt_versions).where(store.prompt_versions.c.tenant == TENANT))
         conn.execute(store.cost_rates.insert(), [dict(source=SOURCE, key=k, value=v, updated_at=now)
                                                  for k, v in EXAMPLE_RATES.items()])
         conn.execute(store.slos.insert(), [dict(source=SOURCE, measure_id=m, dimension=d, slice_value=v,
@@ -198,7 +226,8 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                 runs.append(dict(tenant=TENANT, run_id=f"{did}-{stage}", document_id=did, stage=stage,
                                  status="failed" if failed else "success", started_at=start,
                                  finished_at=start + timedelta(seconds=0.1 if stage in STUBS else 20),
-                                 did_work=stage not in STUBS, sequence=s, outputs=step_out.get(stage)))
+                                 did_work=stage not in STUBS, sequence=s, outputs=step_out.get(stage),
+                                 prompt_id=prompt_for(stage, age)[0], prompt_version=prompt_for(stage, age)[1]))
             for stage in STAGES:
                 ts = received + timedelta(seconds=rng.randint(10, 600))
                 attributed = rng.random() < (0.97 if (stage == "document_splitting" and ago(ts) < rollout) else 0.6)
@@ -215,6 +244,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                 calls.append(dict(
                     tenant=TENANT, call_id=f"{did}-{stage}", stage=stage, ts=ts, document_id=did,
                     model_declared=MODELS[stage], model_served=served,
+                    prompt_id=prompt_for(stage, age)[0], prompt_version=prompt_for(stage, age)[1],
                     resolving_layer=("primary" if served == MODELS[stage] else "fallback_1") if attributed else None,
                     gate_reason=("ok" if served == MODELS[stage] else "low_confidence") if attributed else None,
                     # text extraction isn't priced at all, flash-lite fallbacks never are, and 5% of
@@ -247,13 +277,19 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
         if errors:
             conn.execute(store.event_errors.insert(), errors)
 
+    from assay.ingest import PromptEvent, register_prompts
+    register_prompts(engine, [PromptEvent(prompt_id=pid, version=ver, template=text, note=note,
+                                          author="ml-team" if note else None)
+                              for pid, versions in PROMPTS.values() for ver, _, text, note in versions], TENANT)
+
     # Backfill one run per day over a rolling window, oldest first, so alerts
     # open and resolve in the order they would have live.
     source = EventsSource(engine, TENANT)
     run_ids = []
     for d in range(days - 2 * window_days, -1, -1):
         end = now - timedelta(days=d)
-        run_ids.append(run_measures(engine, source, Window(end - timedelta(days=window_days), end), as_of=end))
+        run_ids.append(run_measures(engine, source, Window(end - timedelta(days=window_days), end), as_of=end,
+                                    prompt_regressions=d < 7))
     with engine.connect() as conn:
         a = store.alerts
         open_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "open"))).all())

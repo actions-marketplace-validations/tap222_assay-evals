@@ -133,6 +133,11 @@ def order_steps(runs: List[StageRun]) -> List[StageRun]:
                                        r.started_at or datetime.min))
 
 
+def step_prompt(step: StageRun, calls) -> Optional[str]:
+    """The prompt version a step ran: its own, else its model calls'."""
+    return step.prompt or next((c.prompt for c in calls if c.stage == step.stage and c.prompt), None)
+
+
 def _signals(step: StageRun, calls) -> List[str]:
     out = []
     if step.status in FAILED_STATUSES:
@@ -171,7 +176,7 @@ def localize(error: ErrorReport, runs: List[StageRun], calls=(),
         evidence = bool(forms) and any(f in t for t in _texts(s.outputs) for f in forms)
         timeline.append({"index": i, "stage": s.stage, "state": state, "value": None if not present else raw,
                          "evidence": evidence, "status": s.status, "records_outputs": s.outputs is not None,
-                         "sequence": s.sequence})
+                         "sequence": s.sequence, "prompt": step_prompt(s, calls)})
 
     present_idx = [t["index"] for t in timeline if t["state"] != "absent"]
     correct_idx = [t["index"] for t in timeline if t["state"] == "correct"]
@@ -241,7 +246,8 @@ def localize(error: ErrorReport, runs: List[StageRun], calls=(),
         if earlier:
             f, i = min(earlier.items(), key=lambda kv: kv[1])
             why += f" {steps[i].stage} had already got {f} wrong on this document, which likely caused this."
-            return _result(error, steps, timeline, "caused_by", origin, why, calls, caused_by={"field": f, "stage": steps[i].stage})
+            return _result(error, steps, timeline, "caused_by", origin, why, calls,
+                           caused_by={"field": f, "stage": steps[i].stage, "index": i})
     return _result(error, steps, timeline, verdict, origin, why, calls)
 
 
@@ -252,6 +258,10 @@ def _result(error, steps, timeline, verdict, origin, why, calls, caused_by=None)
             "reporter": error.reporter, "source": error.source,
             "verdict": verdict, "verdict_label": VERDICTS[verdict],
             "origin_stage": steps[origin].stage if origin is not None else None, "origin_index": origin,
+            # The prompt to hold responsible: for "caused by", the earlier step's, since
+            # that's where the mistake was made; otherwise the origin step's.
+            "origin_prompt": (timeline[caused_by["index"]]["prompt"] if caused_by
+                              else timeline[origin]["prompt"] if origin is not None else None),
             "explanation": why, "caused_by": caused_by,
             "signals": _signals(steps[origin], calls) if origin is not None else [],
             "timeline": timeline}
@@ -275,13 +285,28 @@ def analyze_document(source, document_id: str, errors: Optional[List[ErrorReport
     lineage = [{"field": f, "values": [lookup(s.outputs, f)[1] if lookup(s.outputs, f)[0] else None for s in steps]}
                for f in fields]
     return {"document": doc, "steps": [{"stage": s.stage, "status": s.status, "sequence": s.sequence,
-                                        "records_outputs": s.outputs is not None,
+                                        "records_outputs": s.outputs is not None, "prompt": step_prompt(s, calls),
                                         "text": (_texts(s.outputs) or [None])[0]} for s in steps],
             "lineage": lineage, "errors": results}
 
 
-def summarize(source, window: Window, limit: int = 1000) -> Optional[dict]:
-    """Where errors come from across many documents."""
+def summarize(source, window: Window, limit: int = 1000, include_all: bool = False) -> Optional[dict]:
+    """Where errors come from across many documents. Memoized per run when the
+    source offers a memo (several measures ask for the same summary)."""
+    memo = getattr(source, "memo", None)
+    if memo is not None:
+        key = ("summarize", window, limit)
+        if key not in memo:
+            memo[key] = _summarize(source, window, limit)
+        out = memo[key]
+    else:
+        out = _summarize(source, window, limit)
+    if out is None or include_all:
+        return out
+    return {k: v for k, v in out.items() if k != "recent_all"}
+
+
+def _summarize(source, window: Window, limit: int) -> Optional[dict]:
     errors = source.errors(window) if hasattr(source, "errors") else None
     if errors is None:
         return None
@@ -322,4 +347,6 @@ def summarize(source, window: Window, limit: int = 1000) -> Optional[dict]:
             "by_origin_stage": count("origin_stage"), "by_verdict": count("verdict"),
             "by_field": count("field"), "by_document_type": count("document_type"), "by_segment": count("segment"),
             "by_origin_model": [{"stage": s, "model": m, "errors": n} for (s, m), n in model_at_origin.most_common()],
-            "recent": sorted(results, key=lambda r: r["reported_at"] or "", reverse=True)[:100]}
+            "by_origin_prompt": count("origin_prompt"),
+            "recent": sorted(results, key=lambda r: r["reported_at"] or "", reverse=True)[:100],
+            "recent_all": results}

@@ -248,6 +248,58 @@ def evaluate_run(engine: Engine, run_id: int, min_n: int = 30,
     return {"opened": opened, "resolved": resolved}
 
 
+# ---------- prompt regressions ----------
+
+def evaluate_prompt_regressions(engine: Engine, run_id: int, analysis: dict,
+                                notify: Optional[Callable[[str, dict], None]] = None,
+                                live_since: Optional[datetime] = None) -> Dict[str, List[dict]]:
+    """Open an alert when a prompt version's error rate is worse than the version
+    before it, beyond noise and adjusted for document mix; resolve it when that's
+    no longer true. A new version has no history of its own, so this comparison,
+    not an anomaly band, is what catches a bad release."""
+    runs, alerts_t = store.measure_runs, store.alerts
+    opened, resolved = [], []
+    with engine.begin() as conn:
+        run = conn.execute(select(runs).where(runs.c.id == run_id)).first()
+        now = run.started_at
+        current = {a.slice_value: a for a in conn.execute(select(alerts_t).where(and_(
+            alerts_t.c.source == run.source, alerts_t.c.kind == "regression", alerts_t.c.state == "open")))}
+        worse, cleared = {}, set()
+        for p in analysis.get("prompts", []):
+            for v in p["versions"]:
+                cmp_ = (v.get("vs_previous") or {}).get("error_rate") or {}
+                retired = live_since is not None and v["last_seen"] and v["last_seen"] < live_since.isoformat()
+                if cmp_.get("verdict") == "worse" and not retired:
+                    worse[v["prompt"]] = (v, cmp_)
+                elif retired or cmp_.get("verdict") in ("better", "no clear difference"):
+                    cleared.add(v["prompt"])  # shown no worse, or no longer serving: resolve
+        for label, (v, c) in worse.items():
+            msg = (f"Prompt {label} has a higher error rate than {v['prompt_id']}@{v['vs_previous']['previous']}: "
+                   f"{v['error_rate']:.2%}, +{c['diff'] * 100:.2f} points (95% interval +{c['low'] * 100:.2f} to "
+                   f"+{c['high'] * 100:.2f}), adjusted for document mix, over {v['documents']:,} documents.")
+            fields = dict(last_seen_at=now, run_id=run_id, value=v["error_rate"], n=v["documents"], message=msg,
+                          expected_low=None, expected_high=None, target=None)
+            if label in current:
+                conn.execute(alerts_t.update().where(alerts_t.c.id == current[label].id).values(**fields))
+            else:
+                row = dict(source=run.source, measure_id="prompt_error_rate", dimension="prompt", slice_value=label,
+                           kind="regression", state="open", opened_at=now, streak=1, clear_streak=0, **fields)
+                row["id"] = conn.execute(alerts_t.insert().values(**row)).inserted_primary_key[0]
+                opened.append(row)
+        seen_now = {v["prompt"] for p in analysis.get("prompts", []) for v in p["versions"]}
+        for label, a in current.items():
+            if label in cleared or label not in seen_now:  # "too few" keeps an open alert open
+                conn.execute(alerts_t.update().where(alerts_t.c.id == a.id)
+                             .values(state="resolved", resolved_at=now, run_id=run_id))
+                resolved.append(dict(a._mapping) | {"resolved_at": now})
+    if notify:
+        for a in opened:
+            notify("opened", a)
+        for a in resolved:
+            notify("resolved", a)
+    return {"opened": opened, "resolved": resolved}
+
+
 # ---------- notification ----------
 
 def webhook_notifier(url: str, fmt_kind: str = "slack", public_url: Optional[str] = None,

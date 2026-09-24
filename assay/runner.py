@@ -35,6 +35,7 @@ class CachedSource:
     def __init__(self, source):
         self._source, self._cache = source, {}
         self.name = source.name
+        self.memo = {}  # for derived results several measures share (e.g. the error summary)
 
     def _get(self, method: str, *args):
         key = (method,) + args
@@ -86,7 +87,7 @@ def run_measures(engine: Engine, source, window: Window,
                  as_of: Optional[datetime] = None,
                  notify: Optional[Callable[[str, dict], None]] = None,
                  alert_min_n: int = 30, alert_after_runs: int = 2,
-                 evaluate_alerts: bool = True) -> int:
+                 evaluate_alerts: bool = True, prompt_regressions: bool = True) -> int:
     """Compute and store measures, then evaluate alerts. `as_of` backdates the run (for backfills)."""
     ids = list(measure_ids or REGISTRY)
     cached = CachedSource(source)
@@ -117,9 +118,45 @@ def run_measures(engine: Engine, source, window: Window,
         if rows:
             conn.execute(store.measure_results.insert(), rows)
 
+    _discover_prompts(engine, cached, window)
     if evaluate_alerts:
         alerts.evaluate_run(engine, run_id, min_n=alert_min_n, notify=notify, after_runs=alert_after_runs)
+        if prompt_regressions:  # compares 30 days, so backfills only do it for recent days
+            _prompt_regressions(engine, run_id, cached, window, notify)
     return run_id
+
+
+PROMPT_LOOKBACK_DAYS = 30  # compare versions over this long, whatever the run's window
+
+
+def _prompt_regressions(engine: Engine, run_id: int, source, window: Window, notify) -> None:
+    from assay import prompts, rootcause
+    try:
+        # A run's window can be a day; a release needs both versions in view to compare.
+        lookback = Window(window.end - timedelta(days=PROMPT_LOOKBACK_DAYS), window.end)
+        summary = rootcause.summarize(source, lookback, include_all=True) if hasattr(source, "errors") else None
+        if summary is None:
+            return
+        analysis = prompts.analyze(source, lookback, engine, summary)
+        alerts.evaluate_prompt_regressions(engine, run_id, analysis, notify, live_since=window.start)
+    except Exception:
+        log.exception("Prompt regression check failed for %s", source.name)
+
+
+def _discover_prompts(engine: Engine, source, window: Window) -> None:
+    """Record prompt versions seen in this window, for sources that aren't ingested (SQL)."""
+    from assay import ingest, prompts
+    tenant = prompts.registry_tenant(source.name)
+    try:
+        calls = [{"prompt_id": c.prompt_id, "prompt_version": c.prompt_version, "ts": c.ts}
+                 for c in source.calls(window) or []]
+        runs = [{"prompt_id": r.prompt_id, "prompt_version": r.prompt_version, "started_at": r.started_at}
+                for r in source.stage_runs(window) or []]
+    except Exception:
+        log.exception("Couldn't read prompt versions from %s", source.name)
+        return
+    ingest.discover_prompts(engine, calls, tenant, "ts")
+    ingest.discover_prompts(engine, runs, tenant, "started_at")
 
 
 def backfill(engine: Engine, source, days: int = 30, window_days: float = 1.0,
@@ -147,7 +184,7 @@ def backfill(engine: Engine, source, days: int = 30, window_days: float = 1.0,
             continue
         made.append(run_measures(engine, source, Window(end - timedelta(days=window_days), end), as_of=end,
                                  notify=None, alert_min_n=alert_min_n, alert_after_runs=alert_after_runs,
-                                 evaluate_alerts=fresh))
+                                 evaluate_alerts=fresh, prompt_regressions=d < 7))
     return {"runs_created": len(made), "skipped": skipped, "run_ids": made}
 
 

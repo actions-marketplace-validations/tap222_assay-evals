@@ -38,7 +38,7 @@ class ModelMismatch(Measure):
     name = "Declared vs served model"
     question = "How often is a call served by a different model than it declared?"
     higher_is_better = False
-    dimensions = ("stage", "model_declared")
+    dimensions = ("stage", "model_declared", "prompt")
 
     def compute(self, source, window: Window) -> MeasureOutput:
         calls = source.calls(window)

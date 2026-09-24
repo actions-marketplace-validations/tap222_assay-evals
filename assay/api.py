@@ -8,7 +8,7 @@ See assay/auth.py for scopes and tenant isolation.
 # objects rather than strings to resolve later.
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -19,7 +19,7 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import alerts, auth, cost, coverage, gates, ingest, rootcause, runner, store, trace
+from assay import alerts, auth, cost, coverage, gates, ingest, prompts, rootcause, runner, store, trace
 from assay.auth import Principal
 from assay.config import Settings
 from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EventBatch, ExtractionEvent, ReviewEvent,
@@ -239,7 +239,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         check_source(p, source)
         if measure_id not in REGISTRY:
             raise HTTPException(404, f"Unknown measure '{measure_id}'.")
-        return runner.history(engine, source, measure_id, dimension, slice_value)
+        out = runner.history(engine, source, measure_id, dimension, slice_value)
+        if out["points"]:  # prompt versions that went live in this range: chart markers
+            start = datetime.fromisoformat(out["points"][0]["at"]) - timedelta(days=1)
+            end = datetime.fromisoformat(out["points"][-1]["at"])
+            out["changes"] = prompts.changes_between(engine, prompts.registry_tenant(source), start, end)
+        else:
+            out["changes"] = []
+        return out
 
     @app.get("/v1/overview", tags=["results"], summary="Everything the landing page needs in one call")
     def overview(source: str, p: Principal = Depends(require("read"))):
@@ -401,6 +408,31 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return [{"id": r.id, "created_at": r.created_at.isoformat(), "outcome": r.outcome,
                  "lineage": r.lineage, **r.detail} for r in rows]
 
+    # ---------- prompts ----------
+
+    @app.get("/v1/prompts", tags=["results"], summary="Every prompt version: what it did, and vs the one before")
+    def list_prompts(source: str, days: float = 30, p: Principal = Depends(require("read"))):
+        src = runner.CachedSource(resolve(p, source))
+        window = runner.window_for_days(days)
+        summary = rootcause.summarize(src, window, include_all=True) if hasattr(src, "errors") else None
+        return prompts.analyze(src, window, engine, summary)
+
+    @app.get("/v1/prompts/{prompt_id}/diff", tags=["results"], summary="What changed between two versions")
+    def prompt_diff(prompt_id: str, a: str, b: str, source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        out = prompts.diff(engine, prompts.registry_tenant(source), prompt_id, a, b)
+        if out is None:
+            raise HTTPException(404, f"{prompt_id}@{a} or @{b} isn't in the registry.")
+        return out
+
+    @app.post("/v1/prompts", tags=["ingest"], status_code=201,
+              summary="Register a prompt version (from CI, on release): template and what changed")
+    def register_prompt(body: ingest.PromptEvent, source: Optional[str] = None, x_tenant: Optional[str] = Header(None),
+                        p: Principal = Depends(require("ingest", "manage"))):
+        tenant = prompts.registry_tenant(source) if source and p.platform else tenant_for(p, x_tenant)
+        ingest.register_prompts(engine, [body], tenant)
+        return {"prompt_id": body.prompt_id, "version": body.version, "tenant": tenant}
+
     # ---------- operate ----------
 
     @app.post("/v1/runs", tags=["operate"], summary="Compute every measure now")
@@ -481,6 +513,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         decision = gates.evaluate([gates.GateRule(**r.model_dump()) for r in req.rules],
                                   req.samples, floors, req.required_slices)
         body = decision.to_dict()
+        warnings = []
+        pid, _, ver = req.lineage["prompt"].partition("@")
+        if ver and tenant != "*" and (pid, ver) not in prompts.registry(engine, tenant):
+            warnings.append(f"Prompt {req.lineage['prompt']} isn't in the registry: register it (POST /v1/prompts) "
+                            "so this decision links to its template and production results.")
+        body["warnings"] = warnings
         with engine.begin() as conn:
             gid = conn.execute(store.gate_decisions.insert().values(
                 created_at=datetime.utcnow(), outcome=decision.outcome, tenant=tenant,

@@ -88,7 +88,8 @@ def test_caused_by_an_earlier_error_on_the_same_document():
     runs = PIPE("1,420.00")
     runs[1].outputs = {"document_type": "receipt"}
     r = localize(err(), runs, other_origins={"document_type": (1, True), "total": (2, False)})
-    assert r["verdict"] == "caused_by" and r["caused_by"] == {"field": "document_type", "stage": "classification"}
+    assert r["verdict"] == "caused_by"
+    assert r["caused_by"] == {"field": "document_type", "stage": "classification", "index": 1}
     assert r["origin_stage"] == "field_extraction"
 
 

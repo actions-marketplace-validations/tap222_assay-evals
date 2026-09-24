@@ -129,7 +129,7 @@ class TotalSpend(Measure):
     unit = "usd"
     higher_is_better = None  # grows with volume
     anomaly_alerts = False  # reporting measure: cost per document is what alerts
-    dimensions = ("component", "model_served", "stage", "document_type", "segment")
+    dimensions = ("component", "model_served", "stage", "prompt", "document_type", "segment")
 
     def compute(self, source, window: Window) -> MeasureOutput:
         ledger, why = _ledger_or_reason(self.id, source, window)

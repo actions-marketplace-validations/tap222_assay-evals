@@ -6,7 +6,7 @@ point ASSAY_STORE_URL at Postgres in production.
 from __future__ import annotations
 
 from sqlalchemy import (JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer,
-                        MetaData, String, Table, UniqueConstraint, create_engine)
+                        MetaData, String, Table, Text, UniqueConstraint, create_engine)
 from sqlalchemy.engine import Engine
 
 metadata = MetaData()
@@ -70,7 +70,7 @@ alerts = Table(
     Column("measure_id", String(64), nullable=False),
     Column("dimension", String(64)),
     Column("slice_value", String(256)),
-    Column("kind", String(16), nullable=False),  # anomaly | slo
+    Column("kind", String(16), nullable=False),  # anomaly | slo | regression
     Column("state", String(16), nullable=False, index=True),  # pending | open | resolved
     Column("streak", Integer, nullable=False, default=1),  # consecutive runs the condition held
     Column("clear_streak", Integer, nullable=False, default=0),  # consecutive runs it hasn't, while open
@@ -105,6 +105,8 @@ event_calls = Table(
     Column("document_type", String(128)),
     Column("latency_ms", Float),
     Column("status", String(32)),
+    Column("prompt_id", String(128)),
+    Column("prompt_version", String(64)),
 )
 
 event_documents = Table(
@@ -136,6 +138,23 @@ event_stage_runs = Table(
     Column("did_work", Boolean),
     Column("outputs", JSON),
     Column("sequence", Integer),
+    Column("prompt_id", String(128)),
+    Column("prompt_version", String(64)),
+)
+
+# Every prompt version seen in traffic or registered from CI.
+prompt_versions = Table(
+    "prompt_versions", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("prompt_id", String(128), primary_key=True),
+    Column("version", String(64), primary_key=True),
+    Column("content_hash", String(64)),  # sha256 of the template, when registered
+    Column("template", Text),  # optional; enables diffs between versions
+    Column("note", String(1024)),  # what changed
+    Column("author", String(128)),
+    Column("registered_at", DateTime),  # when CI registered it (None if only seen in traffic)
+    Column("first_seen", DateTime),  # first call or step that ran it
+    Column("last_seen", DateTime),
 )
 
 event_errors = Table(

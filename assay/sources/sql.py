@@ -57,6 +57,8 @@ DEFAULT_MAPPING: Dict = {
             # produced, and the step's position in the pipeline.
             "outputs": "NULL",
             "sequence": "NULL",
+            "prompt_id": "NULL",
+            "prompt_version": "NULL",
         },
     },
     "calls": {
@@ -74,6 +76,9 @@ DEFAULT_MAPPING: Dict = {
             "code_revision": "c.code_revision",
             "latency_ms": "c.latency_ms",
             "status": "c.status",
+            # Which prompt (and version) the call used; NULL if you don't track it yet.
+            "prompt_id": "NULL",
+            "prompt_version": "NULL",
             "segment": "d.segment",
             "document_type": "d.document_type",
         },

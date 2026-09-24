@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -65,6 +66,9 @@ class StageRunEvent(Event):
         None, description="What the step produced, as named values (nested allowed). Long strings, e.g. "
                           "OCR text under '_text', are used as evidence. Max 64 KB.")
     sequence: Optional[int] = Field(None, ge=0, description="Step position in the pipeline; else start time orders steps")
+    prompt_id: Optional[str] = Field(None, max_length=128, description="Which prompt, e.g. extract_invoice_fields")
+    prompt_version: Optional[str] = Field(None, max_length=64,
+                                          description="A label (v13) or content hash; see prompt_version() in the client")
 
     @model_validator(mode="after")
     def _outputs_size(self):
@@ -102,6 +106,9 @@ class CallEvent(Event):
     document_type: Optional[str] = None
     latency_ms: Optional[float] = Field(None, ge=0)
     status: Optional[str] = None
+    prompt_id: Optional[str] = Field(None, max_length=128, description="Which prompt, e.g. extract_invoice_fields")
+    prompt_version: Optional[str] = Field(None, max_length=64,
+                                          description="A label (v13) or content hash; see prompt_version() in the client")
 
 
 class ReviewEvent(Event):
@@ -125,6 +132,29 @@ class ExtractionEvent(Event):
     document_type: Optional[str] = None
 
 
+class PromptEvent(Event):
+    """Register a prompt version (from CI, when it's released). Optional: versions
+    are also discovered from traffic. Registering adds the template, for diffs."""
+    prompt_id: str = Field(..., max_length=128)
+    version: Optional[str] = Field(None, max_length=64, description="Omit to use a hash of the template")
+    template: Optional[str] = Field(None, max_length=65536)
+    note: Optional[str] = Field(None, max_length=1024, description="What changed")
+    author: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _version(self):
+        if not self.version:
+            if not self.template:
+                raise ValueError("Give a version, or a template to derive one from.")
+            object.__setattr__(self, "version", content_version(self.template))
+        return self
+
+
+def content_version(template: str) -> str:
+    """A stable version for prompt text: the first 12 hex digits of its SHA-256."""
+    return hashlib.sha256(template.encode()).hexdigest()[:12]
+
+
 class EventBatch(Event):
     documents: List[DocumentEvent] = []
     stage_runs: List[StageRunEvent] = []
@@ -132,6 +162,7 @@ class EventBatch(Event):
     reviews: List[ReviewEvent] = []
     extractions: List[ExtractionEvent] = []
     errors: List[ErrorEvent] = []
+    prompts: List[PromptEvent] = []
 
 
 def _derive(*parts) -> str:
@@ -188,12 +219,63 @@ def upsert(engine: Engine, table, rows: List[dict], key: str) -> int:
 
 def write(engine: Engine, kind: str, events: List[Event], tenant: str) -> int:
     table, key = TABLES[kind]
-    return upsert(engine, table, _rows(kind, events, tenant), key)
+    rows = _rows(kind, events, tenant)
+    n = upsert(engine, table, rows, key)
+    if kind in ("calls", "stage_runs"):
+        discover_prompts(engine, rows, tenant, "ts" if kind == "calls" else "started_at")
+    return n
 
 
 def write_batch(engine: Engine, batch: EventBatch, tenant: str) -> Dict[str, int]:
     # Documents first, so everything else has something to attach to.
-    return {kind: write(engine, kind, getattr(batch, kind), tenant) for kind in TABLES}
+    out = {kind: write(engine, kind, getattr(batch, kind), tenant) for kind in TABLES}
+    out["prompts"] = register_prompts(engine, batch.prompts, tenant)
+    return out
+
+
+def register_prompts(engine: Engine, prompts: List["PromptEvent"], tenant: str) -> int:
+    t = store.prompt_versions
+    now = datetime.utcnow()
+    rows = [dict(tenant=tenant, prompt_id=p.prompt_id, version=p.version, template=p.template,
+                 content_hash=hashlib.sha256(p.template.encode()).hexdigest() if p.template else None,
+                 note=p.note, author=p.author, registered_at=now) for p in prompts]
+    if not rows:
+        return 0
+    insert = sqlite_insert if engine.dialect.name == "sqlite" else pg_insert
+    with engine.begin() as conn:
+        for r in rows:
+            stmt = insert(t).values(**r)
+            keep = lambda col: func.coalesce(stmt.excluded[col], t.c[col])  # don't erase what we know
+            conn.execute(stmt.on_conflict_do_update(
+                index_elements=["tenant", "prompt_id", "version"],
+                set_={c: keep(c) for c in ("template", "content_hash", "note", "author", "registered_at")}))
+    return len(rows)
+
+
+def discover_prompts(engine: Engine, rows: List[dict], tenant: str, ts_field: str) -> None:
+    """Add prompt versions seen in traffic to the registry, widening first/last seen."""
+    seen: Dict[tuple, list] = {}
+    for r in rows:
+        if r.get("prompt_id") or r.get("prompt_version"):
+            key = (r.get("prompt_id") or "(unnamed)", r.get("prompt_version") or "(unversioned)")
+            ts = r.get(ts_field)
+            span = seen.setdefault(key, [ts, ts])
+            if ts is not None:
+                span[0] = ts if span[0] is None else min(span[0], ts)
+                span[1] = ts if span[1] is None else max(span[1], ts)
+    if not seen:
+        return
+    t = store.prompt_versions
+    sqlite = engine.dialect.name == "sqlite"
+    insert = sqlite_insert if sqlite else pg_insert
+    lo, hi = (func.min, func.max) if sqlite else (func.least, func.greatest)  # scalar min/max per dialect
+    with engine.begin() as conn:
+        for (pid, ver), (first, last) in seen.items():
+            stmt = insert(t).values(tenant=tenant, prompt_id=pid, version=ver, first_seen=first, last_seen=last)
+            conn.execute(stmt.on_conflict_do_update(
+                index_elements=["tenant", "prompt_id", "version"],
+                set_={"first_seen": lo(func.coalesce(t.c.first_seen, stmt.excluded.first_seen), stmt.excluded.first_seen),
+                      "last_seen": hi(func.coalesce(t.c.last_seen, stmt.excluded.last_seen), stmt.excluded.last_seen)}))
 
 
 # ---------- OpenTelemetry (OTLP/HTTP JSON) ----------
@@ -213,6 +295,8 @@ Model call from any span with a gen_ai.* attribute. model_declared =
 Stage run  from any other span with an assay.stage attribute. Optional assay.did_work,
            assay.sequence (step position), and assay.output.<field> attributes
            for what the step produced (used to localize errors).
+Prompts    assay.prompt_id / assay.prompt_version on a model-call span or its
+           parent stage span.
 code_revision comes from the resource's service.version.
 """
 
@@ -228,6 +312,10 @@ def _attr_value(v: Dict[str, Any]):
 
 def _attrs(items) -> Dict[str, Any]:
     return {a.get("key"): _attr_value(a.get("value") or {}) for a in items or []}
+
+
+def _str(v) -> Optional[str]:
+    return None if v is None else str(v)
 
 
 def _ts(nanos) -> Optional[datetime]:
@@ -276,11 +364,15 @@ def from_otlp(payload: Dict[str, Any]) -> EventBatch:
                 cost_usd=a.get("assay.cost_usd"), resolving_layer=a.get("assay.resolving_layer"),
                 gate_reason=a.get("assay.gate_reason"), code_revision=res.get("service.version"),
                 status="error" if errored else "success",
-                segment=a.get("assay.segment"), document_type=a.get("assay.document_type")))
+                segment=a.get("assay.segment"), document_type=a.get("assay.document_type"),
+                prompt_id=_str(a.get("assay.prompt_id") or (parent[1].get("assay.prompt_id") if parent else None)),
+                prompt_version=_str(a.get("assay.prompt_version")
+                                    or (parent[1].get("assay.prompt_version") if parent else None))))
         elif a.get("assay.stage"):
             outputs = {k[len("assay.output."):]: v for k, v in a.items() if k.startswith("assay.output.")}
             batch.stage_runs.append(StageRunEvent(
                 run_id=sp.get("spanId"), document_id=doc_id, stage=str(a["assay.stage"]),
                 status="failed" if errored else "success", started_at=start, finished_at=end,
-                did_work=a.get("assay.did_work"), outputs=outputs or None, sequence=a.get("assay.sequence")))
+                did_work=a.get("assay.did_work"), outputs=outputs or None, sequence=a.get("assay.sequence"),
+                prompt_id=_str(a.get("assay.prompt_id")), prompt_version=_str(a.get("assay.prompt_version"))))
     return batch

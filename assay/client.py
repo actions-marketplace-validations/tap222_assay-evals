@@ -7,7 +7,8 @@
     with assay.stage("inv-123", "field_extraction") as run:   # records timing, status, failures
         result = extract(doc)
     assay.call("inv-123", stage="field_extraction", model_declared="claude-sonnet-5",
-               model_served=resp.model, latency_ms=elapsed_ms, cost_usd=price, status="success")
+               model_served=resp.model, latency_ms=elapsed_ms, cost_usd=price, status="success",
+               prompt_id="extract_fields", prompt_version="v13")   # or Assay.prompt_version(template)
     assay.document("inv-123", received_at=start, completed_at=datetime.utcnow())  # upserts by id
     assay.review("inv-123", minutes=4.5, reviewer="sam")
     assay.flush()   # also happens automatically every `batch_size` records and at exit
@@ -21,6 +22,7 @@ your pipeline unless you pass strict=True. The key decides the tenant; pass
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import logging
 import threading
@@ -33,7 +35,7 @@ from typing import Callable, Dict, List, Optional
 
 log = logging.getLogger("assay.client")
 
-KINDS = ("documents", "stage_runs", "calls", "reviews", "extractions", "errors")
+KINDS = ("documents", "stage_runs", "calls", "reviews", "extractions", "errors", "prompts")
 
 
 class _Step:
@@ -76,7 +78,8 @@ class Assay:
 
     @contextmanager
     def stage(self, document_id: str, stage: str, did_work: Optional[bool] = True,
-              sequence: Optional[int] = None):
+              sequence: Optional[int] = None, prompt_id: Optional[str] = None,
+              prompt_version: Optional[str] = None):
         """Time a stage; records "failed" (and re-raises) if the block raises.
 
         Record what the step produced, for error analysis:
@@ -94,7 +97,24 @@ class Assay:
             raise
         finally:
             self.stage_run(document_id, stage, status, started_at=started, finished_at=datetime.utcnow(),
-                           did_work=did_work, sequence=sequence, outputs=step.outputs or None)
+                           did_work=did_work, sequence=sequence, outputs=step.outputs or None,
+                           prompt_id=prompt_id, prompt_version=prompt_version)
+
+    @staticmethod
+    def prompt_version(template: str) -> str:
+        """A stable version for prompt text (first 12 hex digits of its SHA-256), for
+        teams that don't label versions: the same text always gets the same version."""
+        return hashlib.sha256(template.encode()).hexdigest()[:12]
+
+    def register_prompt(self, prompt_id: str, template: Optional[str] = None, version: Optional[str] = None,
+                        note: Optional[str] = None, author: Optional[str] = None) -> str:
+        """Record a prompt version with its text and what changed (e.g. from CI on release).
+        Returns the version (derived from the template when not given)."""
+        version = version or (self.prompt_version(template) if template else None)
+        if not version:
+            raise ValueError("Give a version, or the template to derive one from.")
+        self._add("prompts", dict(prompt_id=prompt_id, version=version, template=template, note=note, author=author))
+        return version
 
     def report_error(self, document_id: str, field: str, expected: Optional[str] = None,
                      observed: Optional[str] = None, kind: str = "wrong", **fields) -> None:
@@ -106,7 +126,8 @@ class Assay:
     def call(self, document_id: Optional[str], stage: str, call_id: Optional[str] = None,
              ts: Optional[datetime] = None, **fields) -> None:
         """model_declared, model_served, resolving_layer, gate_reason, cost_usd,
-        latency_ms, status, code_revision, segment, document_type."""
+        latency_ms, status, code_revision, segment, document_type, prompt_id,
+        prompt_version."""
         self._add("calls", dict(call_id=call_id or uuid.uuid4().hex, document_id=document_id, stage=stage,
                                 ts=ts or datetime.utcnow(), **fields))
 
