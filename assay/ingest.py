@@ -91,6 +91,30 @@ class ErrorEvent(Event):
     source: Optional[str] = Field(None, description="review, qa, customer, …")
 
 
+class EvalResultEvent(Event):
+    """One test outcome from an evaluation run. Send passes too: they're what
+    failures are compared against to find what the failures have in common."""
+    result_id: Optional[str] = Field(None, max_length=128,
+                                     description="Omit to derive one from run, case, field, evaluator and attempt")
+    run_id: str = Field(..., max_length=128, description="The evaluation run, e.g. cert-2026-09-23")
+    case_id: str = Field(..., max_length=128, description="The test case; the same id across runs")
+    document_id: Optional[str] = Field(None, max_length=128,
+                                       description="The document id the pipeline used for this case, so failures "
+                                                   "can be traced step by step")
+    field: Optional[str] = Field(None, description="The field checked; omit for a whole-case check")
+    expected: Optional[str] = Field(None, max_length=4096)
+    actual: Optional[str] = Field(None, max_length=4096)
+    status: str = Field(..., pattern="^(pass|fail|error)$",
+                        description="error: the check itself couldn't run (judge timeout, harness crash)")
+    evaluator: Optional[str] = Field(None, max_length=128, description="name@version, e.g. exact_match@2")
+    score: Optional[float] = None
+    reason: Optional[str] = Field(None, max_length=2048, description="The evaluator's explanation, or the error")
+    ts: Optional[datetime] = None
+    attempt: Optional[int] = Field(None, ge=0, description="For repeated judgements of the same output")
+    lineage: Optional[Dict[str, str]] = Field(
+        None, description='What produced the output: {"prompt": "extract_fields@v13", "model": "...", "build": "..."}')
+
+
 class CallEvent(Event):
     call_id: str = Field(..., max_length=128)
     stage: str
@@ -162,6 +186,7 @@ class EventBatch(Event):
     reviews: List[ReviewEvent] = []
     extractions: List[ExtractionEvent] = []
     errors: List[ErrorEvent] = []
+    eval_results: List[EvalResultEvent] = []
     prompts: List[PromptEvent] = []
 
 
@@ -176,6 +201,7 @@ TABLES = {
     "reviews": (store.event_reviews, "review_id"),
     "extractions": (store.event_indexed, "extraction_id"),
     "errors": (store.event_errors, "error_id"),
+    "eval_results": (store.eval_results, "result_id"),
 }
 
 
@@ -192,6 +218,10 @@ def _rows(kind: str, events: List[Event], tenant: str) -> List[dict]:
             r["reported_at"] = r["reported_at"] or datetime.utcnow()
             if not r.get("error_id"):
                 r["error_id"] = _derive(r["document_id"], r["field"], r.get("expected"), r.get("kind"))
+        if kind == "eval_results":
+            r["ts"] = r.get("ts") or datetime.utcnow()
+            if not r.get("result_id"):
+                r["result_id"] = _derive(r["run_id"], r["case_id"], r.get("field"), r.get("evaluator"), r.get("attempt"))
         if kind == "extractions" and not r.get("extraction_id"):
             r["extraction_id"] = _derive(r["document_id"], r["field"]) if r.get("field") else uuid.uuid4().hex
         out.append(r | {"tenant": tenant})

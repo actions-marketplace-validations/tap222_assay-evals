@@ -144,6 +144,31 @@ table.lineage th.hl,table.lineage td.hl{box-shadow:inset 2px 0 0 var(--accent),i
 .pathbar button.noop{color:var(--muted);border-style:dashed}
 .pathbar button.hl{box-shadow:0 0 0 2px var(--accent)}
 .pathbar .arr{color:var(--muted)}
+.pathbar button.viol{border:1.5px dashed var(--bad);background:var(--bad-bg);color:var(--bad);font-weight:600}
+.contract{display:grid;grid-template-columns:92px 1fr auto;gap:10px;align-items:start;padding:9px 0;border-bottom:1px solid var(--line)}
+.contract:last-of-type{border-bottom:0}
+.contract .msg{font-size:13.5px}
+.contract .meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
+/* failure causes */
+.kindbar{display:flex;height:14px;border-radius:4px;overflow:hidden;background:var(--sunk)}
+.kindbar i{display:block;height:100%}
+.cause{display:grid;grid-template-columns:5px 1fr;gap:14px;padding:14px 0;border-bottom:1px solid var(--line)}
+.cause:last-child{border-bottom:0}
+.cause .stripe{border-radius:3px}
+.cause.decided{opacity:.62}
+.cause h3{margin:4px 0 6px;font:600 16px var(--body)}
+.cause ul{margin:6px 0;padding-left:18px;font-size:13.5px;color:var(--ink-2)}
+.cause ul li{margin:2px 0}
+.cause .meta{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.cause .head{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.cause .count{margin-left:auto;font:600 20px var(--display);font-variant-numeric:tabular-nums}
+.cause .count small{font:12px var(--mono);color:var(--muted);margin-left:6px}
+.feat{display:inline-block;font:11.5px var(--mono);background:var(--sunk);border-radius:5px;padding:2px 7px;margin:2px 4px 2px 0}
+.cause .acts{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:13px}
+.dots{font:13px var(--mono);letter-spacing:1px;white-space:nowrap}
+.call{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.call .chip{font-size:12px;padding:4px 10px}
+.suggest{background:var(--sunk);border-radius:8px;padding:10px 12px;display:grid;gap:4px}
 pre.code{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font:12.5px/1.55 var(--mono);overflow-x:auto;white-space:pre}
 details summary{cursor:pointer}
 span.costbar{display:flex;height:12px;border-radius:3px;overflow:hidden;background:var(--sunk)}
@@ -174,6 +199,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
     <a href="#measures" data-tab="measures">Measures</a>
     <a href="#cost" data-tab="cost">Cost</a>
     <a href="#errors" data-tab="errors">Errors</a>
+    <a href="#failures" data-tab="failures">Failures</a>
     <a href="#prompts" data-tab="prompts">Prompts</a>
     <a href="#trace" data-tab="trace">Trace</a>
     <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
@@ -190,6 +216,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
   <section id="tab-measures" class="stack" hidden></section>
   <section id="tab-cost" class="stack" hidden></section>
   <section id="tab-errors" class="stack" hidden></section>
+  <section id="tab-failures" class="stack" hidden></section>
   <section id="tab-prompts" class="stack" hidden></section>
   <section id="tab-trace" class="stack" hidden></section>
   <section id="tab-alerts" class="stack" hidden></section>
@@ -289,6 +316,7 @@ function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
   ["overview","workflow","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
+  if(tab()==="failures")render();
 }
 
 /* ---------- overview ---------- */
@@ -296,8 +324,8 @@ function alertRow(a,{actions=true}={}){
   const m=S.catalog[a.measure_id]||{name:a.measure_id};
   const since=a.state==="resolved"?`resolved ${ago(a.resolved_at)} · lasted ${dur(a.opened_at,a.resolved_at)}`:`${a.state==="pending"?"pending since":"open for"} ${dur(a.opened_at)} · last seen ${ago(a.last_seen_at)}`;
   return `<div class="alert ${a.kind} ${a.state}"><span class="stripe"></span>
-    <div><div class="msg">${esc(a.message)}</div><div class="meta">${a.kind==="slo"?"SLO breach":a.kind==="regression"?`Prompt regression · <a href="#prompts">compare versions</a>`:"Anomaly"} · ${esc(since)}${a.n?` · n=${a.n}`:""}</div></div>
-    ${actions?`<button class="link" type="button" data-open="${esc(a.measure_id)}" data-dim="${esc(a.dimension||"")}" data-val="${esc(a.slice_value||"")}">Investigate</button>`:""}</div>`;
+    <div><div class="msg">${esc(a.message)}</div><div class="meta">${a.kind==="slo"?"SLO breach":a.kind==="regression"?`Prompt regression · <a href="#prompts">compare versions</a>`:a.kind==="contract"?"Path contract broken":"Anomaly"} · ${esc(since)}${a.n?` · n=${a.n}`:""}</div></div>
+    ${!actions?"":a.kind==="contract"?`<a class="link" href="#workflow">Investigate</a>`:`<button class="link" type="button" data-open="${esc(a.measure_id)}" data-dim="${esc(a.dimension||"")}" data-val="${esc(a.slice_value||"")}">Investigate</button>`}</div>`;
 }
 // One line per measure and dimension, however many slices breach it.
 function sloGroups(list){
@@ -321,20 +349,20 @@ async function overviewFlow(){
 function renderOverview(){
   const o=S.overview;if(!o)return;
   const open=o.open_alerts,breached=o.slos.filter(s=>s.state==="breached"),judged=o.slos.filter(s=>s.state!=="unmeasured");
-  const anomalies=open.filter(a=>a.kind==="anomaly"||a.kind==="regression"),sloAlerts=open.filter(a=>a.kind==="slo");
+  const anomalies=open.filter(a=>a.kind==="anomaly"||a.kind==="regression"||a.kind==="contract"),sloAlerts=open.filter(a=>a.kind==="slo");
   const sched=o.scheduler;
   const learning=o.run_count<4?`<div class="panel flags"><div class="flag"><span class="chip warn">learning</span>Alerts compare each slice with its recent past and need 4 runs; this source has ${o.run_count}. <a href="#connect">Backfill history</a> to get baselines now.</div></div>`:"";
   $("#tab-overview").innerHTML=learning+`
   <div class="panel" id="ov-flow"><div class="panel-head"><h2>Pipeline</h2><a href="#workflow" class="ref">Open workflow →</a></div><p class="note">Loading…</p></div>
   <div class="strip">
-    <div class="${anomalies.length?"bad":"good"}"><b>${anomalies.length}</b><span>open anomalies</span></div>
+    <div class="${anomalies.length?"bad":"good"}"><b>${anomalies.length}</b><span>open alerts</span></div>
     <div class="${breached.length?"warn":"good"}"><b>${judged.length?`${judged.length-breached.length}/${judged.length}`:"—"}</b><span>SLOs met${o.slos.length>judged.length?` · ${o.slos.length-judged.length} unmeasured`:""}</span></div>
     <div><b>${o.counts.measured}/${o.counts.measured+o.counts.unmeasured}</b><span>measures with data</span></div>
     <div><b style="font-size:20px;padding-top:6px">${esc(ago(o.run.started_at))}</b><span>${sched.enabled?`auto-runs every ${sched.every_minutes} min`:"scheduler off (runs on demand)"}</span></div>
   </div>
   <div class="two">
     <div class="panel"><div class="panel-head"><h2>Needs attention</h2><a href="#alerts" class="ref">All alerts →</a></div>
-      ${anomalies.length?anomalies.map(a=>alertRow(a)).join(""):`<p class="note">No open anomalies. Every measured slice is inside its expected range.</p>`}
+      ${anomalies.length?anomalies.map(a=>alertRow(a)).join(""):`<p class="note">No open alerts. Every measured slice is inside its expected range and every path contract holds.</p>`}
       ${sloAlerts.length?`<h3 style="margin-top:14px">SLO breaches</h3>${sloGroups(sloAlerts)}`:""}
     </div>
     <div class="stack">
@@ -761,14 +789,16 @@ function flowGraph(g,{selected=null,compact=false}={}){
   const pos=id=>({x:PAD+col[id]*(BW+GX),y:rowY[rowOf[id]]+stack[id]*(BH+14)});
   let s="";
   g.edges.forEach(e=>{if(!byId[e.from]||!byId[e.to])return;const a=pos(e.from),b=pos(e.to);
-    const w=1+5*e.share,hot=selected&&(e.from===selected||e.to===selected);
+    const w=1+5*e.share,hot=selected&&(e.from===selected||e.to===selected),viol=e.violations>0;
     let d,lx,ly;
     if(rowOf[e.from]===rowOf[e.to]&&col[e.to]>col[e.from]){const x1=a.x+BW,y1=a.y+BH/2,x2=b.x,y2=b.y+BH/2;d=`M${x1},${y1} C${x1+GX/2},${y1} ${x2-GX/2},${y2} ${x2},${y2}`;lx=(x1+x2)/2;ly=(y1+y2)/2-6}
     else{const x1=a.x+BW/2,y1=a.y+BH,x2=b.x+BW/2,y2=b.y;const my=rowY[rowOf[e.to]]-GY/2;d=`M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;lx=(x1+x2)/2;ly=my-4}
-    s+=`<path d="${d}" fill="none" stroke="${hot?"var(--accent)":"var(--line-strong)"}" stroke-width="${w.toFixed(1)}" opacity="${hot?1:.8}" marker-end="url(#arrow)"/>`;
+    s+=`<path d="${d}" fill="none" stroke="${viol?"var(--bad)":hot?"var(--accent)":"var(--line-strong)"}" stroke-width="${Math.max(w,viol?2:0).toFixed(1)}" opacity="${hot||viol?1:.8}" ${viol?`stroke-dasharray="6 4"`:""} marker-end="url(#arrow)">${viol?`<title>${e.violations} document(s) broke a path contract here</title>`:""}</path>`;
     if(e.share<0.98&&!compact)s+=`<text x="${lx}" y="${ly}" text-anchor="middle" class="elabel">${e.documents.toLocaleString()} (${Math.round(e.share*100)}%)</text>`});
   nodes.forEach(n=>{const {x,y}=pos(n.id),sel=n.id===selected,err=n.errors||0,v=dominant(n.errors_by_verdict);
-    const term=n.kind==="start"||n.kind==="end";
+    const term=n.kind==="start"||n.kind==="end",cv=n.contract_violations||[];
+    const cvN=cv.reduce((a,v)=>a+v.documents,0);
+    const cvText=cv.every(v=>v.kind==="must_include")?`✕ ${cvN} skipped it`:`✕ ${cvN} broke ${cv.length>1?cv.length+" contracts":"contract"}`;
     s+=`<g class="wnode" data-step="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.id)}">
       <rect x="${x}" y="${y}" width="${BW}" height="${BH}" rx="${term?BH/2:8}" fill="var(--surface)" stroke="${sel?"var(--accent)":term?"var(--line-strong)":HEALTH[n.health]}" stroke-width="${sel?3:term?1.2:2}"/>
       ${term?"":`<rect x="${x}" y="${y}" width="5" height="${BH}" rx="2" fill="${HEALTH[n.health]}"/>`}
@@ -780,6 +810,9 @@ function flowGraph(g,{selected=null,compact=false}={}){
         ${n.prompt?`<text x="${x+14}" y="${y+78}" class="wsub" style="fill:${n.regression?"var(--bad)":"var(--accent-ink)"}">${n.regression?"⚠ ":""}${esc(n.prompt)}</text>`:""}`}`}
       ${err?`<g><rect x="${x+BW-(compact?38:46)}" y="${y-9}" width="${compact?44:54}" height="20" rx="10" fill="${VERDICT[v]?.[1]||"var(--bad)"}"/><text x="${x+BW-(compact?16:19)}" y="${y+5}" text-anchor="middle" class="wbadge">${err} err</text></g>`:""}
       ${(n.open_alerts||[]).length?`<circle cx="${x+10}" cy="${y+9}" r="6" fill="var(--bad)"><title>${n.open_alerts.length} open alert(s)</title></circle>`:""}
+      ${cv.length?`<rect x="${x-5}" y="${y-5}" width="${BW+10}" height="${BH+10}" rx="${term?BH/2+5:12}" fill="none" stroke="var(--bad)" stroke-width="1.5" stroke-dasharray="5 4"/>
+        <g><rect x="${x+10}" y="${y+BH-10}" width="${cvText.length*6.8+16}" height="20" rx="10" fill="${cv.some(v=>v.severity==="critical")?"var(--bad)":"var(--warn)"}"/><text x="${x+18}" y="${y+BH+4}" class="wbadge">${esc(cvText)}</text>
+        <title>${esc(cv.map(v=>`${v.label}: ${v.documents} document(s)`).join("\n"))}</title></g>`:""}
     </g>`});
   return `<svg class="workflow" viewBox="0 0 ${W} ${H}" style="min-width:${compact?Math.min(W,760):Math.min(W,900)}px" role="img" aria-label="Pipeline workflow">
     <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line-strong)"/></marker></defs>${s}</svg>`;
@@ -795,11 +828,12 @@ async function renderWorkflow(){
     <div class="panel-head"><div><h2>Pipeline</h2><p class="sub">Drawn from what ${g.documents.toLocaleString()} documents actually did in the last ${days} days. Border color is each step's health, the badge counts reported errors that started there, and arrow width is how many documents took that path. Click a step.</p></div>
       <select id="wf-days" aria-label="Window">${[1,7,30].map(x=>`<option value="${x}" ${x===days?"selected":""}>${x} day${x>1?"s":""}</option>`).join("")}</select></div>
     <div class="scroll">${flowGraph(g,{selected:sel})}</div>
-    <div class="legend"><span><i style="background:var(--good)"></i>healthy</span><span><i style="background:var(--warn)"></i>worth a look</span><span><i style="background:var(--bad)"></i>failing, alerting, or a prompt regression</span>${Object.entries(VERDICT).slice(0,6).map(([k,[l,c]])=>`<span><i style="background:${c}"></i>${esc(l)}</span>`).join("")}</div>
-  </div><div id="wf-detail"></div>`;
+    <div class="legend"><span><i style="background:var(--good)"></i>healthy</span><span><i style="background:var(--warn)"></i>worth a look</span><span><i style="background:var(--bad)"></i>failing, alerting, or a prompt regression</span><span><i style="background:none;border:1.5px dashed var(--bad)"></i>breaks a path contract</span>${Object.entries(VERDICT).slice(0,6).map(([k,[l,c]])=>`<span><i style="background:${c}"></i>${esc(l)}</span>`).join("")}</div>
+  </div><div id="wf-detail"></div><div id="wf-contracts"></div>`;
   $("#wf-days").onchange=e=>{store.set("assay-wf-days",e.target.value);renderWorkflow()};
   wireFlow($("#tab-workflow"),st=>{location.hash="workflow/"+encodeURIComponent(st)});
   if(sel)renderStepDetail(g,sel,days);
+  renderContracts(g,days);
 }
 async function renderStepDetail(g,stage,days){
   const n=g.nodes.find(x=>x.id===stage),box=$("#wf-detail");if(!n){box.innerHTML="";return}
@@ -816,6 +850,7 @@ async function renderStepDetail(g,stage,days){
       <div><dt>Fallback</dt><dd>${n.fallback_rate!=null?(n.fallback_rate*100).toFixed(1)+"%":"—"}</dd></div><div><dt>Models</dt><dd class="mono" style="font-size:12px">${esc(n.models.join(", ")||"—")}</dd></div>
       <div><dt>Prompt</dt><dd>${n.prompts.length?n.prompts.map(p=>`<a href="#prompts" class="mono" style="font-size:12px${n.regression?";color:var(--bad)":""}">${esc(p)}</a>`).join("<br>"):"—"}</dd></div>
     </dl>`}
+    ${(n.contract_violations||[]).length?`<div><h3 style="margin-bottom:6px">Path contracts broken here</h3>${n.contract_violations.map(v=>`<div class="flag"><span class="chip ${v.severity==="critical"?"bad":"warn"}">contract</span>${esc(v.label)}: ${v.documents.toLocaleString()} document${v.documents>1?"s":""}. <a href="#workflow" onclick="setTimeout(()=>$('#wf-contracts')?.scrollIntoView({behavior:'smooth'}),60)">See which</a></div>`).join("")}</div>`:""}
     ${(n.open_alerts||[]).length?`<div><h3 style="margin-bottom:6px">Open alerts</h3>${n.open_alerts.map(a=>`<div class="flag"><span class="chip bad">${esc(a.kind)}</span>${esc(a.message)}</div>`).join("")}</div>`:""}
     <div><h3 style="margin-bottom:6px">Errors that started ${term?"after the pipeline":"here"} <span class="ref">${errs.length}${errs.length>=50?"+":""}</span></h3>
       ${n.errors_by_verdict&&Object.keys(n.errors_by_verdict).length?`<p>${Object.entries(n.errors_by_verdict).map(([v,c])=>`${vchip(v)} ${c}`).join(" &nbsp; ")}</p>`:""}
@@ -824,6 +859,169 @@ async function renderStepDetail(g,stage,days){
     ${term?"":`<p class="note">Measures for this step: <button class="link" type="button" data-open="stage_failure_rate" data-dim="stage" data-val="${esc(stage)}">failures</button> · <button class="link" type="button" data-open="call_latency_p95" data-dim="stage" data-val="${esc(stage)}">latency</button> · <button class="link" type="button" data-open="errors_by_origin" data-dim="origin_stage" data-val="${esc(stage)}">errors over time</button> · <button class="link" type="button" data-open="cost_per_document" data-dim="stage" data-val="${esc(stage)}">cost</button></p>`}
   </div>`;
   box.scrollIntoView({behavior:"smooth",block:"nearest"});
+}
+
+/* ---------- failure causes ---------- */
+const KIND={ai:["AI / pipeline error","var(--bad)","A step got the value wrong."],
+  infrastructure:["Infrastructure","var(--c-fb)","A step failed or timed out, a fallback stood in for an unavailable model, the value was lost after the pipeline, or the test harness couldn't run."],
+  evaluator:["Evaluator","var(--c-ai)","The check is wrong, not the output."],
+  intended_change:["Intended change","var(--good)","The output changed on purpose; update the expected values."],
+  unsure:["Unsure","var(--line-strong)","The evidence doesn't point anywhere."]};
+const DECISION={accepted_change:"Accepted as intended",not_a_problem:"Not a problem",confirmed:"Confirmed, being fixed"};
+function featLabel(f){const [k,v]=f.feature.split("=");const key=k.replace(/^(prompt|model|failed|fallback|call_failed):/,(m,a)=>({prompt:"prompt at ",model:"model at ",failed:"failed: ",fallback:"fallback at ",call_failed:"call failed at "}[a]));
+  return `<span class="feat" title="${pct(f.share,0)} of these failures, ${pct(f.base,1)} of passing cases">${esc(key)}${v!=null?" = "+esc(v):""} · ${f.lift==null?"only in failures":f.lift+"×"}</span>`}
+async function renderFailures(){
+  const box=$("#tab-failures");
+  const runs=await api(`/v1/evals/runs?${q({source:src()})}`).catch(()=>[]);
+  let scope=store.get("assay-fail-scope")||"";if(scope&&!runs.some(r=>r.run_id===scope))scope="";
+  if(!scope&&!S.overview&&runs.length)scope=runs[0].run_id;
+  const picker=`<select id="fail-scope" aria-label="What to analyse"><option value="" ${!scope?"selected":""}>Reported errors · last 30 days</option>
+    ${runs.map(r=>`<option value="${esc(r.run_id)}" ${r.run_id===scope?"selected":""}>Eval run ${esc(r.run_id)} · ${(r.failed+r.errored).toLocaleString()} of ${r.results.toLocaleString()} attempts failed</option>`).join("")}</select>`;
+  box.innerHTML=`<div class="panel"><div class="panel-head"><div><h2>Failure causes</h2><p class="sub">Every failure traced to where it started, then grouped into causes. Each cause gets a kind from rules, with the evidence shown: an AI or pipeline error, infrastructure, the evaluator being wrong, or an intended change.</p></div>${picker}</div><p class="note">Reading failures…</p></div>`;
+  $("#fail-scope").onchange=e=>{store.set("assay-fail-scope",e.target.value);renderFailures()};
+  let a;
+  try{a=scope?await api(`/v1/evals/runs/${encodeURIComponent(scope)}/failures?${q({source:src()})}`):await api(`/v1/failures?${q({source:src(),days:30})}`)}
+  catch(e){box.querySelector(".note").outerHTML=`<div class="empty">${esc(e.message)}${runs.length?"":` Evaluation runs sent to <code>POST /v1/events/eval-results</code> appear in this list.`}${src()==="events:demo"?` The demo's evaluation runs are in <b>events:demo-eval</b>: pick it at the top.`:""}</div>`;return}
+  const sc=a.scope,total=a.failures||1;
+  const bar=`<div class="kindbar">${a.by_kind.filter(k=>k.failures).map(k=>`<i style="width:${k.failures/total*100}%;background:${KIND[k.kind][1]}" title="${esc(k.label)}: ${k.failures}"></i>`).join("")}</div>
+    <div class="legend">${a.by_kind.filter(k=>k.failures).map(k=>`<span title="${esc(KIND[k.kind][2])}"><i style="background:${KIND[k.kind][1]}"></i>${esc(k.label)} · ${k.failures.toLocaleString()}</span>`).join("")}</div>`;
+  const context=sc.kind==="eval"?`${sc.checks.toLocaleString()} checks (${sc.attempts_per_check} attempts each on average), ${sc.passed.toLocaleString()} passed every attempt. ${sc.baseline?`Compared with <b class="mono">${esc(sc.baseline)}</b>${Object.keys(sc.changes).length?`; changed between the runs: ${Object.entries(sc.changes).map(([k,c])=>`${esc(k)} <span class="mono">${esc(c.from)} → ${esc(c.to)}</span>`).join(", ")}`:"; nothing in the lineage changed"}.`:"No earlier run to compare with, so nothing can be called new."}`
+    :`Wrong values reported on ${sc.documents.toLocaleString()} documents received in the last 30 days, compared with the documents that had none.`;
+  box.innerHTML=`<div class="panel stack"><div class="panel-head"><div><h2>Failure causes</h2><p class="sub">${context}</p></div>${picker}</div>
+    <div class="strip" style="margin:0"><div class="bad"><b>${a.failures.toLocaleString()}</b><span>failures</span></div><div><b>${a.causes}</b><span>causes</span></div>
+      <div class="${a.explained>=0.8?"good":"warn"}"><b>${a.explained==null?"—":pct(a.explained,0)}</b><span>explained with evidence</span></div>
+      <div class="${a.needs_action?"bad":"good"}"><b>${a.needs_action.toLocaleString()}</b><span>AI or infrastructure, undecided</span></div></div>
+    ${bar}</div>
+    ${a.stability?releaseCall(a.stability,sc):""}
+    <div class="panel">${a.groups.map(g=>causeCard(g,sc)).join("")||`<p class="note">No failures.</p>`}</div>`;
+  const rec=$("#gate-record");if(rec)rec.onclick=async()=>{rec.disabled=true;
+    try{const g=await api(`/v1/evals/runs/${encodeURIComponent(sc.run_id)}/gate`,{method:"POST",body:JSON.stringify({source:src()})});
+      rec.outerHTML=`<span class="note">Recorded as gate decision #${g.id}. <a href="#gates">See release gates</a></span>`}catch(e){rec.textContent=e.message}};
+  const cp=$("#rerun-copy");if(cp)cp.onclick=async()=>{const list=a.stability.reruns.map(r=>({case_id:r.case_id,field:r.field,evaluator:r.evaluator,attempts:r.reruns}));
+    try{await navigator.clipboard.writeText(JSON.stringify(list,null,1));cp.textContent="Copied"}catch(e){cp.textContent="Copy failed"}};
+  $("#fail-scope").onchange=e=>{store.set("assay-fail-scope",e.target.value);renderFailures()};
+  box.querySelectorAll("[data-decide]").forEach(b=>b.onclick=async()=>{b.disabled=true;
+    try{await api("/v1/failures/decisions",{method:"PUT",body:JSON.stringify({source:src(),key:b.dataset.key,decision:b.dataset.decide||null})});renderFailures()}
+    catch(e){b.textContent=e.message}});
+}
+const CALL={advance:["good","Advance"],rerun:["warn","Rerun"],hold:["warn","Hold"],rollback:["bad","Roll back"]};
+function rateCell(p,n,lo,hi){return n?`${p}/${n}${lo!=null?` <span class="ref">${pct(lo,0)}–${pct(hi,0)}</span>`:""}`:"—"}
+function releaseCall(st,sc){
+  const [cls,label]=CALL[st.outcome],c=st.change;
+  const row=r=>`<tr><td class="mono">${esc(r.case_id)}</td><td class="mono">${esc(r.field||"—")}</td><td class="ref">${esc(r.evaluator||"")}</td>
+    <td class="dots" title="● pass ○ fail × error">${esc(r.outcomes)}</td><td class="num">${rateCell(r.base_passed,r.base_attempts)}</td>
+    <td class="num">${rateCell(r.passed,r.attempts,r.low,r.high)}</td>`;
+  return `<div class="panel stack"><div class="panel-head"><div><h2>Release call</h2><p class="sub">Each check's attempts give it a pass rate with an interval, compared with <b class="mono">${esc(sc.baseline||"no baseline")}</b>. A drop only counts when it's beyond chance across all ${st.checks.toLocaleString()} checks. Failures that are the evaluator's, infrastructure's, or already decided don't count against the release.</p></div></div>
+    <div class="call"><span class="chip ${cls}">${label}</span>${c?`<span>Pass rate ${c.point<=0?"down":"up"} <b>${pct(Math.abs(c.point))}</b> <span class="ref">95% interval ${c.point<=0?`${pct(Math.max(0,-c.high))} to ${pct(-c.low)} lower`:`${pct(c.low)} to ${pct(c.high)}`} · attempt noise ±${pct(st.noise||0)} · ${c.checks.toLocaleString()} checks counted</span></span>`:""}
+      <button type="button" id="gate-record">Record as gate decision</button></div>
+    <ul style="margin:0;padding-left:18px">${st.reasons.map(r=>`<li>${esc(r)}</li>`).join("")}</ul>
+    <div class="legend"><span class="ref">Counted:</span>${Object.entries(st.states).filter(([,n])=>n).map(([k,n])=>`<span><b>${n.toLocaleString()}</b>&nbsp;${esc(k.replace("_"," "))}</span>`).join("")}
+      ${Object.entries(st.roles||{}).filter(([,n])=>n).length?`<span class="ref">Not counted:</span>${Object.entries(st.roles).filter(([,n])=>n).map(([k,n])=>`<span><b>${n.toLocaleString()}</b>&nbsp;${esc({accepted:"decided",intended:"intended change",evaluator:"evaluator",infrastructure:"infrastructure"}[k])}</span>`).join("")}`:""}</div>
+    ${st.got_worse.length?`<details><summary>Got worse beyond chance · ${st.got_worse.length}</summary><div class="scroll"><table><tr><th>Case</th><th>Field</th><th>Evaluator</th><th>Attempts</th><th class="num">Before</th><th class="num">Now</th><th class="num">q</th></tr>
+      ${st.got_worse.slice(0,60).map(r=>row(r)+`<td class="num">${r.q_worse!=null?r.q_worse.toFixed(3):"—"}</td></tr>`).join("")}</table></div></details>`:""}
+    ${st.reruns.length?`<details ${st.outcome==="rerun"?"open":""}><summary>Rerun before judging · ${st.reruns.length} checks, ${st.reruns.reduce((a,r)=>a+(r.reruns||0),0).toLocaleString()} attempts <button class="link" type="button" id="rerun-copy">copy as JSON</button></summary><div class="scroll"><table><tr><th>Case</th><th>Field</th><th>Evaluator</th><th>Attempts</th><th class="num">Before</th><th class="num">Now</th><th>Why</th><th class="num">More</th></tr>
+      ${st.reruns.slice(0,60).map(r=>row(r)+`<td class="ref">${esc(r.why)}</td><td class="num">${r.reruns??"—"}</td></tr>`).join("")}</table></div></details>`:""}
+    ${st.flaky.length?`<details><summary>Flaky · ${st.flaky.length} checks, counted by pass rate, not blocking</summary><div class="scroll"><table><tr><th>Case</th><th>Field</th><th>Evaluator</th><th>Attempts</th><th class="num">Before</th><th class="num">Now</th><th>What varies</th></tr>
+      ${st.flaky.slice(0,60).map(r=>row(r)+`<td class="ref">${esc({output:"the output",evaluator:"only the verdict",infrastructure:"attempts errored"}[r.flake]||"—")}</td></tr>`).join("")}</table></div></details>`:""}
+  </div>`;
+}
+function causeCard(g,sc){
+  const [kl,kc]=KIND[g.kind],d=g.decision;
+  const reg=(g.regression===true?`<span class="chip bad">regression</span>`:g.regression===false?`<span class="chip neutral">${g.flaky_checks?"flaky, no worse":"long-standing"}</span>`:"")
+    +(g.flaky_checks&&g.regression!==false?`<span class="chip warn">${g.flaky_checks} flaky</span>`:"");
+  const conf=`<span class="chip ${g.confidence==="high"?"good":g.confidence==="moderate"?"warn":"neutral"}" title="How consistently the evidence points to this kind">${esc(g.confidence)} confidence</span>`;
+  const trace=x=>x.document_id?`<a class="mono" href="#trace/${encodeURIComponent(x.document_id)}${x.origin_stage?"/"+encodeURIComponent(x.origin_stage):""}">${esc(x.case_id||x.document_id)}</a>`:esc(x.case_id);
+  const exportLink=sc.kind==="eval"&&(g.kind==="intended_change"||g.kind==="evaluator")?` · <a href="/v1/evals/runs/${encodeURIComponent(sc.run_id)}/expectations?${q({source:src(),key:g.key})}" target="_blank" rel="noopener">new expected values (JSON)</a>`:"";
+  const acts=d?`<span class="chip ${d.decision==="confirmed"?"warn":"good"}">${esc(DECISION[d.decision])}</span><span class="ref">${esc(ago(d.decided_at))}${d.decided_by?" by "+esc(d.decided_by):""}</span><button class="link" type="button" data-decide="" data-key="${esc(g.key)}">Undo</button>${d.decision==="accepted_change"?exportLink:""}`
+    :`${g.kind==="intended_change"?`<button class="primary" type="button" data-decide="accepted_change" data-key="${esc(g.key)}">Accept as intended</button>`:""}
+      ${g.kind!=="intended_change"&&!g.small?`<button type="button" data-decide="confirmed" data-key="${esc(g.key)}">Confirm and fix</button>`:""}
+      <button class="link" type="button" data-decide="not_a_problem" data-key="${esc(g.key)}">Not a problem</button>${g.kind==="intended_change"?exportLink:""}`;
+  return `<div class="cause ${d&&d.decision!=="confirmed"?"decided":""}"><span class="stripe" style="background:${kc}"></span><div>
+    <div class="head"><span class="chip" style="color:#fff;background:${kc}">${esc(kl)}</span>${reg}${conf}
+      <span class="count">${g.failures.toLocaleString()}<small>${pct(g.share,0)}</small></span></div>
+    <h3>${esc(g.name)}</h3>
+    ${g.evidence.length?`<ul>${g.evidence.map(e=>`<li>${esc(e)}</li>`).join("")}</ul>`:""}
+    ${g.distinguishing.length?`<div><span class="ref">Sets these apart from passing cases:</span> ${g.distinguishing.map(featLabel).join("")}</div>`:""}
+    <div class="meta" style="margin-top:4px">${Object.entries(g.fields).map(([f,n])=>`${esc(f)} ${n}`).join(" · ")}${g.new!=null?` · ${g.new} new, ${g.persisting} already failing`:""}</div>
+    <details style="margin-top:6px"><summary class="ref">Examples</summary><div class="scroll"><table style="margin-top:6px"><tr><th>Case</th><th>Field</th><th>Expected</th><th>Got</th><th>How</th><th>Started at</th>${sc.kind==="eval"?"<th>Attempts</th>":""}</tr>
+      ${g.examples.map(x=>`<tr><td>${trace(x)}</td><td class="mono">${esc(x.field||"—")}</td><td>${esc(x.expected??"—")}</td><td>${esc(x.actual??"—")}</td><td class="ref">${esc(x.how||x.shape)}${x.reason&&x.reason!=="values differ"?`<br>${esc(x.reason.slice(0,90))}`:""}</td><td class="mono">${esc(x.origin_stage||"—")}</td>${x.check?`<td class="dots" title="${x.check.passed} of ${x.check.attempts} passed${x.check.base_attempts?`; before: ${x.check.base_passed} of ${x.check.base_attempts}`:""}">${esc(x.check.outcomes)}</td>`:""}</tr>`).join("")}</table></div></details>
+    <div class="acts">${acts}</div></div></div>`;
+}
+
+/* ---------- path contracts ---------- */
+const CKINDS={must_include:"Every document runs a step",never:"A step never runs",before:"A step runs before another",
+  only_after:"A step runs only after another",max_runs:"A step runs at most N times",allowed_steps:"Only listed steps run"};
+const CSTATE={broken:["bad","broken"],kept:["good","kept"],unjudged:["neutral","not checked"]};
+async function renderContracts(g,days){
+  const box=$("#wf-contracts");if(!box)return;
+  const [rep,sh]=await Promise.all([api(`/v1/contracts?${q({source:src(),days})}`).catch(e=>({error:e.message,contracts:[]})),
+    api(`/v1/contracts/shifts?${q({source:src(),days})}`).catch(()=>null)]);
+  const steps=g.nodes.filter(n=>!n.kind).map(n=>n.id);
+  const docLink=e=>`<a class="mono" href="#trace/${encodeURIComponent(e.document_id)}/${encodeURIComponent(e.stage)}" title="${esc(e.path.join(" → "))}">${esc(e.document_id)}</a>`;
+  box.innerHTML=`<div class="panel stack">
+    <div class="panel-head"><div><h2>Path contracts</h2><p class="sub">Rules about the steps a document may take, checked on every document. One break opens an alert right away. A change that breaks no rule, like a retry or a new branch, doesn't.</p></div>
+      <button type="button" id="ct-suggest">Suggest from traffic</button></div>
+    <div id="ct-suggestions"></div>
+    <div>${rep.contracts.length?rep.contracts.map(c=>{const [cls,lbl]=CSTATE[c.state];return `<div class="contract">
+      <span><span class="chip ${c.state==="broken"&&c.severity==="warning"?"warn":cls}">${lbl}</span></span>
+      <div><div class="msg">${esc(c.label)}${c.severity==="warning"?` <span class="ref">· warning</span>`:""}</div>
+        <div class="meta">${c.state==="broken"?`${c.violations.toLocaleString()} of ${c.judged.toLocaleString()} documents (${pct(c.rate)})`:`${c.judged.toLocaleString()} documents checked`}${c.note?` · ${esc(c.note)}`:""}</div>
+        ${c.examples.length?`<div class="meta">${esc(c.examples[0].detail)}: ${c.examples.slice(0,8).map(docLink).join(" · ")}${c.violations>8?" …":""}</div>`:""}</div>
+      <button class="link" type="button" data-del-contract="${c.id}">Remove</button></div>`}).join("")
+      :`<p class="note">${esc(rep.error||"No contracts yet. Add one below, or let Assay suggest the ones current traffic already keeps.")}</p>`}</div>
+    <details ${rep.contracts.length?"":"open"}><summary>Add a contract</summary>${contractForm(steps)}</details>
+  </div>
+  ${sh?`<div class="panel stack"><div class="panel-head"><div><h2>Path shifts</h2><p class="sub">How paths changed compared with the ${days} day${days>1?"s":""} before. None of these breaks a contract, so nobody is paged. If a shift is expected, leave it; if it shouldn't happen, add a contract.</p></div></div>
+    ${sh.shifts.length?`<div class="flags">${sh.shifts.map(x=>`<div class="flag"><span class="chip ${x.kind==="share"?"neutral":"warn"}">${esc(x.kind.replace("_"," "))}</span>${esc(x.message)}</div>`).join("")}</div>`:`<p class="note">${esc(sh.note||"No change beyond noise.")}</p>`}</div>`:""}`;
+  wireContracts(g,days);
+}
+function contractForm(steps){
+  return `<form id="ct-form" class="slo-form" style="margin-top:10px">
+    <datalist id="ct-steps">${steps.map(x=>`<option value="${esc(x)}">`).join("")}</datalist>
+    <select id="ct-kind" aria-label="Kind">${Object.entries(CKINDS).map(([k,l])=>`<option value="${k}">${esc(l)}</option>`).join("")}</select>
+    <input id="ct-step" list="ct-steps" placeholder="step" aria-label="Step" style="width:150px">
+    <span id="ct-other-w" hidden><input id="ct-other" list="ct-steps" placeholder="other step" aria-label="Other step" style="width:150px"></span>
+    <span id="ct-max-w" hidden>at most <input id="ct-max" type="number" min="1" value="3" aria-label="At most" style="width:64px"> runs</span>
+    <input id="ct-list" hidden placeholder="step, step, …" aria-label="Allowed steps" style="width:100%;max-width:520px" value="${esc(steps.join(", "))}">
+    <select id="ct-scope" aria-label="Scope"><option value="">for every document</option><option value="when">only when</option><option value="unless">except when</option></select>
+    <span id="ct-scope-w" hidden><select id="ct-field" aria-label="Attribute"><option>segment</option><option>document_type</option><option>processing_mode</option></select>
+      is <input id="ct-values" placeholder="value, value" aria-label="Values" style="width:160px"></span>
+    <select id="ct-sev" aria-label="Severity"><option value="critical">critical</option><option value="warning">warning</option></select>
+    <input id="ct-note" placeholder="why (optional)" aria-label="Note" style="width:180px">
+    <button class="primary" type="submit">Add</button><span id="ct-msg" class="note"></span></form>`;
+}
+function wireContracts(g,days){
+  const f=$("#ct-form"),again=()=>renderWorkflow();
+  const kindUI=()=>{const k=$("#ct-kind").value;
+    $("#ct-step").hidden=k==="allowed_steps";$("#ct-list").hidden=k!=="allowed_steps";
+    $("#ct-other-w").hidden=!["before","only_after"].includes(k);$("#ct-max-w").hidden=k!=="max_runs"};
+  if(f){$("#ct-kind").onchange=kindUI;kindUI();
+    $("#ct-scope").onchange=()=>{$("#ct-scope-w").hidden=!$("#ct-scope").value};
+    f.onsubmit=async e=>{e.preventDefault();const k=$("#ct-kind").value,sc=$("#ct-scope").value;
+      const list=v=>v.split(",").map(x=>x.trim()).filter(Boolean);
+      const body={source:src(),kind:k,severity:$("#ct-sev").value,note:$("#ct-note").value||null,
+        step:k==="allowed_steps"?null:$("#ct-step").value.trim(),other:$("#ct-other").value.trim()||null,
+        max_runs:k==="max_runs"?+$("#ct-max").value:null,steps:k==="allowed_steps"?list($("#ct-list").value):null};
+      if(sc)body[sc]={[$("#ct-field").value]:list($("#ct-values").value)};
+      try{await api("/v1/contracts",{method:"POST",body:JSON.stringify(body)});again()}
+      catch(err){$("#ct-msg").textContent=err.message}}}
+  document.querySelectorAll("[data-del-contract]").forEach(b=>b.onclick=async()=>{
+    if(!b.dataset.sure){b.dataset.sure=1;b.textContent="Remove? Click again";b.classList.add("worse");return}
+    b.disabled=true;await api(`/v1/contracts/${b.dataset.delContract}`,{method:"DELETE"}).catch(e=>{b.textContent=e.message});again()});
+  $("#ct-suggest").onclick=async()=>{const box=$("#ct-suggestions"),b=$("#ct-suggest");b.disabled=true;b.textContent="Reading paths…";
+    try{const r=await api(`/v1/contracts/suggestions?${q({source:src(),days:30})}`);
+      if(!r.suggestions.length){box.innerHTML=`<p class="note">${esc(r.note||"Nothing to add: your contracts already cover what the last 30 days of paths keep.")}</p>`;return}
+      box.innerHTML=`<div class="suggest"><div class="panel-head"><div><h3>Suggested from ${r.documents.toLocaleString()} finished documents (30 days)</h3>
+        <p class="sub">What current paths already keep, ignoring documents that break your contracts. Add the ones that are real rules, not coincidences.</p></div>
+        <button type="button" id="ct-addall">Add all</button></div>
+        ${r.suggestions.map((x,i)=>`<div class="flag"><button class="link" type="button" data-sugg="${i}">Add</button><span>${esc(x.label)} <span class="ref">${pct(x.kept_rate,1)} keep it · ${esc(x.severity)}</span></span></div>`).join("")}</div>`;
+      const add=x=>api("/v1/contracts",{method:"POST",body:JSON.stringify({source:src(),...Object.fromEntries(
+        ["kind","step","other","max_runs","steps","severity"].map(k=>[k,x[k]??null]))})});
+      box.querySelectorAll("[data-sugg]").forEach(el=>el.onclick=async()=>{el.disabled=true;
+        try{await add(r.suggestions[+el.dataset.sugg]);el.textContent="Added"}catch(e){el.textContent=e.message}});
+      $("#ct-addall").onclick=async()=>{for(const x of r.suggestions)await add(x).catch(()=>null);again()};
+    }catch(e){box.innerHTML=`<p class="reason">${esc(e.message)}</p>`}
+    finally{b.disabled=false;b.textContent="Suggest from traffic"}};
 }
 
 /* ---------- trace ---------- */
@@ -861,7 +1059,8 @@ function stepByStep(ea,id){
   const fmtv=v=>v==null?"":typeof v==="object"?JSON.stringify(v):String(v);
   const hl=S.trace.step;
   const origins={};errs.forEach(e=>{if(e.origin_stage)(origins[e.origin_stage]??=[]).push(e.field)});
-  const pathbar=`<div class="pathbar" id="pathbar">${steps.map((s,i)=>`${i?`<span class="arr">→</span>`:""}<button type="button" data-col="${esc(s.stage)}" class="${origins[s.stage]?"err":""} ${["failed","error","timeout","permanently_failed"].includes(s.status)?"fail":""} ${s.stage===hl?"hl":""}" title="${origins[s.stage]?"Errors started here: "+esc(origins[s.stage].join(", ")):esc(s.status)}">${i+1}. ${esc(s.stage)}${origins[s.stage]?` ✕ ${origins[s.stage].length}`:""}</button>`).join("")}<span class="arr">→</span><button type="button" class="${errs.some(e=>!e.origin_stage&&e.verdict==="after")?"err":""}" disabled>output</button></div>`;
+  const broke={};(S.trace.contracts||[]).forEach(v=>{if(v.at!=null)(broke[v.at]??=[]).push(v.detail)});
+  const pathbar=`<div class="pathbar" id="pathbar">${steps.map((s,i)=>`${i?`<span class="arr">→</span>`:""}<button type="button" data-col="${esc(s.stage)}" class="${origins[s.stage]?"err":""} ${["failed","error","timeout","permanently_failed"].includes(s.status)?"fail":""} ${broke[i]?"viol":""} ${s.stage===hl?"hl":""}" title="${broke[i]?"Breaks a path contract: "+esc(broke[i].join("; "))+". ":""}${origins[s.stage]?"Errors started here: "+esc(origins[s.stage].join(", ")):esc(s.status)}">${i+1}. ${esc(s.stage)}${origins[s.stage]?` ✕ ${origins[s.stage].length}`:""}</button>`).join("")}<span class="arr">→</span><button type="button" class="${errs.some(e=>!e.origin_stage&&e.verdict==="after")?"err":""}" disabled>output</button></div>`;
   return `<div class="panel stack" id="stepbystep"><div class="panel-head"><div><h2>Step by step</h2><p class="sub">What each step produced for this document${errs.length?". Red is where a reported value was wrong, green where it was still right":""}.</p></div></div>
     ${pathbar}
     ${hl&&origins[hl]?`<p class="flag"><span class="chip bad">error point</span><b class="mono">${esc(hl)}</b>&nbsp;is where ${esc(origins[hl].join(", "))} went wrong on this document.</p>`:""}
@@ -885,8 +1084,10 @@ function wireStepByStep(ea,id){
 async function showTrace(id,scroll=true){
   S.trace.doc=id;const out=$("#trace-out");
   try{history.replaceState(null,"","#trace/"+encodeURIComponent(id))}catch(e){}
-  let t,ea=null;try{[t,ea]=await Promise.all([api(`/v1/trace/${encodeURIComponent(id)}?${q({source:src()})}`),
-    api(`/v1/errors/${encodeURIComponent(id)}?${q({source:src()})}`).catch(()=>null)])}catch(e){out.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
+  let t,ea=null,cv=[];try{[t,ea,cv]=await Promise.all([api(`/v1/trace/${encodeURIComponent(id)}?${q({source:src()})}`),
+    api(`/v1/errors/${encodeURIComponent(id)}?${q({source:src()})}`).catch(()=>null),
+    api(`/v1/contracts/documents/${encodeURIComponent(id)}?${q({source:src()})}`).catch(()=>[])])}catch(e){out.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
+  S.trace.contracts=cv;
   const d=t.document,sev={bad:"bad",warn:"warn",info:"neutral"};
   const t0=new Date(d.received_at).getTime();
   const ends=[...t.stages.map(s=>s.finished_at),...t.calls.map(c=>c.ts),d.completed_at].filter(Boolean).map(x=>new Date(x).getTime()+0);
@@ -909,6 +1110,7 @@ async function showTrace(id,scroll=true){
       <div><dt>Mode</dt><dd>${esc(d.processing_mode||"—")}</dd></div><div><dt>AI spend</dt><dd>${esc(fmt(t.cost_usd,"usd"))}${t.calls.some(c=>c.cost_usd==null)?" (floor)":""}</dd></div>
       <div><dt>Downstream</dt><dd>${d.delivered_downstream==null?"not checked":d.delivered_downstream?"delivered":"missing"}</dd></div>
     </dl>
+    ${cv.length?`<div class="flags">${cv.map(v=>`<div class="flag"><span class="chip ${v.severity==="critical"?"bad":"warn"}">contract</span><span>Breaks “${esc(v.label)}”: ${esc(v.detail)}.</span></div>`).join("")}</div>`:""}
     ${t.flags.length?`<div class="flags">${t.flags.map(f=>`<div class="flag"><span class="chip ${sev[f.severity]}">${f.severity==="info"?"note":f.severity==="bad"?"problem":"warning"}</span>${esc(f.text)}</div>`).join("")}</div>`:`<p class="note">Nothing flagged on this document.</p>`}
     <div class="scroll"><svg class="timeline" viewBox="0 0 ${W} ${H}" style="min-width:640px;width:100%">${g}</svg></div>
     <div class="legend"><span><i style="background:var(--accent)"></i>stage did work</span><span><i style="background:var(--line-strong)"></i>stage reported success, did no work</span><span><i style="background:var(--good)"></i>AI call</span><span><i style="background:var(--warn)"></i>served by a different model</span><span><i style="background:var(--bad)"></i>failed</span></div>
@@ -928,7 +1130,7 @@ async function renderAlerts(){
   const list=await api(`/v1/alerts?${q({source:src(),state:st==="pending"?"all":st,limit:200})}`).catch(()=>[]);
   const shown=st==="pending"?list.filter(a=>a.state==="pending"):st==="all"?list:list.filter(a=>a.state===st);
   $("#tab-alerts").innerHTML=`<div class="panel">
-    <div class="panel-head"><div><h2>Alerts</h2><p class="sub">An alert opens after its condition holds on two runs in a row, and resolves on the first run where it no longer holds. Pending alerts have been seen once and haven't notified anyone.</p></div>
+    <div class="panel-head"><div><h2>Alerts</h2><p class="sub">An alert opens after its condition holds on two runs in a row (a broken path contract opens at once), and resolves on the first run where it no longer holds. Pending alerts have been seen once and haven't notified anyone.</p></div>
       <div class="picker">${["open","pending","resolved","all"].map(s=>`<button type="button" class="${s===st?"primary":""}" data-state="${s}">${s[0].toUpperCase()+s.slice(1)}</button>`).join("")}</div></div>
     ${shown.length?shown.map(a=>alertRow(a)).join(""):`<p class="note">No ${st==="all"?"":st} alerts.</p>`}
   </div>`;
@@ -940,14 +1142,14 @@ async function renderGates(){
   const g=await api("/v1/gates").catch(()=>[]);
   $("#tab-gates").innerHTML=`<div class="panel"><div class="panel-head"><div><h2>Release gates</h2><p class="sub">Every promote, hold or rollback decision, with the lineage that produced it. CI submits them to <code>POST /v1/gates/evaluate</code> (<a href="/docs#/default/evaluate_gate_v1_gates_evaluate_post">API docs</a>).</p></div></div>
     ${g.length?`<div class="scroll"><table><tr><th>When</th><th>Outcome</th><th>Lineage</th><th>Deciding slices</th></tr>
-    ${g.map(d=>`<tr><td class="ref">${esc(d.created_at.slice(0,16).replace("T"," "))}</td><td><span class="chip ${d.outcome==="advance"?"good":d.outcome==="hold"?"warn":"bad"}">${d.outcome}</span></td>
+    ${g.map(d=>`<tr><td class="ref">${esc(d.created_at.slice(0,16).replace("T"," "))}</td><td><span class="chip ${d.outcome==="advance"?"good":d.outcome==="hold"||d.outcome==="rerun"?"warn":"bad"}">${d.outcome}</span></td>
       <td class="ref">${Object.entries(d.lineage).map(([k,v])=>`${esc(k)}=${esc(v)}`).join("<br>")}</td>
-      <td>${d.slices.filter(s=>s.outcome!=="advance").map(s=>`<div><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}: ${esc(s.reason)}</div>`).join("")||"All slices within limits."}</td></tr>`).join("")}</table></div>`
+      <td>${d.reasons?d.reasons.map(r=>`<div>${esc(r)}</div>`).join(""):d.slices.filter(s=>s.outcome!=="advance").map(s=>`<div><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}: ${esc(s.reason)}</div>`).join("")||"All slices within limits."}</td></tr>`).join("")}</table></div>`
     :`<div class="empty">No gate decisions yet. Wire <code>POST /v1/gates/evaluate</code> into CI so every prompt, model or pipeline change is judged before it ships.</div>`}</div>`;
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","workflow","measures","cost","errors","prompts","trace","alerts","gates","connect"];
+const TABS=["overview","workflow","measures","cost","errors","failures","prompts","trace","alerts","gates","connect"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -959,13 +1161,14 @@ async function render(){
   if(t==="workflow")S.wfStep=hp[1]?decodeURIComponent(hp[1]):null;
   document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
-  if(!S.overview&&t!=="gates"&&t!=="connect")return;
+  if(!S.overview&&!["gates","connect","failures"].includes(t))return;
   try{
     if(t==="overview"){renderOverview();overviewFlow()}
     if(t==="workflow")await renderWorkflow();
     if(t==="measures")await (S.measure?renderMeasureDetail():renderMeasureGrid());
     if(t==="cost")await renderCost();
     if(t==="errors")await renderErrors();
+    if(t==="failures")await renderFailures();
     if(t==="prompts")await renderPrompts();
     if(t==="trace")await renderTrace();
     if(t==="alerts")await renderAlerts();

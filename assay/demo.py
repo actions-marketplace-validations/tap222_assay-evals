@@ -12,6 +12,10 @@ incidents so alerting has something to catch:
 - last 4 days: Globex field extraction escalates to a pricier fallback model,
   so its cost per document jumps
 - last 3 days: a bad release of the validation step corrupts correct totals
+- last 2 days: a config change lets some documents skip redaction, and a
+  cleanup job runs delete_source on a few documents mid-pipeline; both break
+  path contracts. Field extraction retries after a failure, which the
+  contracts allow (up to 3 runs), so that change doesn't alert.
 
 Every step records what it produced, and a share of wrong outputs are reported
 (as a reviewer or customer would), so error analysis can trace each one to the
@@ -60,6 +64,17 @@ TOUCH = {"invoice": 0.10, "bank_statement": 0.20, "contract": 0.45, "id_document
          "insurance_claim": 0.35, None: 0.25}
 VENDORS = ["Acme Supply Co", "Blue Harbor Freight", "Crestline Medical", "Delta Office Partners", "Evergreen Legal LLP"]
 RELEASE_BUG_DAYS = 3  # validation v2.4 shipped 3 days ago and mangles amounts
+PATH_BUG_DAYS = 2  # redaction skipped / delete_source run by a misconfigured job
+
+# Rules about the steps a document may take (assay/contracts.py).
+EXAMPLE_CONTRACTS = [
+    dict(kind="must_include", step="redaction", severity="critical", note="Nothing leaves unredacted"),
+    dict(kind="never", step="delete_source", severity="critical", note="Source files are only deleted by retention"),
+    dict(kind="before", step="classification", other="field_extraction", severity="warning"),
+    dict(kind="only_after", step="human_review", other="validation", severity="warning",
+         note="Reviewers see validated values"),
+    dict(kind="max_runs", step="field_extraction", max_runs=3, severity="warning", note="Retries are fine, loops aren't"),
+]
 
 # Prompt history per AI step: (version, released N days ago, template, what changed).
 PROMPTS = {
@@ -179,6 +194,9 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
             conn.execute(delete(store.measure_runs).where(store.measure_runs.c.id.in_(run_ids)))
         conn.execute(delete(store.alerts).where(store.alerts.c.source == SOURCE))
         conn.execute(delete(store.slos).where(store.slos.c.source == SOURCE))
+        conn.execute(delete(store.path_contracts).where(store.path_contracts.c.source == SOURCE))
+        for c in EXAMPLE_CONTRACTS:  # one at a time: each kind has its own fields
+            conn.execute(store.path_contracts.insert().values(source=SOURCE, updated_at=now, **c))
         conn.execute(delete(store.cost_rates).where(store.cost_rates.c.source == SOURCE))
         conn.execute(delete(store.prompt_versions).where(store.prompt_versions.c.tenant == TENANT))
         conn.execute(store.cost_rates.insert(), [dict(source=SOURCE, key=k, value=v, updated_at=now)
@@ -222,15 +240,24 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
             # Documents that need a person take a branch through human_review.
             touched = rng.random() < TOUCH[itype]
             path = PIPELINE[:6] + (["human_review"] if touched else []) + PIPELINE[6:]
-            for s, stage in enumerate(path):
-                start = received + timedelta(seconds=30 * s)
+            if age < PATH_BUG_DAYS and rng.random() < 0.04:
+                path.remove("redaction")
+            if age < PATH_BUG_DAYS and rng.random() < 0.015:
+                path.insert(2, "delete_source")
+            s = 0
+            for stage in path:
                 fail_p = 0.12 if (stage == "field_extraction" and 4 <= age < 6) else 0.004
-                failed = stage not in STUBS and rng.random() < fail_p
-                runs.append(dict(tenant=TENANT, run_id=f"{did}-{stage}", document_id=did, stage=stage,
-                                 status="failed" if failed else "success", started_at=start,
-                                 finished_at=start + timedelta(seconds=0.1 if stage in STUBS else 20),
-                                 did_work=stage not in STUBS, sequence=s, outputs=step_out.get(stage),
-                                 prompt_id=prompt_for(stage, age)[0], prompt_version=prompt_for(stage, age)[1]))
+                failed = stage not in STUBS and stage != "delete_source" and rng.random() < fail_p
+                # A failed field extraction is retried once; other failed steps aren't.
+                for attempt in ([True, False] if failed and stage == "field_extraction" else [failed]):
+                    start = received + timedelta(seconds=30 * s)
+                    runs.append(dict(tenant=TENANT, run_id=f"{did}-{s:02d}-{stage}", document_id=did, stage=stage,
+                                     status="failed" if attempt else "success", started_at=start,
+                                     finished_at=start + timedelta(seconds=0.1 if stage in STUBS else 20),
+                                     did_work=stage not in STUBS, sequence=s,
+                                     outputs=None if attempt and stage == "field_extraction" else step_out.get(stage),
+                                     prompt_id=prompt_for(stage, age)[0], prompt_version=prompt_for(stage, age)[1]))
+                    s += 1
             for stage in STAGES:
                 ts = received + timedelta(seconds=rng.randint(10, 600))
                 attributed = rng.random() < (0.97 if (stage == "document_splitting" and ago(ts) < rollout) else 0.6)
@@ -293,11 +320,153 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
         end = now - timedelta(days=d)
         run_ids.append(run_measures(engine, source, Window(end - timedelta(days=window_days), end), as_of=end,
                                     prompt_regressions=d < 7))
+    evals = seed_evals(engine, now)
     with engine.connect() as conn:
         a = store.alerts
         open_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "open"))).all())
         resolved_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "resolved"))).all())
     return {"documents": len(docs), "calls": len(calls), "stage_runs": len(runs), "reviews": len(reviews),
             "errors": len(errors),
-            "runs": len(run_ids),
+            "runs": len(run_ids), "eval_results": evals,
             "alerts_open": open_n, "alerts_resolved": resolved_n}
+
+
+# ---------- evaluation runs ----------
+
+EVAL_TENANT = "demo-eval"  # its own source, so certification traffic doesn't skew production measures
+EVAL_CASES = 400
+
+
+def _eval_text(truth, itype, pages, us_date, garble_total):
+    d = datetime.strptime(truth["date"], "%Y-%m-%d")
+    total = "$?,??1.?0" if garble_total else f"${truth['total']}"
+    return (f"{itype.replace('_', ' ').upper()} {truth['reference']}   {truth['vendor']}   "
+            f"Date: {d:%m/%d/%Y}   " if us_date else
+            f"{itype.replace('_', ' ').upper()} {truth['reference']}   {truth['vendor']}   Date: {d:%d %b %Y}   ") + \
+        f"Bill to: Accounts Payable   Line items ...   Total due {total}   Page 1 of {pages}"
+
+
+def seed_evals(engine: Engine, now: datetime, cases: int = EVAL_CASES, attempts: int = 3) -> int:
+    """Two runs of a 400-case certification set, before and after a release, each
+    case attempted three times, with one cause of each kind built in:
+
+    - both runs: OCR loses totals on long documents (AI, long-standing); the test
+      set writes 30% of totals as "$1,240.00" where the pipeline returns "1240.00"
+      (evaluator too strict); 3% of expected references are typos (evaluator:
+      the expected value isn't in the document); the LLM judge fails 6% of
+      vendors on one attempt and passes the same output on the others
+      (evaluator inconsistent); field extraction sometimes drops the last
+      character of a reference on 6% of cases (flaky model, not a regression).
+    - second run only: extract_fields v13 reads US dates day-first (AI regression);
+      build b2e4f60 upper-cases vendor names on purpose (intended change); the
+      field-extraction service times out for half an hour (infrastructure); the
+      LLM judge endpoint times out on some attempts (infrastructure, in the
+      harness); b2e4f60 emits totals as strings (schema check); and 3% of cases
+      start taking the bill-to line as the vendor on some attempts (plausibly
+      worse, too few attempts to tell: rerun).
+    """
+    from assay.ingest import PromptEvent, register_prompts
+    t = EVAL_TENANT
+    with engine.begin() as conn:
+        for tbl in (store.event_documents, store.event_stage_runs, store.event_calls, store.eval_results):
+            conn.execute(delete(tbl).where(tbl.c.tenant == t))
+        conn.execute(delete(store.prompt_versions).where(store.prompt_versions.c.tenant == t))
+        conn.execute(delete(store.failure_decisions).where(store.failure_decisions.c.source == f"events:{t}"))
+    register_prompts(engine, [PromptEvent(prompt_id="extract_fields", version="v12", template=PROMPTS["field_extraction"][1][0][2]),
+                              PromptEvent(prompt_id="extract_fields", version="v13", template=PROMPTS["field_extraction"][1][1][2],
+                                          note="Accept European day-first dates", author="ml-team"),
+                              PromptEvent(prompt_id="ocr_transcribe", version="v4", template=PROMPTS["text_extraction"][1][0][2])], t)
+    runs = [(f"cert-{(now - timedelta(days=14)):%Y-%m-%d}", now - timedelta(days=14, hours=3), "v12", "a1b2c3d", False),
+            (f"cert-{(now - timedelta(days=1)):%Y-%m-%d}", now - timedelta(days=1, hours=3), "v13", "b2e4f60", True)]
+    docs, stage_runs, calls, results = [], [], [], []
+    for run_id, start, version, build, after in runs:
+        lineage = {"prompt": f"extract_fields@{version}", "model": "claude-sonnet-5", "build": build}
+        outage = range(int(cases * 0.37), int(cases * 0.45))  # half an hour of field-extraction timeouts
+        for i in range(cases):
+            crng = random.Random(f"case-{i}")  # the same case in both runs
+            itype = crng.choice(["invoice", "bank_statement", "contract", "insurance_claim"])
+            pages = crng.randint(*PAGES[itype])
+            truth = _truth(crng, start, itype)
+            us = crng.random() < 0.4
+            garble = pages >= 10 and crng.random() < 0.35
+            dollar_total = crng.random() < 0.30
+            typo_ref = crng.random() < 0.03
+            judge_flips = crng.random() < 0.06
+            flaky_ref = crng.random() < 0.06
+            newly_flaky = crng.random() < 0.03
+            case_id = f"case-{i:03d}"
+            expected = {"reference": truth["reference"][:-2] + truth["reference"][-1] + truth["reference"][-2]
+                        if typo_ref else truth["reference"], "vendor": truth["vendor"],
+                        "total": f"${truth['total']}" if dollar_total else truth["total"].replace(",", ""),
+                        "date": truth["date"]}
+            for k in range(attempts):
+                arng = random.Random(f"{run_id}-{i}-{k}")  # what varies between attempts
+                did, ts = f"{run_id}/{case_id}#{k}", start + timedelta(seconds=7 * (i * attempts + k))
+                timeout = after and i in outage
+                fields = {"reference": truth["reference"], "vendor": truth["vendor"], "total": truth["total"],
+                          "date": truth["date"]}
+                if garble:
+                    fields["total"] = f"{float(truth['total'].replace(',', '')) * 0.887:,.2f}"
+                d = datetime.strptime(truth["date"], "%Y-%m-%d")
+                if after and us and d.day <= 12 and d.day != d.month:
+                    fields["date"] = f"{d.year}-{d.day:02d}-{d.month:02d}"
+                if flaky_ref and arng.random() < 0.35:
+                    fields["reference"] = truth["reference"][:-1]
+                if after and newly_flaky and k == 1:
+                    fields["vendor"] = "Accounts Payable"
+                validated = dict(fields, total=fields["total"].replace(",", ""))
+                if after:
+                    validated["vendor"] = validated["vendor"].upper()
+                steps = [("file_prep", {"pages": pages}, None),
+                         ("text_extraction", {"_text": _eval_text(truth, itype, pages, us, garble)}, ("ocr_transcribe", "v4")),
+                         ("classification", {"document_type": itype}, None),
+                         ("field_extraction", None if timeout else fields, ("extract_fields", version)),
+                         ("validation", None if timeout else validated, None)]
+                docs.append(dict(tenant=t, document_id=did, received_at=ts, completed_at=ts + timedelta(minutes=2),
+                                 status="completed", processing_mode="batch", segment="Certification set",
+                                 document_type=itype, page_count=pages))
+                for j, (stage, out, prompt) in enumerate(steps):
+                    status = "timeout" if timeout and stage == "field_extraction" else "success"
+                    stage_runs.append(dict(tenant=t, run_id=f"{did}-{stage}", document_id=did, stage=stage,
+                                           status=status, started_at=ts + timedelta(seconds=j),
+                                           finished_at=ts + timedelta(seconds=j + 1), did_work=True, sequence=j,
+                                           outputs=out, prompt_id=prompt[0] if prompt else None,
+                                           prompt_version=prompt[1] if prompt else None))
+                    if prompt:
+                        model = "claude-sonnet-5" if stage == "field_extraction" else "gemini-3-flash-preview"
+                        calls.append(dict(tenant=t, call_id=f"{did}-{stage}", stage=stage, ts=ts + timedelta(seconds=j),
+                                          document_id=did, model_declared=model, model_served=model,
+                                          resolving_layer="primary", prompt_id=prompt[0], prompt_version=prompt[1],
+                                          segment="Certification set", document_type=itype,
+                                          status="timeout" if status == "timeout" else "success",
+                                          latency_ms=30000 if status == "timeout" else 4000, code_revision=build))
+                final = {} if timeout else validated
+                rt = ts + timedelta(seconds=5)
+                for field_, exp in expected.items():
+                    act = final.get(field_)
+                    results.append(dict(tenant=t, result_id=f"{run_id}-{case_id}-{field_}-em-{k}", run_id=run_id,
+                                        case_id=case_id, document_id=did, field=field_, expected=exp, actual=act,
+                                        evaluator="exact_match@2", status="pass" if act == exp else "fail", ts=rt,
+                                        attempt=k, lineage=lineage, reason=None if act == exp else "values differ"))
+                act = final.get("vendor")
+                ok = act is not None and act.lower() == truth["vendor"].lower() and not (judge_flips and k == 0)
+                harness = after and arng.random() < 0.02
+                results.append(dict(tenant=t, result_id=f"{run_id}-{case_id}-vendor-judge-{k}", run_id=run_id,
+                                    case_id=case_id, document_id=did, field="vendor", expected=truth["vendor"],
+                                    actual=act, evaluator="llm_judge@1", attempt=k, lineage=lineage,
+                                    ts=rt + timedelta(seconds=1), status="error" if harness else "pass" if ok else "fail",
+                                    reason="LLM judge request timed out after 30 s" if harness else None if ok else
+                                    "The vendor name does not match the one on the document."))
+                schema_bad = after and not timeout and random.Random(f"schema-{i}").random() < 0.05
+                results.append(dict(tenant=t, result_id=f"{run_id}-{case_id}-schema-{k}", run_id=run_id,
+                                    case_id=case_id, document_id=did, field=None, expected=None, actual=None,
+                                    evaluator="schema_check@1", attempt=k, lineage=lineage,
+                                    ts=rt + timedelta(seconds=2), status="fail" if schema_bad else "pass",
+                                    reason=f"schema violation: 'total' is a string ('{validated['total']}'), "
+                                           "expected number" if schema_bad else None))
+    with engine.begin() as conn:
+        conn.execute(store.event_documents.insert(), docs)
+        conn.execute(store.event_stage_runs.insert(), stage_runs)
+        conn.execute(store.event_calls.insert(), calls)
+        conn.execute(store.eval_results.insert(), results)
+    return len(results)

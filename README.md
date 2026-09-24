@@ -35,6 +35,11 @@ The demo is a generated pipeline serving four customers. It has four staged inci
   flagged as a regression)
 - a bad release of the validation step that corrupts correct totals, plus everyday errors
   (OCR losing totals, misclassification, misread dates) reported by reviewers and customers
+- two path-contract breaks: documents skipping redaction, and a `delete_source` step
+
+A second source, `events:demo-eval`, holds two runs of a 400-case certification set, before
+and after a release. Each case runs three times, and some outputs vary between attempts. Its failures include one cause of each kind (see
+[Failure causes](#failure-causes-many-failures-a-few-causes)).
 
 None of it is real data.
 
@@ -154,8 +159,8 @@ to refuse to run open.
 
 | Endpoint | Use |
 |---|---|
-| `POST /v1/events` | any mix of `documents`, `stage_runs`, `calls`, `reviews`, `extractions` in one request (up to 5,000 records) |
-| `POST /v1/events/{documents,stage-runs,calls,reviews,extractions}` | one record type per request |
+| `POST /v1/events` | any mix of `documents`, `stage_runs`, `calls`, `reviews`, `extractions`, `errors`, `eval_results` in one request (up to 5,000 records) |
+| `POST /v1/events/{documents,stage-runs,calls,reviews,extractions,errors,eval-results}` | one record type per request |
 | `POST /v1/otlp/v1/traces` | OpenTelemetry traces (OTLP/HTTP, JSON). Point a collector's `otlphttp` exporter at `/v1/otlp` |
 
 The ingest contract:
@@ -301,11 +306,106 @@ after release.
 - Release gates warn when the `prompt` in a decision's lineage (`id@version`) isn't in the
   registry.
 
+## Failure causes: many failures, a few causes
+
+5,000 failed checks are rarely 5,000 problems. **Failures** groups them into causes and
+gives each cause a kind, with the evidence:
+
+| Kind | What it means | Evidence Assay uses |
+|---|---|---|
+| **AI / pipeline error** | a step got the value wrong. Marked a **regression** when it's new | the step's output was wrong although its input had the right value; no infrastructure signal there. New: passed in the previous run, or a failure rate that jumped at a point in time |
+| **Infrastructure** | the output was wrong because something broke | a step failed or timed out on that document; a fallback stood in for an *unavailable* model; right in every step but wrong after the pipeline; the harness couldn't run the check (timeouts, 5xx, rate limits); failures bunched in a short stretch |
+| **Evaluator** | the check is wrong, not the output | same value written differently; the output is in the document's text and the expected value isn't; the same evaluator passed the same output on another attempt; the evaluator errored |
+| **Intended change** | the output changed on purpose | newly failing with a release, consistently, and still correct once formatting is ignored |
+| **Unsure** | the evidence doesn't point anywhere | said plainly rather than forced into a kind |
+
+How it works:
+
+1. Every failure is traced through its document's steps (the same analysis as
+   [Error analysis](#error-analysis-where-did-it-go-wrong)) and classified on its own evidence.
+2. Failures are grouped by kind, mechanism and step. In an eval run, newly failing and
+   already failing are kept apart. AI groups are also split by how the value is wrong, so a
+   swapped date and a wrong vendor at the same step are separate causes.
+3. Each group is described by what **sets it apart from passing cases**. A feature is listed
+   only if it's much more common in the group's failures than in the passes (lift, with a
+   significance test). So "they're all invoices" doesn't make the list when most cases are
+   invoices.
+4. Group-level evidence settles the kind:
+   - whether the failures are new since the previous run;
+   - which change between the runs they line up with. That's the prompt at their origin step,
+     or, for values a code step produced, the build;
+   - when they started;
+   - whether they came in a burst.
+
+No LLM decides anything here. Every kind comes from rules, and the rules' evidence is on the
+card. Confidence reflects how consistently the members point to that kind.
+
+**Evaluation runs.** Send each check, **passes too**, to `POST /v1/events/eval-results`:
+
+```json
+{"run_id": "cert-2026-09-23", "case_id": "case-017", "document_id": "cert-2026-09-23/case-017",
+ "field": "date", "expected": "2026-03-07", "actual": "2026-07-03", "status": "fail",
+ "evaluator": "exact_match@2", "lineage": {"prompt": "extract_fields@v13", "build": "b2e4f60"}}
+```
+
+`status` is `pass`, `fail`, or `error` when the check itself couldn't run. Send the pipeline's
+stage runs for the same `document_id`, so failures can be traced step by step. Each run is
+compared with the one before it, or with `?baseline=<run_id>`.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/failures?source=…&days=30` | reported errors grouped into causes |
+| `GET /v1/evals/runs?source=…` | evaluation runs with pass/fail counts and lineage |
+| `GET /v1/evals/runs/{run}/failures?source=…` | one run's failures grouped into causes |
+| `PUT /v1/failures/decisions` | record a call on a cause: `accepted_change`, `not_a_problem` or `confirmed` |
+| `GET /v1/evals/runs/{run}/expectations?source=…&key=…` | for an accepted change: the new expected values, to update the test set |
+| `GET /v1/evals/runs/{run}/stability?source=…` | pass rate per check, flaky and rerun lists, and the release call |
+| `POST /v1/evals/runs/{run}/gate` | the same call, recorded as a gate decision |
+
+## Path contracts: which changes are regressions?
+
+Not every change to a document's path is a regression. `search → order → retry → respond`
+is usually fine; `search → delete → respond` is not. A diff between two workflows can't tell
+them apart, so Assay checks every document's path against rules you agree to:
+
+| Kind | Example | Catches |
+|---|---|---|
+| `must_include` | every document runs `redaction` | skipped safety steps |
+| `never` | `delete_source` never runs, `unless` segment is `admin` | dangerous steps |
+| `before` | `classification` runs before `field_extraction` | reordering |
+| `only_after` | `human_review` runs only after `validation` | a branch taken without its trigger |
+| `max_runs` | `field_extraction` runs at most 3 times | allows retries but not loops |
+| `allowed_steps` | nothing outside this list runs | unknown new steps |
+
+Scope a contract with `when` (the document must match every listed attribute) or `unless`
+(a matching document is exempt), over `segment`, `document_type` and `processing_mode`.
+`must_include` is judged only once a document has finished.
+
+```bash
+curl -X POST "$ASSAY/v1/contracts" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"kind": "never", "step": "delete_source", "unless": {"segment": ["admin"]}}'
+```
+
+- **One break is enough.** A broken contract opens an alert on the run that sees it. There's
+  no baseline to learn and no sample size to wait for. The alert resolves on the first run
+  where documents were checked and none broke it, or when you change or delete the contract.
+- **Shifts** (`GET /v1/contracts/shifts`) are changes that break no contract: a new step, a
+  new move between steps, or a move whose share of documents changed by more than 3
+  standard errors and 2 points. They are listed for a person to look at and never page.
+- **Suggestions** (`GET /v1/contracts/suggestions`) are the contracts that the last 30 days of
+  paths already keep, learned only from documents that keep your existing contracts. You
+  confirm them rather than write them from scratch.
+- The **Workflow** view draws a red dashed ring around steps where contracts broke and a red
+  dashed edge on the move that broke them. **Trace** marks the step where a document broke
+  a contract.
+
 ## What you get
 
 | View | Answers |
 |---|---|
 | **Overview** | What's broken right now? Open anomalies, SLO state, and the slices that moved beyond noise since the last run. Refreshes every minute. |
+| **Workflow** | The pipeline as a graph inferred from traffic: each step's health, errors and broken path contracts; the contracts and how each is holding up; suggested contracts; and path shifts. |
+| **Failures** | Reported errors or an evaluation run, grouped into causes: each with its kind, confidence, evidence, what sets it apart from passes, and examples. Accept intended changes, confirm or dismiss the rest. |
 | **Cost** | Fully loaded cost per document and per page, stacked by component over time; cost by document type, segment or mode; AI spend by model with the fallback share; the rate card. |
 | **Measures** | Each measure over time, with the expected range it's judged against, any SLO line, a breakdown of every slice, and an SLO editor. |
 | **Prompts** | Every prompt version: documents, error rate, fallback, latency, cost, a verdict against the previous version (adjusted for document mix), what changed, and a diff. |
@@ -405,6 +505,53 @@ if even the optimistic end of the confidence interval is worse than max(toleranc
 floor). It holds if the interval straddles that limit, and advances otherwise.
 `severity: "high"` halves the tolerance. The worst slice decides.
 
+**The noise floor** is how far apart two runs of the same version on the same corpus usually
+land. With two baseline runs, it's their difference. With three or more, it's 1.96 × √2 × the
+standard deviation of the run means, which is the 95% range of the gap between two runs. It
+used to be the largest gap between any two runs. That grows with the number of runs, so more
+evidence made the gate looser.
+
+### Nondeterminism: flaky checks, and rerun instead of block
+
+Run the same case five times and get PASS PASS FAIL PASS PASS. Is that a regression? Four of
+five fits any true pass rate from 28% to 99%, so it depends on how reliably the case passed
+before. Send each attempt as its own eval result (`attempt`: 0, 1, 2…). Each **check** (a case,
+field and evaluator) then gets a pass rate with an exact interval, compared with the baseline
+run:
+
+| State | Meaning |
+|---|---|
+| got worse | the pass rate dropped beyond chance: one-sided Fisher exact test, with Benjamini–Hochberg across all checks (so 5,000 checks don't produce 250 false alarms) |
+| needs reruns | plausibly worse, but too few attempts to tell. Says how many more attempts would settle it |
+| flaky | both outcomes seen, and no worse than before |
+| improved, stable pass, stable fail, errored | as named |
+
+A flaky check says what varies:
+- the output changes between attempts (the model or pipeline is nondeterministic);
+- only the verdict on the same output changes (the evaluator);
+- attempts errored (infrastructure).
+
+In Failure causes, flaky failures are kept apart from new ones. A cause is called a regression
+only when its checks' attempts, pooled, show a drop beyond chance. Three attempts per case
+can't prove much alone, but 55 cases that all went from 3/3 to 0/3 can.
+
+**The release call** (`GET /v1/evals/runs/{run}/stability`, recorded with
+`POST /v1/evals/runs/{run}/gate`) counts each check by its pass rate, so a flaky check is 0.8,
+not a pass one run and a fail the next. The noise comes from the attempts themselves, so no
+separate identical runs are needed. It uses the failure causes:
+- failures that are the evaluator's, or that someone accepted, don't count;
+- infrastructure failures are listed for rerunning;
+- an intended change nobody has accepted holds the release.
+
+The decision is one of:
+
+| Call | When |
+|---|---|
+| roll back | the counted pass rate is lower than the tolerance allows, even at the optimistic end of its interval |
+| hold | checks got worse beyond chance, or an intended change is waiting for a decision |
+| rerun | nothing proven worse, but some checks can't be judged yet. Returns the list, with attempts per check |
+| advance | otherwise. Flaky checks are reported and don't block |
+
 ## Deploy
 
 **Docker:** `docker build -t assay . && docker run -p 8400:8400 -v assay-data:/data assay`
@@ -430,7 +577,11 @@ All settings are listed in `.env.example`.
 sources/      sql.py (any database, via a mapping), events.py (pushed events)
 measures/     operations.py, cost.py, pipeline.py, ground_truth.py; each a class with compute()
 cost.py       cost ledger: components, estimates, breakdowns
-alerts.py     bands, SLO matching, pending → open → resolved, webhook
+alerts.py     bands, SLO matching, pending → open → resolved, contract alerts, webhook
+workflow.py   the pipeline as a graph, inferred from stage runs
+contracts.py  path contracts, checking every document's path, shifts, suggestions
+failures.py   failures into causes: per-failure evidence, grouping, contrast with passes, kinds
+flaky.py      pass rates per check from attempts, exact tests, flaky / rerun / got worse, release call
 trace.py      per-document trace and flags; slowest / stuck / lost finders
 rootcause.py  error localization: which step a wrong value started at, and how
 prompts.py    prompt registry, per-version results, version-vs-previous comparison, diffs
@@ -438,7 +589,7 @@ coverage.py   what a source can answer, and which field unlocks the rest
 client.py     standard-library SDK for pushing events
 auth.py       API keys, scopes, tenant isolation, rate limits
 ingest.py     event contract: validation, idempotent upserts, OpenTelemetry mapping
-gates.py      noise floor, paired bootstrap CI, advance / hold / rollback
+gates.py      noise floor (spread of identical runs), paired bootstrap CI, advance / hold / rollback
 runner.py     compute + persist a run (one fetch per window), history, what-changed
 scheduler.py  in-process periodic runs
 api.py        FastAPI; dashboard in static/index.html
@@ -446,7 +597,10 @@ api.py        FastAPI; dashboard in static/index.html
 
 ## Not built yet
 
-- **Ground-truth ingest:** the accuracy measures need a way to load labelled values.
+- **Accuracy from eval runs:** evaluation results are grouped into causes, but the accuracy
+  measures don't read them yet.
+- **Naming causes:** cause names come from templates. An LLM could write better one-line names
+  (only names, never kinds).
 - **Users and SSO:** keys are the only identity. There are no user accounts, SSO or audit log
   of who changed what.
 - **Shared rate limits:** limits are per instance, in memory. Use a shared store (such as

@@ -19,11 +19,11 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import alerts, auth, cost, coverage, gates, ingest, prompts, rootcause, runner, store, trace, workflow
+from assay import alerts, auth, contracts, cost, coverage, failures, gates, ingest, prompts, rootcause, runner, store, trace, workflow
 from assay.auth import Principal
 from assay.config import Settings
-from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EventBatch, ExtractionEvent, ReviewEvent,
-                          StageRunEvent)
+from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EvalResultEvent, EventBatch, ExtractionEvent,
+                          ReviewEvent, StageRunEvent)
 from assay.measures import GROUPS, REGISTRY
 from assay.scheduler import Scheduler
 
@@ -73,6 +73,33 @@ class SLOIn(BaseModel):
     slice_value: Optional[str] = Field(None, description="Omit to require every slice of the dimension")
     target: float
     note: Optional[str] = None
+
+
+class ContractIn(BaseModel):
+    source: Optional[str] = Field(None, description='Defaults to your own source; "*" needs a platform key')
+    kind: str = Field(..., description="must_include | never | before | only_after | max_runs | allowed_steps")
+    step: Optional[str] = Field(None, max_length=64)
+    other: Optional[str] = Field(None, max_length=64, description="before / only_after: the other step")
+    max_runs: Optional[int] = Field(None, ge=1, le=1000)
+    steps: Optional[List[str]] = Field(None, description="allowed_steps: every step a document may run")
+    when: Optional[Dict[str, List[str]]] = Field(
+        None, description="Applies only to documents matching every attribute (segment, document_type, processing_mode)")
+    unless: Optional[Dict[str, List[str]]] = Field(None, description="Documents matching any attribute are exempt")
+    severity: str = Field("critical", description="critical | warning")
+    note: Optional[str] = Field(None, max_length=512)
+
+
+class EvalGateIn(BaseModel):
+    source: str
+    baseline: Optional[str] = Field(None, description="Run to compare with; defaults to the run before")
+    tolerance: float = Field(0.01, ge=0, le=1, description="Largest acceptable drop in the pass rate")
+
+
+class DecisionIn(BaseModel):
+    source: str
+    key: str = Field(..., max_length=512, description="The group's key, from GET /v1/failures")
+    decision: Optional[str] = Field(None, description="accepted_change | not_a_problem | confirmed; null clears it")
+    note: Optional[str] = Field(None, max_length=512)
 
 
 class KeyIn(BaseModel):
@@ -411,10 +438,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # ---------- workflow ----------
 
     @app.get("/v1/workflow", tags=["results"],
-             summary="The pipeline as a graph, inferred from traffic, with each step's health and errors")
+             summary="The pipeline as a graph, inferred from traffic, with each step's health, errors and broken contracts")
     def get_workflow(source: str, days: float = 7, p: Principal = Depends(require("read"))):
-        src = runner.CachedSource(resolve(p, source))
-        return workflow.build(src, runner.window_for_days(days), engine, source)
+        src, window = runner.CachedSource(resolve(p, source)), runner.window_for_days(days)
+        graph = workflow.build(src, window, engine, source)
+        rules = contracts.load(engine, source)
+        if rules:
+            contracts.annotate(graph, contracts.check(src, window, rules))
+        return graph
 
     @app.get("/v1/workflow/steps/{stage}/errors", tags=["results"],
              summary="Reported errors that started at one step ('(done)' for after the pipeline)")
@@ -424,10 +455,153 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.get("/v1/workflow/documents/{document_id}", tags=["results"],
              summary="One document's path through the workflow, with where each error started")
     def get_document_path(document_id: str, source: str, p: Principal = Depends(require("read"))):
-        out = workflow.document_path(resolve(p, source), document_id)
+        src = resolve(p, source)
+        out = workflow.document_path(src, document_id)
+        if out is None:
+            raise HTTPException(404, f"No document '{document_id}' in {source}.")
+        return out | {"contract_violations": contracts.check_document(src, document_id,
+                                                                      contracts.load(engine, source)) or []}
+
+    # ---------- failure causes ----------
+
+    def _public(analysis):
+        if analysis is None:
+            return None
+        return analysis | {"groups": [{k: v for k, v in g.items() if k != "member_ids"} for g in analysis["groups"]]}
+
+    def _tenant(source: str) -> str:
+        return prompts.registry_tenant(source)
+
+    @app.get("/v1/failures", tags=["results"],
+             summary="Reported errors grouped into causes, each with its kind (AI, infrastructure, evaluator, "
+                     "intended change) and the evidence")
+    def failure_causes(source: str, days: float = 30, p: Principal = Depends(require("read"))):
+        out = failures.production(runner.CachedSource(resolve(p, source)), runner.window_for_days(days), engine)
+        if out is None:
+            raise HTTPException(404, f"No errors have been reported for {source}. POST /v1/errors, or send "
+                                     "evaluation results to POST /v1/events/eval-results.")
+        return _public(out)
+
+    @app.get("/v1/evals/runs", tags=["results"], summary="Evaluation runs, newest first, with pass/fail counts")
+    def list_eval_runs(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return failures.eval_runs(engine, _tenant(source))
+
+    @app.get("/v1/evals/runs/{run_id}/failures", tags=["results"],
+             summary="One evaluation run's failures grouped into causes, compared with the run before it")
+    def eval_failures(run_id: str, source: str, baseline: Optional[str] = None, tolerance: float = 0.01,
+                      p: Principal = Depends(require("read"))):
+        out = failures.evaluation(engine, resolve(p, source), _tenant(source), run_id, baseline, tolerance)
+        if out is None:
+            raise HTTPException(404, f"No results for evaluation run '{run_id}' in {source}.")
+        return _public(out)
+
+    @app.get("/v1/evals/runs/{run_id}/stability", tags=["results"],
+             summary="Pass rate per check from its attempts: got worse, flaky, needs reruns; and the run's call")
+    def eval_stability(run_id: str, source: str, baseline: Optional[str] = None, tolerance: float = 0.01,
+                       p: Principal = Depends(require("read"))):
+        out = failures.evaluation(engine, resolve(p, source), _tenant(source), run_id, baseline, tolerance)
+        if out is None:
+            raise HTTPException(404, f"No results for evaluation run '{run_id}' in {source}.")
+        return out["stability"]
+
+    @app.post("/v1/evals/runs/{run_id}/gate", tags=["operate"],
+              summary="Advance, rerun, hold or roll back on an evaluation run, allowing for flakiness; recorded")
+    def eval_gate(run_id: str, body: EvalGateIn, p: Principal = Depends(require("manage"))):
+        a = failures.evaluation(engine, resolve(p, body.source), _tenant(body.source), run_id, body.baseline,
+                                body.tolerance)
+        if a is None:
+            raise HTTPException(404, f"No results for evaluation run '{run_id}' in {body.source}.")
+        out = a["stability"]
+        lineage = {**out["lineage"], "eval_run": run_id, **({"baseline_run": out["baseline"]} if out["baseline"] else {})}
+        detail = {"kind": "eval_run", "slices": [], "reasons": out["reasons"], "states": out["states"],
+                  "roles": out["roles"],
+                  "change": out["change"], "noise": out["noise"], "reruns": out["reruns"][:200],
+                  "got_worse": out["got_worse"][:200]}
+        with engine.begin() as conn:
+            gid = conn.execute(store.gate_decisions.insert().values(
+                created_at=datetime.utcnow(), outcome=out["outcome"], tenant=_tenant(body.source),
+                lineage=lineage, detail=detail)).inserted_primary_key[0]
+        return {"id": gid, "outcome": out["outcome"], "lineage": lineage, **detail}
+
+    @app.get("/v1/evals/runs/{run_id}/expectations", tags=["results"],
+             summary="For a group accepted as an intended change: the new expected values, to update the test set")
+    def eval_expectations(run_id: str, source: str, key: str, p: Principal = Depends(require("read"))):
+        out = failures.evaluation(engine, resolve(p, source), _tenant(source), run_id)
+        if out is None:
+            raise HTTPException(404, f"No results for evaluation run '{run_id}' in {source}.")
+        return failures.expectations(out, key, engine, _tenant(source))
+
+    @app.put("/v1/failures/decisions", tags=["operate"],
+             summary="Record a call on a group of failures: accepted as intended, not a problem, or confirmed")
+    def put_decision(body: DecisionIn, p: Principal = Depends(require("manage"))):
+        check_source(p, body.source)
+        if body.decision is not None and body.decision not in failures.DECISIONS:
+            raise HTTPException(422, f"decision is one of: {', '.join(failures.DECISIONS)}, or null to clear it.")
+        failures.save_decision(engine, body.source, body.key, body.decision, body.note, p.name)
+        return {"source": body.source, "key": body.key, "decision": body.decision}
+
+    # ---------- path contracts ----------
+
+    @app.get("/v1/contracts", tags=["results"], summary="Path contracts for a source, and how each is holding up")
+    def list_contracts(source: str, days: float = 7, p: Principal = Depends(require("read"))):
+        src = runner.CachedSource(resolve(p, source))
+        return contracts.check(src, runner.window_for_days(days), contracts.load(engine, source))
+
+    @app.get("/v1/contracts/suggestions", tags=["results"],
+             summary="Contracts the paths seen already keep, to confirm rather than write from scratch")
+    def suggest_contracts(source: str, days: float = 30, p: Principal = Depends(require("read"))):
+        src = runner.CachedSource(resolve(p, source))
+        return contracts.suggest(src, runner.window_for_days(days), contracts.load(engine, source))
+
+    @app.get("/v1/contracts/shifts", tags=["results"],
+             summary="Path changes that break no contract: new steps, new moves, shares that moved beyond noise")
+    def path_shifts(source: str, days: float = 7, p: Principal = Depends(require("read"))):
+        return contracts.shifts(runner.CachedSource(resolve(p, source)), runner.window_for_days(days))
+
+    @app.get("/v1/contracts/documents/{document_id}", tags=["results"],
+             summary="The contracts one document breaks, and at which step")
+    def document_contracts(document_id: str, source: str, p: Principal = Depends(require("read"))):
+        out = contracts.check_document(resolve(p, source), document_id, contracts.load(engine, source))
         if out is None:
             raise HTTPException(404, f"No document '{document_id}' in {source}.")
         return out
+
+    def contract_body(body: ContractIn, p: Principal) -> tuple:
+        source = own_source(p, body.source)
+        data = body.model_dump()
+        err = contracts.validate(data)
+        if err:
+            raise HTTPException(422, err)
+        return source, data
+
+    def own_contract(p: Principal, contract_id: int):
+        t = store.path_contracts
+        with engine.connect() as conn:
+            row = conn.execute(select(t).where(t.c.id == contract_id)).first()
+        if row is None or not (p.platform or row.source == f"events:{p.tenant}"):
+            raise HTTPException(404, f"No contract with id {contract_id} that this key can change.")
+        return row
+
+    @app.post("/v1/contracts", tags=["operate"], status_code=201, summary="Add a path contract")
+    def create_contract(body: ContractIn, p: Principal = Depends(require("manage"))):
+        source, data = contract_body(body, p)
+        return contracts.save(engine, source, data)
+
+    @app.put("/v1/contracts/{contract_id}", tags=["operate"], summary="Change a path contract")
+    def update_contract(contract_id: int, body: ContractIn, p: Principal = Depends(require("manage"))):
+        own_contract(p, contract_id)
+        source, data = contract_body(body, p)
+        return contracts.save(engine, source, data, contract_id)
+
+    @app.delete("/v1/contracts/{contract_id}", tags=["operate"],
+                summary="Remove a path contract and resolve its open alert")
+    def delete_contract(contract_id: int, p: Principal = Depends(require("manage"))):
+        own_contract(p, contract_id)
+        with engine.begin() as conn:
+            conn.execute(delete(store.path_contracts).where(store.path_contracts.c.id == contract_id))
+            contracts.close_alerts(conn, contract_id)
+        return {"deleted": contract_id}
 
     # ---------- prompts ----------
 
@@ -609,6 +783,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     for path, kind, model in [("documents", "documents", DocumentEvent), ("stage-runs", "stage_runs", StageRunEvent),
                               ("calls", "calls", CallEvent), ("reviews", "reviews", ReviewEvent),
                               ("extractions", "extractions", ExtractionEvent), ("errors", "errors", ErrorEvent),
+                              ("eval-results", "eval_results", EvalResultEvent),
                               ("indexed", "extractions", ExtractionEvent)]:
         app.add_api_route(f"/v1/events/{path}", one_kind(kind, model), methods=["POST"], tags=["ingest"],
                           summary=f"Send {path.replace('-', ' ')}", include_in_schema=path != "indexed")

@@ -300,6 +300,57 @@ def evaluate_prompt_regressions(engine: Engine, run_id: int, analysis: dict,
     return {"opened": opened, "resolved": resolved}
 
 
+# ---------- path contracts ----------
+
+def evaluate_contracts(engine: Engine, run_id: int, report: dict,
+                       notify: Optional[Callable[[str, dict], None]] = None) -> Dict[str, List[dict]]:
+    """Open an alert the first run a contract is broken, with no waiting: a
+    contract is a rule, not a baseline, so one document that ran a forbidden
+    step is already the news. Resolve it on the first run where documents were
+    judged and none broke it, or when the contract is deleted."""
+    runs, alerts_t = store.measure_runs, store.alerts
+    opened, resolved = [], []
+    with engine.begin() as conn:
+        run = conn.execute(select(runs).where(runs.c.id == run_id)).first()
+        now = run.started_at
+        current = {a.slice_value: a for a in conn.execute(select(alerts_t).where(and_(
+            alerts_t.c.source == run.source, alerts_t.c.kind == "contract", alerts_t.c.state == "open")))}
+        live = set()
+        for c in report.get("contracts", []):
+            key = str(c["id"])
+            live.add(key)
+            if c["violations"]:
+                ex = ", ".join(e["document_id"] for e in c["examples"][:3])
+                msg = (f"{'Contract' if c.get('severity') != 'warning' else 'Warning contract'} broken: "
+                       f"{c['label']}. {c['violations']:,} of {c['judged']:,} documents ({ex}"
+                       f"{', …' if c['violations'] > 3 else ''}): {c['examples'][0]['detail']}.")[:512]
+                fields = dict(last_seen_at=now, run_id=run_id, value=float(c["violations"]), n=c["judged"],
+                              message=msg, expected_low=None, expected_high=None, target=0.0, clear_streak=0)
+                if key in current:
+                    conn.execute(alerts_t.update().where(alerts_t.c.id == current[key].id)
+                                 .values(streak=(current[key].streak or 1) + 1, **fields))
+                else:
+                    row = dict(source=run.source, measure_id="path_contract", dimension="contract", slice_value=key,
+                               kind="contract", state="open", opened_at=now, streak=1, **fields)
+                    row["id"] = conn.execute(alerts_t.insert().values(**row)).inserted_primary_key[0]
+                    opened.append(row)
+            elif c["judged"] and key in current:
+                conn.execute(alerts_t.update().where(alerts_t.c.id == current[key].id)
+                             .values(state="resolved", resolved_at=now, run_id=run_id, value=0.0, n=c["judged"]))
+                resolved.append(dict(current[key]._mapping) | {"value": 0.0, "resolved_at": now})
+        for key, a in current.items():
+            if key not in live:  # contract deleted
+                conn.execute(alerts_t.update().where(alerts_t.c.id == a.id)
+                             .values(state="resolved", resolved_at=now, run_id=run_id))
+                resolved.append(dict(a._mapping) | {"resolved_at": now})
+    if notify:
+        for a in opened:
+            notify("opened", a)
+        for a in resolved:
+            notify("resolved", a)
+    return {"opened": opened, "resolved": resolved}
+
+
 # ---------- notification ----------
 
 def webhook_notifier(url: str, fmt_kind: str = "slack", public_url: Optional[str] = None,
@@ -314,12 +365,18 @@ def webhook_notifier(url: str, fmt_kind: str = "slack", public_url: Optional[str
     def send(event: str, alert: dict) -> None:
         icon = ":red_circle:" if event == "opened" else ":white_check_mark:"
         text = f"{icon} Assay alert {event} ({alert['kind']}, {alert['source']}): {alert['message']}"
-        if event == "resolved":
+        m = REGISTRY.get(alert["measure_id"])
+        if event == "resolved" and alert["kind"] == "contract":
+            text = f"{icon} Resolved (contract, {alert['source']}): no documents break it any more."
+        elif event == "resolved" and m:
             text = (f"{icon} Resolved ({alert['kind']}, {alert['source']}): "
-                    f"{REGISTRY[alert['measure_id']].name} [{slice_label(alert['dimension'], alert['slice_value'])}] "
-                    f"is back to {fmt(alert['value'], REGISTRY[alert['measure_id']].unit)}.")
+                    f"{m.name} [{slice_label(alert['dimension'], alert['slice_value'])}] "
+                    f"is back to {fmt(alert['value'], m.unit)}.")
+        elif event == "resolved":
+            text = f"{icon} Resolved ({alert['kind']}, {alert['source']}): {alert['message']}"
         if public_url:
-            text += f" {public_url.rstrip('/')}/#measures/{alert['measure_id']}"
+            page = "workflow" if alert["kind"] == "contract" else f"measures/{alert['measure_id']}"
+            text += f" {public_url.rstrip('/')}/#{page}"
         if fmt_kind == "slack":
             body = {"text": text}
         else:

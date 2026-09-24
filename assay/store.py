@@ -63,6 +63,23 @@ slos = Table(
     UniqueConstraint("source", "measure_id", "dimension", "slice_value", name="uq_slo_scope"),
 )
 
+# Rules about the steps a document may take. See assay/contracts.py.
+path_contracts = Table(
+    "path_contracts", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("source", String(64), nullable=False, index=True),  # "*" = every source
+    Column("kind", String(32), nullable=False),  # must_include | never | before | only_after | max_runs | allowed_steps
+    Column("step", String(64)),
+    Column("other", String(64)),  # before / only_after: the other step
+    Column("max_runs", Integer),
+    Column("steps", JSON),  # allowed_steps
+    Column("when", JSON),  # {"segment": [...], ...}: applies only to documents matching all
+    Column("unless", JSON),  # documents matching any are exempt
+    Column("severity", String(16), nullable=False, default="critical"),  # critical | warning
+    Column("note", String(512)),
+    Column("updated_at", DateTime, nullable=False),
+)
+
 alerts = Table(
     "alerts", metadata,
     Column("id", Integer, primary_key=True),
@@ -70,7 +87,7 @@ alerts = Table(
     Column("measure_id", String(64), nullable=False),
     Column("dimension", String(64)),
     Column("slice_value", String(256)),
-    Column("kind", String(16), nullable=False),  # anomaly | slo | regression
+    Column("kind", String(16), nullable=False),  # anomaly | slo | regression | contract
     Column("state", String(16), nullable=False, index=True),  # pending | open | resolved
     Column("streak", Integer, nullable=False, default=1),  # consecutive runs the condition held
     Column("clear_streak", Integer, nullable=False, default=0),  # consecutive runs it hasn't, while open
@@ -169,6 +186,40 @@ event_errors = Table(
     Column("kind", String(16), nullable=False),
     Column("reporter", String(128)),
     Column("source", String(64)),
+)
+
+# One test outcome from an evaluation run: a case (usually a document), what
+# was expected, what the pipeline produced, and what the evaluator decided.
+eval_results = Table(
+    "eval_results", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("result_id", String(128), primary_key=True),
+    Column("run_id", String(128), nullable=False, index=True),  # the evaluation run
+    Column("case_id", String(128), nullable=False),  # the test case, stable across runs
+    Column("document_id", String(128), index=True),  # the pipeline's trace of this case, if sent
+    Column("field", String(256)),  # None for a whole-case check
+    Column("expected", String(4096)),
+    Column("actual", String(4096)),
+    Column("status", String(16), nullable=False),  # pass | fail | error (the check itself couldn't run)
+    Column("evaluator", String(128)),  # e.g. exact_match@2, llm_judge@1
+    Column("score", Float),
+    Column("reason", String(2048)),  # the evaluator's explanation or error
+    Column("ts", DateTime, nullable=False, index=True),
+    Column("attempt", Integer),  # repeated judgements of the same output
+    Column("lineage", JSON),  # {"prompt": "extract_fields@v13", "model": ..., "build": ...}
+)
+
+# A person's call on a group of failures: accepted as intended, not a problem, or confirmed.
+failure_decisions = Table(
+    "failure_decisions", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("source", String(64), nullable=False, index=True),
+    Column("key", String(512), nullable=False),  # the group's signature
+    Column("decision", String(32), nullable=False),  # accepted_change | not_a_problem | confirmed
+    Column("note", String(512)),
+    Column("decided_by", String(128)),
+    Column("decided_at", DateTime, nullable=False),
+    UniqueConstraint("source", "key", name="uq_failure_decision"),
 )
 
 event_indexed = Table(

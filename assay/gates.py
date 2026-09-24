@@ -14,8 +14,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import asdict, dataclass, field
-from itertools import combinations
-from statistics import fmean
+from statistics import fmean, stdev
 from typing import Dict, List, Optional, Sequence, Tuple
 
 ADVANCE, HOLD, ROLLBACK = "advance", "hold", "rollback"
@@ -58,15 +57,20 @@ class GateDecision:
 
 
 def noise_floor(identical_runs: Sequence[Sequence[float]]) -> Optional[float]:
-    """Largest mean difference seen between runs of the same config on the same corpus.
+    """How far apart two runs of the same config on the same corpus usually land.
 
-    Needs at least two runs; returns None otherwise, which the gate treats as
-    "no threshold can be trusted yet".
+    With two runs, their difference. With three or more, 1.96 × √2 × the standard
+    deviation of the run means: the 95% range of the difference between two runs.
+    (The largest pairwise difference, used before, grows with the number of runs,
+    so more evidence made the floor looser.) Returns None with fewer than two runs,
+    which the gate treats as "no threshold can be trusted yet".
     """
-    runs = [r for r in identical_runs if r]
-    if len(runs) < 2:
+    means = [fmean(r) for r in identical_runs if r]
+    if len(means) < 2:
         return None
-    return max(abs(fmean(a) - fmean(b)) for a, b in combinations(runs, 2))
+    if len(means) == 2:
+        return abs(means[0] - means[1])
+    return 1.96 * (2 ** 0.5) * stdev(means)
 
 
 def bootstrap_diff_ci(baseline: Sequence[float], candidate: Sequence[float], *,

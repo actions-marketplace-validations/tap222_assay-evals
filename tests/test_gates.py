@@ -62,3 +62,11 @@ def test_worst_slice_decides():
     samples = {"acc": {"A": {"baseline": good, "candidate": list(good)},
                        "B": {"baseline": outcomes(0.9, 300, 8), "candidate": outcomes(0.5, 300, 9)}}}
     assert gates.evaluate([GateRule("acc")], samples, {"acc": 0.01}).outcome == ROLLBACK
+
+
+def test_noise_floor_is_the_typical_spread_not_the_largest_gap():
+    runs = [[1] * 90 + [0] * 10, [1] * 91 + [0] * 9, [1] * 89 + [0] * 11, [1] * 90 + [0] * 10]
+    floor = gates.noise_floor(runs)
+    assert 0.01 < floor < 0.03
+    # Ten more runs like these shouldn't make the floor looser, as the largest gap would.
+    assert gates.noise_floor(runs * 3) <= floor

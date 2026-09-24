@@ -121,6 +121,7 @@ def run_measures(engine: Engine, source, window: Window,
     _discover_prompts(engine, cached, window)
     if evaluate_alerts:
         alerts.evaluate_run(engine, run_id, min_n=alert_min_n, notify=notify, after_runs=alert_after_runs)
+        _contract_alerts(engine, run_id, cached, window, notify)
         if prompt_regressions:  # compares 30 days, so backfills only do it for recent days
             _prompt_regressions(engine, run_id, cached, window, notify)
     return run_id
@@ -141,6 +142,20 @@ def _prompt_regressions(engine: Engine, run_id: int, source, window: Window, not
         alerts.evaluate_prompt_regressions(engine, run_id, analysis, notify, live_since=window.start)
     except Exception:
         log.exception("Prompt regression check failed for %s", source.name)
+
+
+def _contract_alerts(engine: Engine, run_id: int, source, window: Window, notify) -> None:
+    from assay import contracts
+    try:
+        rules = contracts.load(engine, source.name)
+        with engine.connect() as conn:  # an open contract alert must still resolve once its contract is gone
+            open_ = conn.execute(select(store.alerts.c.id).where(and_(
+                store.alerts.c.source == source.name, store.alerts.c.kind == "contract",
+                store.alerts.c.state == "open"))).first()
+        if rules or open_:
+            alerts.evaluate_contracts(engine, run_id, contracts.check(source, window, rules), notify)
+    except Exception:
+        log.exception("Contract check failed for %s", source.name)
 
 
 def _discover_prompts(engine: Engine, source, window: Window) -> None:
