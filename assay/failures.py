@@ -194,6 +194,17 @@ def trace_failure(f: dict, detail, other_errors: Optional[List[ErrorReport]] = N
                        else None, "value_origin_ai": _ai_stage(made["stage"], runs, calls) if made else None}
 
 
+def trace_agent(f: dict, traj: dict, ref: Optional[dict], rules: List[dict]) -> dict:
+    """For an agent trajectory: the first bad step, by credit assignment (assay/agents.py)."""
+    from assay import agents
+    why = agents.credit(traj, ref, rules, f["field"] if f.get("field") in agents.CHECKS else None)
+    return f | {"agent": True, "verdict": why["mechanism"], "origin_stage": why["stage"], "signals": [],
+                "explanation": why["detail"], "origin_ai": True, "expected_tool": why.get("expected_tool"),
+                "tool_error": why.get("error"), "origin_prompt": (traj.get("lineage") or {}).get("prompt"),
+                "text_actual": False, "text_expected": False, "doc_failed": [], "value_origin": None,
+                "value_origin_prompt": None, "step": why.get("seq")}
+
+
 def classify(f: dict) -> Tuple[str, str, List[str]]:
     """(kind, mechanism, evidence) for one failure, from its own evidence only."""
     reason, stage = f.get("reason") or "", f.get("origin_stage")
@@ -202,6 +213,10 @@ def classify(f: dict) -> Tuple[str, str, List[str]]:
         if INFRA_REASON.search(reason):
             return "infrastructure", "harness", [f"The check couldn't run: {reason[:160]}"]
         return "evaluator", "evaluator_error", [f"The evaluator itself failed: {reason[:160] or 'no reason given'}"]
+    if f.get("agent") and not f.get("disagreement"):
+        if verdict == "tool_error" and INFRA_REASON.search(f.get("tool_error") or ""):
+            return "infrastructure", "tool_unavailable", [f.get("explanation", "")]
+        return "ai", verdict, [f.get("explanation", "")]
     if f.get("disagreement"):
         return "evaluator", "disagreement", [f"{f.get('evaluator') or 'The evaluator'} passed this same output on "
                                              "another attempt."]
@@ -363,6 +378,16 @@ GROUP_NAMES = {
     ("infrastructure", "harness"): "the test harness couldn't run the check",
     ("infrastructure", "attempt_errors"): "some attempts errored on {fields}",
     ("ai", "nondeterministic"): "{stage} gives different {fields} from attempt to attempt",
+    ("infrastructure", "tool_unavailable"): "{stage} was unavailable, and the agent went on without it",
+    ("ai", "tool_error"): "{stage} errored and the agent didn't recover",
+    ("ai", "unsafe_action"): "unsafe action: {stage}",
+    ("ai", "looped"): "the agent loops on {stage}",
+    ("ai", "wrong_tool"): "wrong tool: {stage} where {expected} was expected",
+    ("ai", "bad_arguments"): "{stage} called with the wrong arguments",
+    ("ai", "gave_up"): "the agent stops before calling {stage}",
+    ("ai", "ignored_result"): "{stage} returned the answer, and the agent didn't use it",
+    ("ai", "wrong_state"): "the calls look right, but {stage} left the world wrong",
+    ("ai", "wrong_answer"): "the tool calls were right, the final answer wasn't",
     ("evaluator", "format_only"): "{evaluator} fails {fields} values that differ only in format",
     ("evaluator", "identical"): "{evaluator} fails identical values",
     ("evaluator", "disagreement"): "{evaluator} contradicts another judgement of the same output",
@@ -401,7 +426,8 @@ def group_failures(failures: List[dict], passes: List[set], pop_times: List[date
         since = f.get("since") if is_eval and f.get("since") in ("new", "persisting", "flaky") and \
             f["kind"] in ("ai", "evaluator", "unsure") else ""
         # How the value is wrong separates causes that share a step (a swapped date vs a wrong vendor).
-        shape = f["shape"] if f["kind"] in ("ai", "unsure") and f["mechanism"] != "check_failed" else ""
+        shape = f["shape"] if f["kind"] in ("ai", "unsure") and f["mechanism"] != "check_failed" \
+            and not f.get("agent") else ""
         buckets[(f["kind"], f["mechanism"], scope or "", pattern or "", since + shape)].append(f)
 
     groups, other = [], []
@@ -540,8 +566,8 @@ def _describe(kind, mech, scope, pattern, members, passes, pop_times, changes, r
     elif mech not in ("other",):
         sample = members[0]["evidence"][0]
         evidence.insert(0, f"For example: {sample}")
-    if consistent and dom_shape != "no_values" and mech not in ("harness", "evaluator_error", "disagreement",
-                                                                 "check_failed", "other"):
+    if consistent and dom_shape != "no_values" and not any(m.get("agent") for m in members) and \
+            mech not in ("harness", "evaluator_error", "disagreement", "check_failed", "other"):
         evidence.append(f"{dom_n:,} of {n:,} are {SHAPES.get(dom_shape, dom_shape)}.")
 
     agree = evidence_kinds.get(original, 0) / n
@@ -552,10 +578,12 @@ def _describe(kind, mech, scope, pattern, members, passes, pop_times, changes, r
     name = "Other small groups" if small else GROUP_NAMES.get(
         (kind, mech), GROUP_NAMES.get((original, mech), "{fields}: {mechanism}")).format(
         stage=stage or "a step", fields=fields, evaluator=scope or _top([m.get("evaluator") for m in members], 1),
+        expected=_top([m.get("expected_tool") for m in members], 1),
         pattern=pattern or "failed", mechanism=mech.replace("_", " "),
         change=change["to"] if change and change["specific"] else "a release")
     key = "|".join([kind if kind != "intended_change" else "evaluator", mech, scope, pattern])
     return {
+        "cases": len({m.get("case_id") for m in members}),
         "key": key, "name": name if re.match(r"\S*[_@\d]", name) else name[0].upper() + name[1:], "kind": kind, "kind_label": KINDS[kind], "mechanism": mech,
         "confidence": confidence, "regression": regression, "failures": n, "share": n / total,
         "stage": scope if kind != "evaluator" else None, "evaluator": scope if kind == "evaluator" else None,
@@ -691,6 +719,15 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
     states = flaky.assess(cand, flaky.attempts_by_check(base_rows))
     details = _details(source, list({r.document_id for r in rows if r.document_id}))
     feats = {d: doc_features(det) for d, det in details.items()}
+    # Agent trajectories: traced by their first bad step instead of by value.
+    trajs = source.trajectories(list(details)) if hasattr(source, "trajectories") else {}
+    agent_refs, rules = {}, []
+    if trajs:
+        from assay import agents, contracts
+        agent_refs = agents.references(engine, tenant, {t["case_id"] for t in trajs.values() if t.get("case_id")})
+        rules = contracts.load(engine, source.name)
+        for d, t in trajs.items():
+            feats[d] = feats.get(d, set()) | agents.features(t)
 
     def features_of(r):
         return feats.get(r.document_id, set()) | ({f"field={r.field}"} if r.field else set()) | \
@@ -728,7 +765,9 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
                                   reported_at=s["ts"], expected=s["expected"], observed=s["actual"],
                                   kind="missing" if s["actual"] in (None, "") else "wrong")
                       for s in siblings if s["expected"] not in (None, "")]
-        traced.append(settle(trace_failure(f, det, others)))
+        t = trajs.get(f["document_id"]) if f["document_id"] else None
+        traced.append(settle(trace_agent(f, t, agent_refs.get(t.get("case_id")), rules) if t is not None
+                             else trace_failure(f, det, others)))
     span = (max(r.ts for r in rows) - min(r.ts for r in rows)) or timedelta(minutes=8)
     out = group_failures(traced, passes[:MAX_POPULATION], [r.ts for r in rows], changes=changes,
                          release_notes=_release_notes(engine, source.name), burst_width=span / 8, is_eval=True,

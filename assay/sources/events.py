@@ -1,6 +1,7 @@
 """Source over events pushed to Assay's ingest API (the multi-tenant path)."""
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import and_, select
@@ -23,10 +24,87 @@ class EventsSource:
         with self.engine.connect() as conn:
             return [dict(r._mapping) for r in conn.execute(select(table).where(and_(*cond)))]
 
+    # --- agents: a trajectory's steps, seen as stage runs and model calls ---
+
+    def _agent_steps(self, window: Optional[Window] = None, ids: Optional[List[str]] = None):
+        t, st = store.agent_trajectories, store.agent_steps
+        cond = [t.c.tenant == self.tenant]
+        if window is not None:
+            cond += [t.c.started_at >= window.start, t.c.started_at < window.end]
+        if ids is not None:
+            cond.append(t.c.trajectory_id.in_(ids))
+        q = (select(st, t.c.started_at.label("t_start"), t.c.lineage).join(
+            t, and_(t.c.tenant == st.c.tenant, t.c.trajectory_id == st.c.trajectory_id)).where(and_(*cond)))
+        with self.engine.connect() as conn:
+            return [dict(r._mapping) for r in conn.execute(q)]
+
+    @staticmethod
+    def _as_runs(steps) -> List[StageRun]:
+        """Tool calls and the answer as pipeline steps: the workflow graph, path contracts and
+        error tracing then work on agents unchanged. Arguments and results go in outputs."""
+        from datetime import timedelta
+        out = []
+        for s in steps:
+            if s["kind"] not in ("tool", "answer"):
+                continue
+            start = s["started_at"] or s["t_start"] + timedelta(seconds=s["seq"])
+            outputs = {"_args": s["args"], "_result": s["result"]} if s["kind"] == "tool" else {"answer": s["text"]}
+            out.append(StageRun(document_id=s["trajectory_id"], stage=s["name"] or s["kind"],
+                                status="error" if s["error"] else "success", started_at=start,
+                                finished_at=s["finished_at"] or start, did_work=True, outputs=outputs,
+                                sequence=s["seq"]))
+        return out
+
+    @staticmethod
+    def _as_calls(steps) -> List[CallRecord]:
+        from datetime import timedelta
+        out = []
+        for s in steps:
+            if not s["model"]:
+                continue
+            start = s["started_at"] or s["t_start"] + timedelta(seconds=s["seq"])
+            lin = s.get("lineage") or {}
+            pid, _, ver = (lin.get("prompt") or "").partition("@")
+            out.append(CallRecord(call_id=f"{s['trajectory_id']}#{s['seq']}", stage=s["kind"], ts=start,
+                                  document_id=s["trajectory_id"], model_declared=s["model"], model_served=s["model"],
+                                  cost_usd=s["cost_usd"], status="error" if s["error"] else "success",
+                                  latency_ms=(s["finished_at"] - s["started_at"]).total_seconds() * 1000
+                                  if s["started_at"] and s["finished_at"] else None,
+                                  prompt_id=pid or None, prompt_version=ver or None, code_revision=lin.get("build")))
+        return out
+
+    def trajectory(self, trajectory_id: str) -> Optional[dict]:
+        t, st = store.agent_trajectories, store.agent_steps
+        with self.engine.connect() as conn:
+            head = conn.execute(select(t).where(and_(t.c.tenant == self.tenant,
+                                                     t.c.trajectory_id == trajectory_id))).first()
+            if head is None:
+                return None
+            steps = conn.execute(select(st).where(and_(st.c.tenant == self.tenant, st.c.trajectory_id == trajectory_id))
+                                 .order_by(st.c.seq)).all()
+        return {**{k: v for k, v in head._mapping.items() if k != "tenant"},
+                "steps": [{k: v for k, v in r._mapping.items() if k not in ("tenant", "trajectory_id")} for r in steps]}
+
+    def trajectories(self, ids: List[str]) -> Dict[str, dict]:
+        """Many trajectories with their steps, in two queries."""
+        t, st = store.agent_trajectories, store.agent_steps
+        out = {}
+        with self.engine.connect() as conn:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                for h in conn.execute(select(t).where(and_(t.c.tenant == self.tenant, t.c.trajectory_id.in_(chunk)))):
+                    out[h.trajectory_id] = {**{k: v for k, v in h._mapping.items() if k != "tenant"}, "steps": []}
+                for r in conn.execute(select(st).where(and_(st.c.tenant == self.tenant, st.c.trajectory_id.in_(chunk)))
+                                      .order_by(st.c.trajectory_id, st.c.seq)):
+                    if r.trajectory_id in out:
+                        out[r.trajectory_id]["steps"].append(
+                            {k: v for k, v in r._mapping.items() if k not in ("tenant", "trajectory_id")})
+        return out
+
     def calls(self, window: Window) -> Iterable[CallRecord]:
         t = store.event_calls
         return [CallRecord(**{k: v for k, v in r.items() if k != "tenant"})
-                for r in self._rows(t, t.c.ts, window)]
+                for r in self._rows(t, t.c.ts, window)] + self._as_calls(self._agent_steps(window))
 
     def documents(self, window: Window) -> Iterable[DocumentRecord]:
         t = store.event_documents
@@ -36,7 +114,7 @@ class EventsSource:
     def stage_runs(self, window: Window) -> Iterable[StageRun]:
         t = store.event_stage_runs
         return [StageRun(**{k: v for k, v in r.items() if k not in ("tenant", "run_id")})
-                for r in self._rows(t, t.c.started_at, window)]
+                for r in self._rows(t, t.c.started_at, window)] + self._as_runs(self._agent_steps(window))
 
     def indexed(self, window: Window) -> Iterable[IndexedRecord]:
         t = store.event_indexed
@@ -79,8 +157,9 @@ class EventsSource:
                                  .order_by(c.c.ts)).all()
         drop = ("tenant", "run_id", "delivered_downstream")
         clean = lambda row: {k: v for k, v in row._mapping.items() if k not in drop}
-        return (DocumentRecord(**clean(doc)), [StageRun(**clean(x)) for x in runs],
-                [CallRecord(**clean(x)) for x in calls])
+        agent = self._agent_steps(ids=[document_id])
+        return (DocumentRecord(**clean(doc)), [StageRun(**clean(x)) for x in runs] + self._as_runs(agent),
+                [CallRecord(**clean(x)) for x in calls] + self._as_calls(agent))
 
     def document_details(self, document_ids: List[str]) -> Dict[str, Tuple[DocumentRecord, List[StageRun], List[CallRecord]]]:
         """document_detail for many documents in three queries."""
@@ -103,6 +182,14 @@ class EventsSource:
                                         .order_by(c.c.ts)):
                     if row.document_id in out:
                         out[row.document_id][2].append(CallRecord(**clean(row)))
+        agent = defaultdict(list)
+        for i in range(0, len(document_ids), 500):
+            for s in self._agent_steps(ids=document_ids[i:i + 500]):
+                agent[s["trajectory_id"]].append(s)
+        for d, steps in agent.items():
+            if d in out:
+                out[d][1].extend(self._as_runs(steps))
+                out[d][2].extend(self._as_calls(steps))
         return {k: tuple(v) for k, v in out.items()}
 
     def downstream_hashes(self) -> Optional[Set[str]]:

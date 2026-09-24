@@ -75,6 +75,9 @@ path_contracts = Table(
     Column("steps", JSON),  # allowed_steps
     Column("when", JSON),  # {"segment": [...], ...}: applies only to documents matching all
     Column("unless", JSON),  # documents matching any are exempt
+    Column("where", JSON),  # conditions on the step's arguments (tool calls): {"confirmed": {"not": true}}
+    Column("same", JSON),  # before / only_after: arguments the other step must share, e.g. ["order_id"]
+    Column("identical", Boolean),  # max_runs: count only calls with identical arguments
     Column("severity", String(16), nullable=False, default="critical"),  # critical | warning
     Column("note", String(512)),
     Column("updated_at", DateTime, nullable=False),
@@ -207,6 +210,55 @@ eval_results = Table(
     Column("ts", DateTime, nullable=False, index=True),
     Column("attempt", Integer),  # repeated judgements of the same output
     Column("lineage", JSON),  # {"prompt": "extract_fields@v13", "model": ..., "build": ...}
+)
+
+# --- Agents: one trajectory per run of an agent on a task, its steps, and what a case expects ---
+
+agent_trajectories = Table(
+    "agent_trajectories", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("trajectory_id", String(128), primary_key=True),  # also its document_id
+    Column("run_id", String(128), index=True),  # the evaluation run, if this is a test case
+    Column("case_id", String(128)),
+    Column("attempt", Integer),
+    Column("task", String(128)),  # the kind of task, e.g. refund_request
+    Column("started_at", DateTime, nullable=False, index=True),
+    Column("finished_at", DateTime),
+    Column("answer", Text),  # the final answer
+    Column("status", String(32)),  # completed | failed | max_steps | …
+    Column("lineage", JSON),
+)
+
+agent_steps = Table(
+    "agent_steps", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("trajectory_id", String(128), primary_key=True),
+    Column("seq", Integer, primary_key=True),
+    Column("kind", String(16), nullable=False),  # reason | tool | state | answer
+    Column("name", String(128)),  # the tool, or the object a state change touched ("order:1001")
+    Column("args", JSON),  # tool arguments; for a state change {"op": "create" | "update" | "delete"}
+    Column("result", JSON),  # tool result; for a state change, the object after it
+    Column("error", String(1024)),
+    Column("text", Text),  # reasoning or answer text
+    Column("model", String(128)),
+    Column("tokens", Integer),
+    Column("cost_usd", Float),
+    Column("started_at", DateTime),
+    Column("finished_at", DateTime),
+)
+
+# What a test case expects of a trajectory: the tool calls, the answer, and the end state.
+agent_references = Table(
+    "agent_references", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("case_id", String(128), primary_key=True),
+    Column("calls", JSON),  # [{"tool", "args" (partial match), "optional", "any_order"}]
+    Column("allow_extra", JSON),  # tools that may be called beyond the expected ones (read-only lookups)
+    Column("answer", Text),  # expected answer, or a value it must contain
+    Column("answer_match", String(16)),  # contains | equals
+    Column("state", JSON),  # [{"object", "exists" | "field" + "equals"}], objects may use * wildcards
+    Column("max_steps", Integer),
+    Column("updated_at", DateTime, nullable=False),
 )
 
 # A person's call on a group of failures: accepted as intended, not a problem, or confirmed.

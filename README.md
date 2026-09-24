@@ -38,7 +38,10 @@ The demo is a generated pipeline serving four customers. It has four staged inci
 - two path-contract breaks: documents skipping redaction, and a `delete_source` step
 
 A second source, `events:demo-eval`, holds two runs of a 400-case certification set, before
-and after a release. Each case runs three times, and some outputs vary between attempts. Its failures include one cause of each kind (see
+and after a release. Each case runs three times, and some outputs vary between attempts.
+A third, `events:demo-agent`, is a customer-support agent with nine tools, run on 150 cases
+before and after a prompt release, with one of each agent failure mode built in (see
+[Agents](#agents-evaluating-the-trajectory-not-just-the-answer)). Its failures include one cause of each kind (see
 [Failure causes](#failure-causes-many-failures-a-few-causes)).
 
 None of it is real data.
@@ -159,8 +162,8 @@ to refuse to run open.
 
 | Endpoint | Use |
 |---|---|
-| `POST /v1/events` | any mix of `documents`, `stage_runs`, `calls`, `reviews`, `extractions`, `errors`, `eval_results` in one request (up to 5,000 records) |
-| `POST /v1/events/{documents,stage-runs,calls,reviews,extractions,errors,eval-results}` | one record type per request |
+| `POST /v1/events` | any mix of `documents`, `stage_runs`, `calls`, `reviews`, `extractions`, `errors`, `eval_results`, `trajectories` in one request (up to 5,000 records) |
+| `POST /v1/events/{documents,stage-runs,calls,reviews,extractions,errors,eval-results,trajectories}` | one record type per request |
 | `POST /v1/otlp/v1/traces` | OpenTelemetry traces (OTLP/HTTP, JSON). Point a collector's `otlphttp` exporter at `/v1/otlp` |
 
 The ingest contract:
@@ -306,6 +309,70 @@ after release.
 - Release gates warn when the `prompt` in a decision's lineage (`id@version`) isn't in the
   registry.
 
+## Agents: evaluating the trajectory, not just the answer
+
+An agent reasons, calls tools, reads what they return, changes things, and answers. Judging
+only the answer misses a refund issued to the wrong order, or a correct answer reached by
+deleting something first. Send each run as a **trajectory**:
+
+```json
+{"trajectory_id": "agent-0923.case-017.a0", "run_id": "agent-0923", "case_id": "case-017", "attempt": 0,
+ "task": "refund_request", "started_at": "2026-09-23T10:00:00Z", "answer": "Refunded $27.61.",
+ "lineage": {"prompt": "support_agent@v5", "model": "claude-sonnet-5"},
+ "steps": [
+   {"kind": "reason", "model": "claude-sonnet-5", "tokens": 812, "cost_usd": 0.0024},
+   {"kind": "tool", "name": "get_order", "args": {"order_id": "O-10017"}, "result": {"price": 27.61}},
+   {"kind": "tool", "name": "issue_refund", "args": {"order_id": "O-10017", "amount": 27.61}},
+   {"kind": "state", "name": "refund:O-10017", "args": {"op": "create"}, "result": {"amount": 27.61}},
+   {"kind": "answer", "text": "Refunded $27.61."}]}
+```
+
+Also send what each test case expects to `POST /v1/agents/references`:
+- the tool calls, in order where it matters. Arguments match partially, and a call can be
+  `optional` or `any_order`;
+- tools that may be called beyond those (`allow_extra`, e.g. read-only lookups);
+- the answer;
+- end-state assertions, such as `{"object": "refund:O-10017", "exists": true}` or
+  `{"object": "order:*", "field": "qty", "equals": 3}`;
+- a step budget.
+
+OpenTelemetry works too. `execute_tool` spans become tool steps and model spans become
+reasoning steps (see the mapping at `/docs`).
+
+`POST /v1/agents/runs/{run}/evaluate` checks every trajectory five ways and stores the checks
+as evaluation results. Failure causes, flakiness across attempts and the release call then
+work on agents unchanged.
+
+| Check | Passes when |
+|---|---|
+| answer | the final answer has the expected value (whole-word, or written another usual way) |
+| end state | the world afterwards matches, folded from the state-change steps |
+| tool calls | every required call was made with the right arguments, in order. Retrying a call that errored is fine; so are allowed extras |
+| safety | no critical path contract broke. Contracts see tool arguments: `delete_order` never runs `where` `confirmed` isn't true; `issue_refund` only after `get_order` with the `same` `order_id`; at most 2 `identical` `lookup_customer` calls |
+| efficiency | within the step budget, and no call repeated 3 times with identical arguments |
+
+For a failing run, **credit assignment** finds the first bad step and how it went wrong:
+unsafe action, a tool error it never recovered from (infrastructure when the error says the
+tool was unavailable), a loop, the wrong tool, the right tool with the wrong arguments,
+stopping before an expected call, ignoring a tool result that held the answer, the wrong end
+state, or a wrong answer after correct calls. These are the mechanisms Failure causes groups
+by, so you get lines like "Wrong tool: `search_orders` where `get_order` was expected: 21
+cases, a regression since `support_agent` v4 → v5".
+
+Tool calls are also recorded as pipeline steps. So the workflow graph draws the agent's tool
+graph, path contracts and shifts apply to tool sequences, Trace shows any run step by step
+against its reference, and the measures count tool failures and model cost. A document
+pipeline is just an agent with a fixed path.
+
+| Endpoint | Returns |
+|---|---|
+| `POST /v1/events/trajectories` | ingest trajectories (steps inline) |
+| `POST /v1/agents/references`, `GET /v1/agents/references?source=…` | what cases expect |
+| `GET /v1/agents/runs?source=…` | agent runs, newest first |
+| `POST /v1/agents/runs/{run}/evaluate?source=…` | run the five checks, stored as eval results |
+| `GET /v1/agents/runs/{run}?source=…` | pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline |
+| `GET /v1/agents/trajectories/{id}?source=…` | one run step by step: divergence, end state, contract breaks, cost |
+
 ## Failure causes: many failures, a few causes
 
 5,000 failed checks are rarely 5,000 problems. **Failures** groups them into causes and
@@ -405,6 +472,7 @@ curl -X POST "$ASSAY/v1/contracts" -H "Authorization: Bearer $KEY" -H "Content-T
 |---|---|
 | **Overview** | What's broken right now? Open anomalies, SLO state, and the slices that moved beyond noise since the last run. Refreshes every minute. |
 | **Workflow** | The pipeline as a graph inferred from traffic: each step's health, errors and broken path contracts; the contracts and how each is holding up; suggested contracts; and path shifts. |
+| **Agents** | An agent run's pass rate per check against the baseline, where failing runs first went wrong, efficiency (steps, repeats, tool errors, tokens, cost), runs that got longer, and every trajectory. Trace shows one step by step against its reference. |
 | **Failures** | Reported errors or an evaluation run, grouped into causes: each with its kind, confidence, evidence, what sets it apart from passes, and examples. Accept intended changes, confirm or dismiss the rest. |
 | **Cost** | Fully loaded cost per document and per page, stacked by component over time; cost by document type, segment or mode; AI spend by model with the fallback share; the rate card. |
 | **Measures** | Each measure over time, with the expected range it's judged against, any SLO line, a breakdown of every slice, and an SLO editor. |
@@ -582,6 +650,7 @@ workflow.py   the pipeline as a graph, inferred from stage runs
 contracts.py  path contracts, checking every document's path, shifts, suggestions
 failures.py   failures into causes: per-failure evidence, grouping, contrast with passes, kinds
 flaky.py      pass rates per check from attempts, exact tests, flaky / rerun / got worse, release call
+agents.py     trajectories: reference comparison, end state, checks, credit assignment, efficiency
 trace.py      per-document trace and flags; slowest / stuck / lost finders
 rootcause.py  error localization: which step a wrong value started at, and how
 prompts.py    prompt registry, per-version results, version-vs-previous comparison, diffs

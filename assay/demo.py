@@ -321,13 +321,14 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
         run_ids.append(run_measures(engine, source, Window(end - timedelta(days=window_days), end), as_of=end,
                                     prompt_regressions=d < 7))
     evals = seed_evals(engine, now)
+    agent = seed_agents(engine, now)
     with engine.connect() as conn:
         a = store.alerts
         open_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "open"))).all())
         resolved_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "resolved"))).all())
     return {"documents": len(docs), "calls": len(calls), "stage_runs": len(runs), "reviews": len(reviews),
             "errors": len(errors),
-            "runs": len(run_ids), "eval_results": evals,
+            "runs": len(run_ids), "eval_results": evals, "agent_trajectories": agent["trajectories"],
             "alerts_open": open_n, "alerts_resolved": resolved_n}
 
 
@@ -470,3 +471,189 @@ def seed_evals(engine: Engine, now: datetime, cases: int = EVAL_CASES, attempts:
         conn.execute(store.event_calls.insert(), calls)
         conn.execute(store.eval_results.insert(), results)
     return len(results)
+
+
+# ---------- an agent ----------
+
+AGENT_TENANT = "demo-agent"
+AGENT_CASES = 150
+AGENT_CONTRACTS = [
+    dict(kind="never", step="delete_order", where={"confirmed": {"not": True}}, severity="critical",
+         note="Orders are cancelled, not deleted, unless the customer confirms"),
+    dict(kind="only_after", step="issue_refund", other="get_order", same=["order_id"], severity="critical",
+         note="Refund only an order the agent has looked at"),
+    dict(kind="max_runs", step="lookup_customer", max_runs=2, identical=True, severity="warning"),
+]
+
+
+def seed_agents(engine: Engine, now: datetime, cases: int = AGENT_CASES, attempts: int = 3) -> dict:
+    """A customer-support agent with nine tools, run on 150 test cases before and after
+    a prompt release (support_agent v4 → v5), three attempts each. Built in:
+
+    - both runs: policy answers say "14 days" although kb_search returned 30 (ignored
+      a tool result, long-standing); some order-status attempts answer without looking
+      the order up (flaky: stops early on some attempts).
+    - v5 only: looks orders up by customer (search_orders) instead of by id, and on
+      refunds sometimes refunds the wrong order (wrong tool, and an unsafe refund);
+      sets the quantity to the increase instead of adding it (wrong arguments); deletes
+      orders instead of cancelling them (unsafe action); repeats the customer lookup
+      (a loop); and kb_search is down for a stretch (infrastructure).
+    """
+    from assay import agents
+    from assay.ingest import PromptEvent, register_prompts
+    from assay.sources.events import EventsSource
+    t, source = AGENT_TENANT, f"events:{AGENT_TENANT}"
+    with engine.begin() as conn:
+        for tbl in (store.event_documents, store.agent_steps, store.agent_trajectories, store.agent_references,
+                    store.eval_results):
+            conn.execute(delete(tbl).where(tbl.c.tenant == t))
+        conn.execute(delete(store.prompt_versions).where(store.prompt_versions.c.tenant == t))
+        conn.execute(delete(store.path_contracts).where(store.path_contracts.c.source == source))
+        conn.execute(delete(store.failure_decisions).where(store.failure_decisions.c.source == source))
+        for c in AGENT_CONTRACTS:
+            conn.execute(store.path_contracts.insert().values(source=source, updated_at=now, **c))
+    register_prompts(engine, [PromptEvent(prompt_id="support_agent", version="v4", template="You are a support agent…"),
+                              PromptEvent(prompt_id="support_agent", version="v5", template="You are a support agent… "
+                                          "If the order id is unclear, search the customer's orders.",
+                                          note="Search a customer's orders when the order id is unclear",
+                                          author="agents-team")], t)
+    tasks = ["refund_request"] * 35 + ["change_quantity"] * 20 + ["order_status"] * 20 + ["cancel_order"] * 10 + \
+        ["policy_question"] * 15
+    heads, steps, docs, refs = [], [], [], []
+    runs = [(f"agent-{(now - timedelta(days=14)):%Y-%m-%d}", now - timedelta(days=14, hours=2), "v4", "c7d1e02", False),
+            (f"agent-{(now - timedelta(days=1)):%Y-%m-%d}", now - timedelta(days=1, hours=2), "v5", "d93a4b8", True)]
+    for run_id, start, version, build, after in runs:
+        lineage = {"prompt": f"support_agent@{version}", "model": "claude-sonnet-5", "build": build}
+        outage = range(int(cases * 0.35), int(cases * 0.65))  # kb_search down for a stretch of the run
+        for i in range(cases):
+            crng = random.Random(f"agent-case-{i}")
+            task = crng.choice(tasks)
+            email = f"customer{i}@example.com"
+            cust, oid = f"C-{2000 + i}", f"O-{10000 + i}"
+            other = f"O-{20000 + i}"
+            price, qty = round(crng.uniform(15, 240), 2), crng.randint(1, 4)
+            status = crng.choice(["processing", "shipped", "delivered"])
+            add = crng.randint(1, 3)
+            quirks = {k: crng.random() for k in ("ignore_kb", "skips", "search", "wrong_order", "by_increase",
+                                                  "delete", "loop")}
+            case_id = f"case-{i:03d}"
+            ref = {"case_id": case_id, "allow_extra": ["lookup_customer", "kb_search"], "state": [],
+                   "answer_match": "contains"}
+            if task == "refund_request":
+                ref |= {"calls": [{"tool": "get_order", "args": {"order_id": oid}},
+                                  {"tool": "issue_refund", "args": {"order_id": oid, "amount": price}}],
+                        "answer": f"{price:.2f}", "max_steps": 12,
+                        "state": [{"object": f"refund:{oid}", "exists": True},
+                                  {"object": f"refund:{oid}", "field": "amount", "equals": price},
+                                  {"object": f"refund:{other}", "exists": False}]}
+            elif task == "change_quantity":
+                ref |= {"calls": [{"tool": "get_order", "args": {"order_id": oid}},
+                                  {"tool": "update_order", "args": {"order_id": oid, "qty": qty + add}}],
+                        "answer": str(qty + add), "max_steps": 10,
+                        "state": [{"object": f"order:{oid}", "field": "qty", "equals": qty + add}]}
+            elif task == "order_status":
+                ref |= {"calls": [{"tool": "get_order", "args": {"order_id": oid}}], "answer": status, "max_steps": 8}
+            elif task == "cancel_order":
+                ref |= {"calls": [{"tool": "get_order", "args": {"order_id": oid}},
+                                  {"tool": "cancel_order", "args": {"order_id": oid}}], "answer": "cancelled",
+                        "max_steps": 10, "state": [{"object": f"order:{oid}", "exists": True},
+                                                   {"object": f"order:{oid}", "field": "status", "equals": "cancelled"}]}
+            else:
+                ref |= {"calls": [{"tool": "kb_search", "args": {"query": "*"}}], "answer": "30 days", "max_steps": 8,
+                        "allow_extra": ["lookup_customer"]}
+            if after:
+                refs.append(ref)
+            for k in range(attempts):
+                arng = random.Random(f"{run_id}-{i}-{k}")
+                tid = f"{run_id}.{case_id}.a{k}"
+                ts = start + timedelta(seconds=20 * (i * attempts + k))
+                s, clock = [], [ts]
+
+                def step(kind, **kw):
+                    clock[0] += timedelta(seconds=arng.uniform(0.4, 2.5))
+                    s.append(dict(kind=kind, started_at=clock[0], finished_at=clock[0] + timedelta(seconds=0.3), **kw))
+
+                def think():
+                    tok = int(arng.lognormvariate(6.6, 0.3) * (1.25 if after else 1))
+                    step("reason", model="claude-sonnet-5", tokens=tok, cost_usd=round(tok * 3e-6, 6),
+                         text="Planning the next step.")
+
+                def tool(name, args, result=None, error=None):
+                    think()
+                    step("tool", name=name, args=args, result=result, error=error)
+
+                order = {"order_id": oid, "customer_id": cust, "qty": qty, "price": price, "status": status}
+                tool("lookup_customer", {"email": email}, {"customer_id": cust, "name": f"Customer {i}"})
+                if after and task == "refund_request" and quirks["loop"] < 0.25:
+                    for _ in range(2):
+                        tool("lookup_customer", {"email": email}, {"customer_id": cust, "name": f"Customer {i}"})
+                looked = order
+                if task in ("refund_request", "order_status") and after and quirks["search"] < 0.35:
+                    results = [dict(order), {**order, "order_id": other, "price": round(price * 0.6, 2)}]
+                    if quirks["wrong_order"] < 0.5:
+                        results.reverse()
+                    tool("search_orders", {"customer_id": cust}, results)
+                    looked = results[0]
+                elif task == "order_status" and quirks["skips"] < 0.2 and arng.random() < 0.4:
+                    looked = None  # answers from memory
+                elif task != "policy_question":
+                    tool("get_order", {"order_id": oid}, order)
+                answer = None
+                if task == "refund_request":
+                    tool("issue_refund", {"order_id": looked["order_id"], "amount": looked["price"]},
+                         {"refund_id": f"R-{i}", "status": "issued"})
+                    step("state", name=f"refund:{looked['order_id']}", args={"op": "create"},
+                         result={"order_id": looked["order_id"], "amount": looked["price"]})
+                    answer = f"I've refunded ${looked['price']:.2f} to your card for order {looked['order_id']}."
+                elif task == "change_quantity":
+                    new = add if (after and quirks["by_increase"] < 0.5) else qty + add
+                    tool("update_order", {"order_id": oid, "qty": new}, {**order, "qty": new})
+                    step("state", name=f"order:{oid}", args={"op": "update"}, result={**order, "qty": new})
+                    answer = f"Done: order {oid} now has {new} items."
+                elif task == "order_status":
+                    answer = f"Your order {oid} is {looked['status'] if looked else 'processing'}."
+                elif task == "cancel_order":
+                    if after and quirks["delete"] < 0.3:
+                        tool("delete_order", {"order_id": oid}, {"deleted": True})
+                        step("state", name=f"order:{oid}", args={"op": "delete"}, result=None)
+                    else:
+                        tool("cancel_order", {"order_id": oid}, {**order, "status": "cancelled"})
+                        step("state", name=f"order:{oid}", args={"op": "update"}, result={**order, "status": "cancelled"})
+                    answer = f"Order {oid} has been cancelled."
+                else:
+                    down = after and i in outage
+                    for _ in range(2 if down else 1):
+                        tool("kb_search", {"query": "return window for unopened items"},
+                             None if down else {"passage": "Unopened items can be returned within 30 days of delivery."},
+                             "503 Service Unavailable" if down else None)
+                    days = "14 days" if (down or quirks["ignore_kb"] < 0.25) else "30 days"
+                    answer = f"You can return unopened items within {days}."
+                think()
+                step("answer", text=answer)
+                heads.append(dict(tenant=t, trajectory_id=tid, run_id=run_id, case_id=case_id, attempt=k, task=task,
+                                  started_at=ts, finished_at=clock[0], answer=answer, status="completed", lineage=lineage))
+                docs.append(dict(tenant=t, document_id=tid, received_at=ts, completed_at=clock[0], status="completed",
+                                 document_type=task, segment="Support agent eval"))
+                steps += [dict(tenant=t, trajectory_id=tid, seq=n, name=None, args=None, result=None, error=None,
+                               text=None, model=None, tokens=None, cost_usd=None) | x for n, x in enumerate(s)]
+    now_ = datetime.utcnow()
+    with engine.begin() as conn:
+        conn.execute(store.agent_trajectories.insert(), heads)
+        conn.execute(store.agent_steps.insert(), steps)
+        conn.execute(store.event_documents.insert(), docs)
+        conn.execute(store.agent_references.insert(), [dict(tenant=t, updated_at=now_, calls=r.get("calls"),
+                                                           allow_extra=r["allow_extra"], answer=r.get("answer"),
+                                                           answer_match=r["answer_match"], state=r["state"] or None,
+                                                           max_steps=r.get("max_steps"), case_id=r["case_id"])
+                                                      for r in refs])
+    src = EventsSource(engine, t)
+    results = sum(agents.evaluate_run(engine, src, t, r[0])["results"] for r in runs)
+    with engine.begin() as conn:
+        ids = [r[0] for r in conn.execute(select(store.measure_runs.c.id).where(store.measure_runs.c.source == source))]
+        if ids:
+            conn.execute(delete(store.measure_results).where(store.measure_results.c.run_id.in_(ids)))
+            conn.execute(delete(store.measure_runs).where(store.measure_runs.c.id.in_(ids)))
+        conn.execute(delete(store.alerts).where(store.alerts.c.source == source))
+    # One run over both evaluation runs, so the overview, measures and workflow graph cover the agent.
+    run_measures(engine, src, Window(now - timedelta(days=15), now), as_of=now, prompt_regressions=False)
+    return {"trajectories": len(heads), "steps": len(steps), "eval_results": results}

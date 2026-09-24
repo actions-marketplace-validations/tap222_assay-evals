@@ -56,6 +56,12 @@ class CachedSource:
     def document_detail(self, document_id):
         return self._source.document_detail(document_id)
 
+    def __getattr__(self, name):
+        # Anything else the source offers (e.g. an events source's agent trajectories), uncached.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._source, name)
+
     def document_details(self, document_ids):
         if hasattr(self._source, "document_details"):
             return self._source.document_details(document_ids)

@@ -168,6 +168,24 @@ table.lineage th.hl,table.lineage td.hl{box-shadow:inset 2px 0 0 var(--accent),i
 .dots{font:13px var(--mono);letter-spacing:1px;white-space:nowrap}
 .call{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .call .chip{font-size:12px;padding:4px 10px}
+/* agents */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.tile{background:var(--sunk);border-radius:8px;padding:10px 12px}
+.tile b{display:block;font:600 22px var(--display);font-variant-numeric:tabular-nums}
+.tile span{font-size:12px;color:var(--muted)}
+.traj{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:18px}
+@media (max-width:980px){.traj{grid-template-columns:1fr}}
+.steps{display:grid;gap:6px}
+.stp{display:grid;grid-template-columns:34px 70px minmax(0,1fr);gap:8px;align-items:start;padding:7px 10px;border:1px solid var(--line);border-left:4px solid var(--line-strong);border-radius:6px;background:var(--surface);font-size:13px}
+.stp.matched{border-left-color:var(--good)}.stp.extra{border-left-color:var(--line)}
+.stp.bad{border-left-color:var(--bad)}.stp.err{border-left-color:var(--warn)}
+.stp.first{box-shadow:0 0 0 2px var(--bad);}
+.stp.reason{opacity:.72}
+.stp .n{font:11px var(--mono);color:var(--muted);padding-top:2px}
+.stp .call{font:12.5px var(--mono);overflow-wrap:anywhere}
+.stp .res{font:11.5px var(--mono);color:var(--muted);overflow-wrap:anywhere;margin-top:2px}
+.stp .flag{margin-top:4px;font-size:12.5px}
+.okx{font:600 13px var(--mono)}.okx.y{color:var(--good)}.okx.n{color:var(--bad)}
 .suggest{background:var(--sunk);border-radius:8px;padding:10px 12px;display:grid;gap:4px}
 pre.code{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font:12.5px/1.55 var(--mono);overflow-x:auto;white-space:pre}
 details summary{cursor:pointer}
@@ -200,6 +218,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
     <a href="#cost" data-tab="cost">Cost</a>
     <a href="#errors" data-tab="errors">Errors</a>
     <a href="#failures" data-tab="failures">Failures</a>
+    <a href="#agents" data-tab="agents">Agents</a>
     <a href="#prompts" data-tab="prompts">Prompts</a>
     <a href="#trace" data-tab="trace">Trace</a>
     <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
@@ -217,6 +236,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
   <section id="tab-cost" class="stack" hidden></section>
   <section id="tab-errors" class="stack" hidden></section>
   <section id="tab-failures" class="stack" hidden></section>
+  <section id="tab-agents" class="stack" hidden></section>
   <section id="tab-prompts" class="stack" hidden></section>
   <section id="tab-trace" class="stack" hidden></section>
   <section id="tab-alerts" class="stack" hidden></section>
@@ -316,7 +336,7 @@ function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
   ["overview","workflow","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
-  if(tab()==="failures")render();
+  if(["failures","agents","trace"].includes(tab()))render();
 }
 
 /* ---------- overview ---------- */
@@ -861,6 +881,103 @@ async function renderStepDetail(g,stage,days){
   box.scrollIntoView({behavior:"smooth",block:"nearest"});
 }
 
+/* ---------- agents ---------- */
+const MECH={unsafe_action:["Unsafe action","var(--bad)"],tool_error:["Tool error","var(--c-fb)"],looped:["Looped","var(--warn)"],
+  wrong_tool:["Wrong tool","var(--c-ai)"],bad_arguments:["Wrong arguments","var(--c-est)"],gave_up:["Stopped early","var(--c-plat)"],
+  ignored_result:["Ignored a tool result","var(--c-rew)"],wrong_state:["Wrong end state","var(--c-rev)"],wrong_answer:["Wrong answer","var(--line-strong)"]};
+const CHECK_LABEL={answer:"Answer",end_state:"End state",tool_calls:"Tool calls",safety:"Safety",efficiency:"Efficiency"};
+const jtxt=v=>v==null?"":typeof v==="string"?v:JSON.stringify(v);
+const callTxt=(n,a)=>`${n}(${Object.entries(a||{}).map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(", ")})`;
+function delta(now,before,{pp=true,lowerBetter=false}={}){if(now==null||before==null)return"";const d=now-before;if(Math.abs(d)<1e-9)return`<span class="ref">no change</span>`;
+  const worse=lowerBetter?d>0:d<0;return `<span class="${worse?"worse":"better"}">${d>0?"▲":"▼"} ${pp?(Math.abs(d)*100).toFixed(1)+" pts":before?Math.round(Math.abs(d/before)*100)+"%":Math.abs(d).toFixed(2)}</span>`}
+async function renderAgents(){
+  const box=$("#tab-agents");
+  const runs=await api(`/v1/agents/runs?${q({source:src()})}`).catch(()=>[]);
+  if(!runs.length){box.innerHTML=`<div class="empty">No agent runs in this source. Send trajectories to <code>POST /v1/events/trajectories</code> (with a <code>run_id</code> and <code>case_id</code> for test runs), and what each case expects to <code>POST /v1/agents/references</code>.${src()==="events:demo"?` The demo agent is in <b>events:demo-agent</b>: pick it at the top.`:""}</div>`;return}
+  let run=store.get("assay-agent-run");if(!runs.some(r=>r.run_id===run))run=runs[0].run_id;
+  const meta=runs.find(r=>r.run_id===run);
+  box.innerHTML=`<div class="panel"><p class="note">Reading ${meta.trajectories} trajectories…</p></div>`;
+  let s;try{s=await api(`/v1/agents/runs/${encodeURIComponent(run)}?${q({source:src()})}`)}catch(e){box.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
+  const c=s.current,p=s.previous,ef=c.efficiency,pe=p?.efficiency||{};
+  const mechTotal=Object.values(c.mechanisms).reduce((a,b)=>a+b,0)||1;
+  const effRows=[["Steps per run","steps",1,true],["Tool calls","tool_calls",1,true],["Repeated identical calls","repeated_calls",1,true],["Tool errors","tool_errors",1,true],
+    ["Errors recovered","recovery_rate",0,false],["Tokens","tokens",0,true],["Cost per run","cost_usd",4,true],["Seconds","seconds",1,true],["Tool precision","precision",0,false],["Tool recall","recall",0,false]];
+  const fmtE=(k,v,d)=>v==null?"—":["recovery_rate","precision","recall"].includes(k)?pct(v,0):k==="cost_usd"?money(v):k==="tokens"?Math.round(v).toLocaleString():v.toFixed(d);
+  const onlyBad=store.get("assay-agent-bad")!=="0";
+  const list=c.trajectories_list.filter(t=>!onlyBad||Object.values(t.checks).includes("fail"));
+  box.innerHTML=`<div class="panel stack">
+    <div class="panel-head"><div><h2>Agent run</h2><p class="sub">Each trajectory is checked against its case's reference and the source's path contracts: the answer, the end state, the tool calls, safety and efficiency. ${s.baseline?`Compared with <b class="mono">${esc(s.baseline)}</b>.`:"No earlier run to compare with."} ${Object.entries(s.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" ")}</p></div>
+      <div class="picker"><select id="agent-run" aria-label="Run">${runs.map(r=>`<option value="${esc(r.run_id)}" ${r.run_id===run?"selected":""}>${esc(r.run_id)} · ${r.cases} cases, ${r.trajectories} runs${r.evaluated?"":" · not evaluated"}</option>`).join("")}</select>
+        <button type="button" id="agent-eval" class="${s.evaluated?"":"primary"}">${s.evaluated?"Re-evaluate":"Evaluate against references"}</button></div></div>
+    ${s.evaluated?"":`<p class="flag"><span class="chip warn">not evaluated</span>These numbers are computed live. Evaluate to store the checks as eval results, which feeds Failure causes and the release call.</p>`}
+    <div class="tiles">${Object.keys(CHECK_LABEL).filter(k=>c.checks[k]).map(k=>`<div class="tile"><b>${pct(c.checks[k].rate,0)}</b><span>${CHECK_LABEL[k]} passed ${p?.checks[k]?delta(c.checks[k].rate,p.checks[k].rate):""}</span></div>`).join("")}</div>
+    <div><h3 style="margin-bottom:6px">Where failing runs first went wrong</h3>
+      ${Object.keys(c.mechanisms).length?`<div class="kindbar">${Object.entries(c.mechanisms).map(([m,n])=>`<i style="width:${n/mechTotal*100}%;background:${MECH[m][1]}" title="${esc(MECH[m][0])}: ${n}"></i>`).join("")}</div>
+      <div class="legend">${Object.entries(c.mechanisms).map(([m,n])=>`<span><i style="background:${MECH[m][1]}"></i>${esc(MECH[m][0])} · ${n}${p&&p.mechanisms[m]!=null?` <span class="ref">(was ${p.mechanisms[m]})</span>`:p?` <span class="ref">(new)</span>`:""}</span>`).join("")}</div>
+      <p class="note"><a href="#failures" id="to-causes">See these grouped into causes, with the release call →</a></p>`:`<p class="note">No failing runs.</p>`}</div>
+  </div>
+  <div class="two"><div class="panel"><h2>Efficiency</h2><p class="sub">Average per run. Getting to the same answer by a different path isn't a regression; getting there with twice the steps might be.</p>
+      <table style="margin-top:8px"><tr><th>Measure</th><th class="num">Before</th><th class="num">Now</th><th class="num">Change</th></tr>
+      ${effRows.map(([l,k,d,lower])=>`<tr><td>${l}</td><td class="num">${fmtE(k,pe[k],d)}</td><td class="num">${fmtE(k,ef[k],d)}</td><td class="num">${p?delta(ef[k],pe[k],{pp:["recovery_rate","precision","recall"].includes(k),lowerBetter:lower}):""}</td></tr>`).join("")}</table></div>
+    <div class="panel"><h2>Runs that got longer</h2><p class="sub">Cases whose median steps grew by half or more (and by 2+).</p>
+      ${s.costlier.length?`<table style="margin-top:8px"><tr><th>Case</th><th class="num">Steps before</th><th class="num">Now</th><th class="num">Cost now</th></tr>${s.costlier.slice(0,15).map(r=>`<tr><td class="mono">${esc(r.case_id)}</td><td class="num">${r.steps_before}</td><td class="num">${r.steps_now}</td><td class="num">${money(r.cost_now)}</td></tr>`).join("")}</table>`:`<p class="note">None.</p>`}</div></div>
+  <div class="panel"><div class="panel-head"><div><h2>Trajectories</h2><p class="sub">${list.length} shown. Open one to see it step by step against its reference.</p></div>
+    <label class="picker"><input type="checkbox" id="agent-bad" ${onlyBad?"checked":""}> failing only</label></div>
+    <div class="scroll"><table><tr><th>Case</th><th>Attempt</th><th>Task</th>${Object.keys(CHECK_LABEL).map(k=>`<th>${CHECK_LABEL[k]}</th>`).join("")}<th class="num">Steps</th><th class="num">Cost</th></tr>
+    ${list.slice(0,200).map(t=>`<tr class="click" data-traj="${esc(t.trajectory_id)}"><td class="mono">${esc(t.case_id||t.trajectory_id)}</td><td class="num">${t.attempt??""}</td><td class="ref">${esc(t.task||"")}</td>
+      ${Object.keys(CHECK_LABEL).map(k=>`<td>${t.checks[k]==null?"":`<span class="okx ${t.checks[k]==="pass"?"y":"n"}">${t.checks[k]==="pass"?"✓":"✗"}</span>`}</td>`).join("")}
+      <td class="num">${t.steps}</td><td class="num">${money(t.cost_usd)}</td></tr>`).join("")}</table></div></div>`;
+  $("#agent-run").onchange=e=>{store.set("assay-agent-run",e.target.value);renderAgents()};
+  $("#agent-bad").onchange=e=>{store.set("assay-agent-bad",e.target.checked?"1":"0");renderAgents()};
+  $("#agent-eval").onclick=async e=>{const b=e.target;b.disabled=true;b.textContent="Evaluating…";
+    try{await api(`/v1/agents/runs/${encodeURIComponent(run)}/evaluate?${q({source:src()})}`,{method:"POST"});renderAgents()}catch(err){b.textContent=err.message}};
+  const tc=$("#to-causes");if(tc)tc.onclick=()=>store.set("assay-fail-scope",run);
+  box.querySelectorAll("[data-traj]").forEach(r=>r.onclick=()=>{location.hash="trace/"+encodeURIComponent(r.dataset.traj)});
+}
+// One trajectory, step by step, against its reference.
+function renderTrajectory(t){
+  const cmp=t.tool_calls,bySeq={};(cmp?.calls||[]).forEach(r=>bySeq[r.seq]=r);
+  const breaks={};(t.safety||[]).forEach(b=>{if(b.seq!=null)(breaks[b.seq]??=[]).push(b)});
+  const fb=t.first_bad,world=t.world||{};
+  const cls=st=>{const r=bySeq[st.seq];if(st.kind==="reason")return"reason";if(st.error)return"err";if(breaks[st.seq])return"bad";
+    if(!r)return"";return r.status==="matched"?"matched":["wrong_tool","bad_arguments","extra"].includes(r.status)?"bad":r.status.startsWith("error")?"err":"extra"};
+  const label={reason:"think",tool:"tool",state:"state",answer:"answer"};
+  const stepHtml=st=>{const r=bySeq[st.seq];
+    const body=st.kind==="tool"?`<div class="call">${esc(callTxt(st.name,st.args))}</div>${st.error?`<div class="res" style="color:var(--bad)">error: ${esc(st.error)}</div>`:st.result!=null?`<div class="res" title="${esc(jtxt(st.result))}">→ ${esc(jtxt(st.result).slice(0,220))}</div>`:""}`
+      :st.kind==="state"?`<div class="call">${esc((st.args||{}).op||"update")} ${esc(st.name)}</div>${st.result!=null?`<div class="res">${esc(jtxt(st.result).slice(0,200))}</div>`:""}`
+      :st.kind==="answer"?`<div>${esc(st.text||"")}</div>`
+      :`<div class="res">${esc(st.model||"")}${st.tokens?` · ${st.tokens.toLocaleString()} tokens`:""}${st.cost_usd?` · ${money(st.cost_usd)}`:""}${st.text?` · ${esc(st.text.slice(0,120))}`:""}</div>`;
+    const notes=[];
+    if(r&&r.status==="matched")notes.push(`<span class="okx y">✓</span> expected call ${r.expected_index+1}`);
+    if(r&&r.status==="allowed_extra")notes.push(`<span class="ref">allowed extra</span>`);
+    if(r&&r.status==="error_retried")notes.push(`<span class="ref">errored, retried later</span>`);
+    if(r&&r.status==="wrong_tool")notes.push(`<span class="chip bad">wrong tool</span> expected ${esc(r.expected_tool)}`);
+    if(r&&r.status==="bad_arguments")notes.push(`<span class="chip bad">wrong arguments</span> ${esc((r.diffs||[]).join("; "))}`);
+    if(r&&r.status==="extra")notes.push(`<span class="chip warn">not expected</span>`);
+    (breaks[st.seq]||[]).forEach(b=>notes.push(`<span class="chip ${b.severity==="critical"?"bad":"warn"}">contract</span> ${esc(b.label)}`));
+    if(fb&&fb.seq===st.seq)notes.push(`<span class="chip bad">first bad step</span> ${esc(MECH[fb.mechanism][0])}`);
+    return `<div class="stp ${cls(st)} ${fb&&fb.seq===st.seq?"first":""}"><span class="n">${st.seq+1}</span><span class="chip neutral">${label[st.kind]||st.kind}</span><div>${body}${notes.length?`<div class="flag">${notes.join(" · ")}</div>`:""}</div></div>`};
+  const ref=t.reference,e=t.efficiency;
+  return `<div class="panel stack">
+    <div class="panel-head"><div><span class="ref">Agent trajectory</span><h2 class="mono" style="font-size:18px">${esc(t.trajectory_id)}</h2>
+      <p class="sub">${[t.task,t.case_id&&`case ${t.case_id}`,t.attempt!=null&&`attempt ${t.attempt}`,t.run_id&&`run ${t.run_id}`].filter(Boolean).map(esc).join(" · ")} ${Object.entries(t.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" ")}</p></div>
+      <span class="chip ${t.failed.length?"bad":"good"}">${t.failed.length?`failed: ${t.failed.map(f=>CHECK_LABEL[f]).join(", ")}`:"passed"}</span></div>
+    ${fb?`<p class="flag"><span class="chip bad">first bad step</span><span><b>${esc(MECH[fb.mechanism][0])}</b>${fb.seq!=null?` at step ${fb.seq+1}`:""}: ${esc(fb.detail)}</span></p>`:""}
+    <div class="traj"><div class="steps">${t.steps.map(stepHtml).join("")}</div>
+      <div class="stack" style="align-content:start">
+        ${ref?`<div><h3 style="margin-bottom:6px">Expected tool calls</h3>${(cmp?.expected||[]).map(x=>`<div class="flag"><span class="okx ${x.matched!=null?"y":"n"}">${x.matched!=null?"✓":"✗"}</span><span class="mono" style="font-size:12.5px">${esc(callTxt(x.tool,x.args))}</span>${x.optional?` <span class="ref">optional</span>`:""}${x.matched!=null?` <span class="ref">step ${x.matched+1}</span>`:` <span class="ref">missing</span>`}</div>`).join("")||`<p class="note">None listed.</p>`}
+          ${cmp?`<p class="ref">precision ${pct(cmp.precision,0)} · recall ${pct(cmp.recall,0)} · ${cmp.in_order?"in order":"out of order"}</p>`:""}</div>
+        ${t.end_state?`<div><h3 style="margin-bottom:6px">End state</h3>${t.end_state.map(a=>`<div class="flag"><span class="okx ${a.passed?"y":"n"}">${a.passed?"✓":"✗"}</span><span><span class="mono" style="font-size:12.5px">${esc(a.assertion)}</span>${a.passed?"":` <span class="ref">got ${esc(a.got)}</span>`}</span></div>`).join("")}</div>`:""}
+        ${ref.answer?`<div><h3 style="margin-bottom:6px">Answer</h3><div class="flag"><span class="okx ${t.answer_ok?"y":"n"}">${t.answer_ok?"✓":"✗"}</span><span>should ${ref.answer_match==="equals"?"be":"include"} <b>${esc(ref.answer)}</b></span></div></div>`:""}`
+        :`<p class="note">No reference for this case, so only contracts and efficiency are checked. Send one to <code>POST /v1/agents/references</code>.</p>`}
+        ${Object.keys(world).length?`<div><h3 style="margin-bottom:6px">World afterwards</h3>${Object.entries(world).map(([k,v])=>`<div class="res mono" style="font-size:12px">${esc(k)}: ${v.deleted?`<span class="worse">deleted</span>`:esc(jtxt(v.state).slice(0,140))}</div>`).join("")}</div>`:""}
+        <div><h3 style="margin-bottom:6px">Efficiency</h3><dl class="facts">
+          <div><dt>Steps</dt><dd>${e.steps}${e.budget?` / ${e.budget}`:""}</dd></div><div><dt>Tool calls</dt><dd>${e.tool_calls}</dd></div>
+          <div><dt>Most identical</dt><dd>${e.max_identical}×</dd></div><div><dt>Tool errors</dt><dd>${e.tool_errors}${e.tool_errors?` (${e.recovered} recovered)`:""}</dd></div>
+          <div><dt>Tokens</dt><dd>${e.tokens.toLocaleString()}</dd></div><div><dt>Cost</dt><dd>${money(e.cost_usd)}</dd></div></dl></div>
+      </div></div></div>`;
+}
+
 /* ---------- failure causes ---------- */
 const KIND={ai:["AI / pipeline error","var(--bad)","A step got the value wrong."],
   infrastructure:["Infrastructure","var(--c-fb)","A step failed or timed out, a fallback stood in for an unavailable model, the value was lost after the pipeline, or the test harness couldn't run."],
@@ -981,7 +1098,10 @@ function contractForm(steps){
     <select id="ct-kind" aria-label="Kind">${Object.entries(CKINDS).map(([k,l])=>`<option value="${k}">${esc(l)}</option>`).join("")}</select>
     <input id="ct-step" list="ct-steps" placeholder="step" aria-label="Step" style="width:150px">
     <span id="ct-other-w" hidden><input id="ct-other" list="ct-steps" placeholder="other step" aria-label="Other step" style="width:150px"></span>
-    <span id="ct-max-w" hidden>at most <input id="ct-max" type="number" min="1" value="3" aria-label="At most" style="width:64px"> runs</span>
+    <span id="ct-max-w" hidden>at most <input id="ct-max" type="number" min="1" value="3" aria-label="At most" style="width:64px"> runs
+      <label title="Count only calls with identical arguments (an agent looping)"><input type="checkbox" id="ct-ident"> identical arguments</label></span>
+    <input id="ct-where" placeholder="only where args… e.g. confirmed!=true" aria-label="Argument conditions" style="width:220px" title="Agent tool calls: conditions on the step's arguments. key=value or key!=value, comma-separated">
+    <span id="ct-same-w" hidden><input id="ct-same" placeholder="same args, e.g. order_id" aria-label="Arguments the other step must share" style="width:180px"></span>
     <input id="ct-list" hidden placeholder="step, step, …" aria-label="Allowed steps" style="width:100%;max-width:520px" value="${esc(steps.join(", "))}">
     <select id="ct-scope" aria-label="Scope"><option value="">for every document</option><option value="when">only when</option><option value="unless">except when</option></select>
     <span id="ct-scope-w" hidden><select id="ct-field" aria-label="Attribute"><option>segment</option><option>document_type</option><option>processing_mode</option></select>
@@ -994,7 +1114,8 @@ function wireContracts(g,days){
   const f=$("#ct-form"),again=()=>renderWorkflow();
   const kindUI=()=>{const k=$("#ct-kind").value;
     $("#ct-step").hidden=k==="allowed_steps";$("#ct-list").hidden=k!=="allowed_steps";
-    $("#ct-other-w").hidden=!["before","only_after"].includes(k);$("#ct-max-w").hidden=k!=="max_runs"};
+    $("#ct-other-w").hidden=!["before","only_after"].includes(k);$("#ct-same-w").hidden=!["before","only_after"].includes(k);
+    $("#ct-max-w").hidden=k!=="max_runs";$("#ct-where").hidden=k==="allowed_steps"};
   if(f){$("#ct-kind").onchange=kindUI;kindUI();
     $("#ct-scope").onchange=()=>{$("#ct-scope-w").hidden=!$("#ct-scope").value};
     f.onsubmit=async e=>{e.preventDefault();const k=$("#ct-kind").value,sc=$("#ct-scope").value;
@@ -1003,6 +1124,11 @@ function wireContracts(g,days){
         step:k==="allowed_steps"?null:$("#ct-step").value.trim(),other:$("#ct-other").value.trim()||null,
         max_runs:k==="max_runs"?+$("#ct-max").value:null,steps:k==="allowed_steps"?list($("#ct-list").value):null};
       if(sc)body[sc]={[$("#ct-field").value]:list($("#ct-values").value)};
+      const val=v=>v==="true"?true:v==="false"?false:v!==""&&!isNaN(+v)?+v:v;
+      const where={};list($("#ct-where").value).forEach(c=>{const m=c.match(/^([\w.]+)\s*(!=|=)\s*(.*)$/);if(m)where[m[1]]=m[2]==="!="?{not:val(m[3])}:val(m[3])});
+      if(Object.keys(where).length)body.where=where;
+      if(["before","only_after"].includes(k)&&$("#ct-same").value.trim())body.same=list($("#ct-same").value);
+      if(k==="max_runs"&&$("#ct-ident").checked)body.identical=true;
       try{await api("/v1/contracts",{method:"POST",body:JSON.stringify(body)});again()}
       catch(err){$("#ct-msg").textContent=err.message}}}
   document.querySelectorAll("[data-del-contract]").forEach(b=>b.onclick=async()=>{
@@ -1083,6 +1209,9 @@ function wireStepByStep(ea,id){
 }
 async function showTrace(id,scroll=true){
   S.trace.doc=id;const out=$("#trace-out");
+  const agent=await api(`/v1/agents/trajectories/${encodeURIComponent(id)}?${q({source:src()})}`).catch(()=>null);
+  if(agent){try{history.replaceState(null,"","#trace/"+encodeURIComponent(id))}catch(e){}
+    out.innerHTML=renderTrajectory(agent);if(scroll)out.scrollIntoView({behavior:"smooth",block:"start"});return}
   try{history.replaceState(null,"","#trace/"+encodeURIComponent(id))}catch(e){}
   let t,ea=null,cv=[];try{[t,ea,cv]=await Promise.all([api(`/v1/trace/${encodeURIComponent(id)}?${q({source:src()})}`),
     api(`/v1/errors/${encodeURIComponent(id)}?${q({source:src()})}`).catch(()=>null),
@@ -1149,7 +1278,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","workflow","measures","cost","errors","failures","prompts","trace","alerts","gates","connect"];
+const TABS=["overview","workflow","measures","cost","errors","failures","agents","prompts","trace","alerts","gates","connect"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -1161,7 +1290,7 @@ async function render(){
   if(t==="workflow")S.wfStep=hp[1]?decodeURIComponent(hp[1]):null;
   document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
-  if(!S.overview&&!["gates","connect","failures"].includes(t))return;
+  if(!S.overview&&!["gates","connect","failures","agents","trace"].includes(t))return;
   try{
     if(t==="overview"){renderOverview();overviewFlow()}
     if(t==="workflow")await renderWorkflow();
@@ -1169,6 +1298,7 @@ async function render(){
     if(t==="cost")await renderCost();
     if(t==="errors")await renderErrors();
     if(t==="failures")await renderFailures();
+    if(t==="agents")await renderAgents();
     if(t==="prompts")await renderPrompts();
     if(t==="trace")await renderTrace();
     if(t==="alerts")await renderAlerts();

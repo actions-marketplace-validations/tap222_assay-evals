@@ -10,7 +10,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,11 +19,11 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import alerts, auth, contracts, cost, coverage, failures, gates, ingest, prompts, rootcause, runner, store, trace, workflow
+from assay import agents, alerts, auth, contracts, cost, coverage, failures, gates, ingest, prompts, rootcause, runner, store, trace, workflow
 from assay.auth import Principal
 from assay.config import Settings
 from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EvalResultEvent, EventBatch, ExtractionEvent,
-                          ReviewEvent, StageRunEvent)
+                          ReferenceEvent, ReviewEvent, StageRunEvent, TrajectoryEvent)
 from assay.measures import GROUPS, REGISTRY
 from assay.scheduler import Scheduler
 
@@ -85,6 +85,12 @@ class ContractIn(BaseModel):
     when: Optional[Dict[str, List[str]]] = Field(
         None, description="Applies only to documents matching every attribute (segment, document_type, processing_mode)")
     unless: Optional[Dict[str, List[str]]] = Field(None, description="Documents matching any attribute are exempt")
+    where: Optional[Dict[str, Any]] = Field(
+        None, description='Conditions on the step\'s arguments (agent tool calls): {"confirmed": {"not": true}}, '
+                          '{"region": {"in": ["eu"]}}, {"mode": "dry_run"}')
+    same: Optional[List[str]] = Field(None, description="before / only_after: arguments the other step must share, "
+                                                        'e.g. ["order_id"]')
+    identical: Optional[bool] = Field(None, description="max_runs: count only calls with identical arguments")
     severity: str = Field("critical", description="critical | warning")
     note: Optional[str] = Field(None, max_length=512)
 
@@ -343,7 +349,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(422, f"view must be one of {', '.join(trace.VIEWS)}")
         return trace.find_documents(resolve(p, source), runner.window_for_days(days), view, min(limit, 500), segment)
 
-    @app.get("/v1/trace/{document_id}", tags=["results"], summary="One document through every stage and call")
+    @app.get("/v1/trace/{document_id:path}", tags=["results"], summary="One document through every stage and call")
     def get_trace(document_id: str, source: str, p: Principal = Depends(require("read"))):
         out = trace.build_trace(resolve(p, source), document_id)
         if out is None:
@@ -357,7 +363,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, "No error reports from this source yet. Report one with POST /v1/errors.")
         return out
 
-    @app.get("/v1/errors/{document_id}", tags=["results"],
+    @app.get("/v1/errors/{document_id:path}", tags=["results"],
              summary="One document: every step's values, and where each reported error started")
     def error_detail(document_id: str, source: str, p: Principal = Depends(require("read"))):
         out = rootcause.analyze_document(resolve(p, source), document_id)
@@ -452,7 +458,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def get_step_errors(stage: str, source: str, days: float = 7, p: Principal = Depends(require("read"))):
         return workflow.stage_errors(runner.CachedSource(resolve(p, source)), runner.window_for_days(days), stage)
 
-    @app.get("/v1/workflow/documents/{document_id}", tags=["results"],
+    @app.get("/v1/workflow/documents/{document_id:path}", tags=["results"],
              summary="One document's path through the workflow, with where each error started")
     def get_document_path(document_id: str, source: str, p: Principal = Depends(require("read"))):
         src = resolve(p, source)
@@ -461,6 +467,57 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, f"No document '{document_id}' in {source}.")
         return out | {"contract_violations": contracts.check_document(src, document_id,
                                                                       contracts.load(engine, source)) or []}
+
+    # ---------- agents ----------
+
+    @app.post("/v1/events/trajectories", tags=["ingest"],
+              summary="Send agent trajectories: reasoning, tool calls, state changes and the answer, in order")
+    def ingest_trajectories(events: List[TrajectoryEvent], x_tenant: Optional[str] = Header(None),
+                            p: Principal = Depends(require("ingest"))):
+        too_big(sum(len(e.steps) + 1 for e in events))
+        return {"ingested": ingest.write_trajectories(engine, events, tenant_for(p, x_tenant))}
+
+    @app.post("/v1/agents/references", tags=["ingest"],
+              summary="What test cases expect: tool calls, answer and end state (upserts by case_id)")
+    def put_references(refs: List[ReferenceEvent], x_tenant: Optional[str] = Header(None),
+                       p: Principal = Depends(require("ingest"))):
+        too_big(len(refs))
+        return {"ingested": ingest.write_references(engine, refs, tenant_for(p, x_tenant))}
+
+    @app.get("/v1/agents/references", tags=["results"])
+    def get_references(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return list(agents.references(engine, _tenant(source)).values())
+
+    @app.get("/v1/agents/runs", tags=["results"], summary="Agent evaluation runs, newest first")
+    def list_agent_runs(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return agents.agent_runs(engine, _tenant(source))
+
+    @app.post("/v1/agents/runs/{run_id}/evaluate", tags=["operate"],
+              summary="Check every trajectory in a run against its reference and contracts; stored as eval results")
+    def evaluate_agent_run(run_id: str, source: str, p: Principal = Depends(require("manage"))):
+        out = agents.evaluate_run(engine, resolve(p, source), _tenant(source), run_id)
+        if not out["trajectories"]:
+            raise HTTPException(404, f"No trajectories in run '{run_id}' for {source}.")
+        return out
+
+    @app.get("/v1/agents/runs/{run_id}", tags=["results"],
+             summary="Pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline")
+    def agent_run_summary(run_id: str, source: str, baseline: Optional[str] = None,
+                          p: Principal = Depends(require("read"))):
+        out = agents.summary(engine, resolve(p, source), _tenant(source), run_id, baseline)
+        if out is None:
+            raise HTTPException(404, f"No trajectories in run '{run_id}' for {source}.")
+        return out
+
+    @app.get("/v1/agents/trajectories/{trajectory_id:path}", tags=["results"],
+             summary="One trajectory step by step, against its reference: divergence, end state, contracts, cost")
+    def get_trajectory(trajectory_id: str, source: str, p: Principal = Depends(require("read"))):
+        out = agents.detail(engine, resolve(p, source), _tenant(source), trajectory_id)
+        if out is None:
+            raise HTTPException(404, f"No trajectory '{trajectory_id}' in {source}.")
+        return out
 
     # ---------- failure causes ----------
 
@@ -559,7 +616,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def path_shifts(source: str, days: float = 7, p: Principal = Depends(require("read"))):
         return contracts.shifts(runner.CachedSource(resolve(p, source)), runner.window_for_days(days))
 
-    @app.get("/v1/contracts/documents/{document_id}", tags=["results"],
+    @app.get("/v1/contracts/documents/{document_id:path}", tags=["results"],
              summary="The contracts one document breaks, and at which step")
     def document_contracts(document_id: str, source: str, p: Principal = Depends(require("read"))):
         out = contracts.check_document(resolve(p, source), document_id, contracts.load(engine, source))

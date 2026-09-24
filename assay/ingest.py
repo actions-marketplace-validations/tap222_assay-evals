@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -115,6 +116,62 @@ class EvalResultEvent(Event):
         None, description='What produced the output: {"prompt": "extract_fields@v13", "model": "...", "build": "..."}')
 
 
+class StepEvent(Event):
+    kind: str = Field(..., pattern="^(reason|tool|state|answer)$",
+                      description="reason (model thinking or planning), tool (a call and its result), state "
+                                  "(a change to the world), answer (the final reply)")
+    name: Optional[str] = Field(None, max_length=128,
+                                description="tool: the tool's name; state: the object changed, e.g. order:1001")
+    args: Optional[Dict[str, Any]] = Field(None, description='tool: its arguments; state: {"op": "create|update|delete"}')
+    result: Optional[Any] = Field(None, description="tool: what it returned; state: the object after the change")
+    error: Optional[str] = Field(None, max_length=1024, description="tool: the error it raised, if any")
+    text: Optional[str] = Field(None, max_length=16384, description="reason / answer: the text")
+    model: Optional[str] = Field(None, max_length=128)
+    tokens: Optional[int] = Field(None, ge=0)
+    cost_usd: Optional[float] = Field(None, ge=0)
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+class TrajectoryEvent(Event):
+    """One run of an agent on one task, with its steps in order. Also recorded as a
+    document, so volume, cost, the workflow graph and path contracts cover agents."""
+    trajectory_id: str = Field(..., max_length=128)
+    run_id: Optional[str] = Field(None, max_length=128, description="The evaluation run, for a test case")
+    case_id: Optional[str] = Field(None, max_length=128, description="The test case, the same id across runs")
+    attempt: Optional[int] = Field(None, ge=0)
+    task: Optional[str] = Field(None, max_length=128, description="The kind of task, e.g. refund_request")
+    segment: Optional[str] = None
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    answer: Optional[str] = Field(None, max_length=16384)
+    status: Optional[str] = Field(None, description="completed, failed, max_steps, …")
+    lineage: Optional[Dict[str, str]] = None
+    steps: List[StepEvent] = Field(..., max_length=500)
+
+    @model_validator(mode="after")
+    def _size(self):
+        if len(json.dumps([s.model_dump() for s in self.steps], default=str)) > 512 * 1024:
+            raise ValueError("steps are larger than 512 KB; trim long tool results")
+        return self
+
+
+class ReferenceEvent(Event):
+    """What a test case expects of the agent's trajectory."""
+    case_id: str = Field(..., max_length=128)
+    calls: List[Dict[str, Any]] = Field(
+        default_factory=list, description='Expected tool calls in order: {"tool": "get_order", "args": {"order_id": '
+                                          '"1001"}, "optional": false, "any_order": false}. args match partially.')
+    allow_extra: List[str] = Field(default_factory=list, description="Tools that may be called beyond these, "
+                                                                     "e.g. read-only lookups")
+    answer: Optional[str] = Field(None, description="The expected answer, or a value it must contain")
+    answer_match: str = Field("contains", pattern="^(contains|equals)$")
+    state: List[Dict[str, Any]] = Field(
+        default_factory=list, description='End-state assertions: {"object": "refund:*", "exists": false} or '
+                                          '{"object": "order:1001", "field": "qty", "equals": 2}')
+    max_steps: Optional[int] = Field(None, ge=1)
+
+
 class CallEvent(Event):
     call_id: str = Field(..., max_length=128)
     stage: str
@@ -187,6 +244,7 @@ class EventBatch(Event):
     extractions: List[ExtractionEvent] = []
     errors: List[ErrorEvent] = []
     eval_results: List[EvalResultEvent] = []
+    trajectories: List[TrajectoryEvent] = []
     prompts: List[PromptEvent] = []
 
 
@@ -256,9 +314,42 @@ def write(engine: Engine, kind: str, events: List[Event], tenant: str) -> int:
     return n
 
 
+def write_trajectories(engine: Engine, events: List["TrajectoryEvent"], tenant: str) -> int:
+    """Store trajectories with their steps (replacing any earlier copy), and each as a document."""
+    if not events:
+        return 0
+    t, st = store.agent_trajectories, store.agent_steps
+    heads, steps, docs = [], [], []
+    for e in events:
+        heads.append({"tenant": tenant, "trajectory_id": e.trajectory_id, "run_id": e.run_id, "case_id": e.case_id,
+                      "attempt": e.attempt, "task": e.task, "started_at": e.started_at, "finished_at": e.finished_at,
+                      "answer": e.answer, "status": e.status, "lineage": e.lineage})
+        for i, s in enumerate(e.steps):
+            steps.append({"tenant": tenant, "trajectory_id": e.trajectory_id, "seq": i, **s.model_dump()})
+        docs.append(DocumentEvent(document_id=e.trajectory_id, received_at=e.started_at,
+                                  completed_at=e.finished_at if (e.status or "completed") == "completed" else None,
+                                  status=e.status or "completed", document_type=e.task, segment=e.segment))
+    ids = [e.trajectory_id for e in events]
+    with engine.begin() as conn:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            conn.execute(st.delete().where((st.c.tenant == tenant) & st.c.trajectory_id.in_(chunk)))
+        if steps:
+            conn.execute(st.insert(), steps)
+    upsert(engine, t, heads, "trajectory_id")
+    write(engine, "documents", docs, tenant)
+    return len(events)
+
+
+def write_references(engine: Engine, refs: List["ReferenceEvent"], tenant: str) -> int:
+    rows = [r.model_dump() | {"tenant": tenant, "updated_at": datetime.utcnow()} for r in refs]
+    return upsert(engine, store.agent_references, rows, "case_id")
+
+
 def write_batch(engine: Engine, batch: EventBatch, tenant: str) -> Dict[str, int]:
     # Documents first, so everything else has something to attach to.
     out = {kind: write(engine, kind, getattr(batch, kind), tenant) for kind in TABLES}
+    out["trajectories"] = write_trajectories(engine, batch.trajectories, tenant)
     out["prompts"] = register_prompts(engine, batch.prompts, tenant)
     return out
 
@@ -328,6 +419,15 @@ Stage run  from any other span with an assay.stage attribute. Optional assay.did
 Prompts    assay.prompt_id / assay.prompt_version on a model-call span or its
            parent stage span.
 code_revision comes from the resource's service.version.
+
+Agents     a trace with any tool span (gen_ai.operation.name = execute_tool, or a
+           gen_ai.tool.name attribute) becomes a trajectory. Tool spans are tool
+           steps: gen_ai.tool.call.arguments and gen_ai.tool.call.result (JSON or
+           text), and the span's error. Model spans are reasoning steps (model,
+           gen_ai.usage.input_tokens + output_tokens, assay.cost_usd). Spans with
+           assay.state.object are state changes (assay.state.op,
+           assay.state.value as JSON). The root span may carry assay.answer,
+           assay.task, and for test cases assay.run_id, assay.case_id, assay.attempt.
 """
 
 
@@ -405,4 +505,60 @@ def from_otlp(payload: Dict[str, Any]) -> EventBatch:
                 status="failed" if errored else "success", started_at=start, finished_at=end,
                 did_work=a.get("assay.did_work"), outputs=outputs or None, sequence=a.get("assay.sequence"),
                 prompt_id=_str(a.get("assay.prompt_id")), prompt_version=_str(a.get("assay.prompt_version"))))
+    _agent_trajectories(batch, collected, doc_of)
     return batch
+
+
+def _json(v):
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return v
+    return v
+
+
+def _agent_trajectories(batch: EventBatch, collected, doc_of) -> None:
+    """Turn traces with tool spans into trajectories (see OTEL_MAPPING)."""
+    by_doc = defaultdict(list)
+    for sp, a, res in collected:
+        by_doc[doc_of(sp, a)].append((sp, a, res))
+    agent_docs = set()
+    for doc, spans in by_doc.items():
+        is_tool = lambda a: a.get("gen_ai.operation.name") == "execute_tool" or "gen_ai.tool.name" in a
+        if not any(is_tool(a) for _, a, _ in spans):
+            continue
+        agent_docs.add(doc)
+        root = next(((sp, a) for sp, a, _ in spans if not sp.get("parentSpanId")), (spans[0][0], spans[0][1]))
+        steps = []
+        for sp, a, res in sorted(spans, key=lambda x: int(x[0].get("startTimeUnixNano") or 0)):
+            errored = (sp.get("status") or {}).get("code") in (2, "STATUS_CODE_ERROR")
+            start, end = _ts(sp.get("startTimeUnixNano")), _ts(sp.get("endTimeUnixNano"))
+            if is_tool(a):
+                steps.append(StepEvent(kind="tool", name=str(a.get("gen_ai.tool.name") or sp.get("name")),
+                                       args=_json(a.get("gen_ai.tool.call.arguments")) if isinstance(
+                                           _json(a.get("gen_ai.tool.call.arguments")), dict) else None,
+                                       result=_json(a.get("gen_ai.tool.call.result")),
+                                       error=((sp.get("status") or {}).get("message") or "error") if errored else None,
+                                       started_at=start, finished_at=end))
+            elif a.get("assay.state.object"):
+                steps.append(StepEvent(kind="state", name=str(a["assay.state.object"]),
+                                       args={"op": a.get("assay.state.op") or "update"},
+                                       result=_json(a.get("assay.state.value")), started_at=start, finished_at=end))
+            elif any(k.startswith("gen_ai.") for k in a) and sp.get("parentSpanId"):
+                tokens = (a.get("gen_ai.usage.input_tokens") or 0) + (a.get("gen_ai.usage.output_tokens") or 0)
+                steps.append(StepEvent(kind="reason", model=a.get("gen_ai.response.model") or a.get("gen_ai.request.model"),
+                                       tokens=tokens or None, cost_usd=a.get("assay.cost_usd"),
+                                       started_at=start, finished_at=end))
+        rsp, ra = root
+        if ra.get("assay.answer"):
+            steps.append(StepEvent(kind="answer", text=str(ra["assay.answer"]), started_at=_ts(rsp.get("endTimeUnixNano"))))
+        errored = (rsp.get("status") or {}).get("code") in (2, "STATUS_CODE_ERROR")
+        batch.trajectories.append(TrajectoryEvent(
+            trajectory_id=doc, run_id=_str(ra.get("assay.run_id")), case_id=_str(ra.get("assay.case_id")),
+            attempt=ra.get("assay.attempt"), task=_str(ra.get("assay.task") or ra.get("assay.document_type")),
+            segment=_str(ra.get("assay.segment")), started_at=_ts(rsp.get("startTimeUnixNano")) or datetime.utcnow(),
+            finished_at=_ts(rsp.get("endTimeUnixNano")), answer=_str(ra.get("assay.answer")),
+            status="failed" if errored else "completed", steps=steps[:500]))
+    # Their model spans are reasoning steps now; don't count them again as calls.
+    batch.calls = [c for c in batch.calls if c.document_id not in agent_docs]

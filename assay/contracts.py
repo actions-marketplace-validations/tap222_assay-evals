@@ -23,6 +23,7 @@ person to look at rather than to page anyone.
 """
 from __future__ import annotations
 
+import json
 import math
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -70,6 +71,10 @@ def validate(c: dict) -> Optional[str]:
         return "max_runs must be at least 1."
     if c.get("severity", "critical") not in SEVERITIES:
         return f"severity is one of: {', '.join(SEVERITIES)}."
+    if c.get("where") is not None and not isinstance(c["where"], dict):
+        return "where is an object of argument conditions, e.g. {\"confirmed\": {\"not\": true}}."
+    if c.get("same") and c["kind"] not in ("only_after", "before"):
+        return "same applies to only_after and before contracts."
     for scope in ("when", "unless"):
         bad = [k for k in (c.get(scope) or {}) if k not in SCOPE_FIELDS]
         if bad:
@@ -81,6 +86,15 @@ def describe(c: dict) -> str:
     text = KINDS[c["kind"]][1].format(step=c.get("step"), other=c.get("other"), max_runs=c.get("max_runs"),
                                       steps=", ".join(c.get("steps") or []))
     scope = lambda s: "; ".join(f"{k} is {' or '.join(map(str, v))}" for k, v in (s or {}).items())
+    if c.get("where"):
+        conds = [f"{k} is not {v['not']!r}" if isinstance(v, dict) and "not" in v else
+                 f"{k} is one of {v['in']!r}" if isinstance(v, dict) and "in" in v else f"{k} is {v!r}"
+                 for k, v in c["where"].items()]
+        text = text.replace(str(c.get("step")), f"{c.get('step')} (where {' and '.join(conds)})", 1)
+    if c.get("same") and c["kind"] in ("only_after", "before"):
+        text += f" with the same {', '.join(c['same'])}"
+    if c.get("identical") and c["kind"] == "max_runs":
+        text += " with identical arguments"
     if c.get("when"):
         text += f", when {scope(c['when'])}"
     if c.get("unless"):
@@ -114,38 +128,95 @@ def applies(c: dict, doc) -> Optional[bool]:
     return not any(getattr(doc, k, None) in v for k, v in (c.get("unless") or {}).items())
 
 
+class Step(str):
+    """A step name that also carries the step's arguments (a tool call's), so contracts
+    can say "delete_order only where confirmed is true". Compares and hashes as its name."""
+    args: dict
+
+    def __new__(cls, name: str, args: Optional[dict] = None):
+        obj = super().__new__(cls, name)
+        obj.args = args or {}
+        return obj
+
+
+def _args(item) -> dict:
+    return getattr(item, "args", None) or {}
+
+
+def _where(cond: Optional[dict], args: dict) -> bool:
+    """{"confirmed": true}, {"confirmed": {"not": true}}, {"region": {"in": ["eu", "uk"]}}."""
+    for k, v in (cond or {}).items():
+        got = args.get(k)
+        if isinstance(v, dict) and "not" in v:
+            if got == v["not"]:
+                return False
+        elif isinstance(v, dict) and "in" in v:
+            if got not in v["in"]:
+                return False
+        elif got != v:
+            return False
+    return True
+
+
+def _hits(c: dict, path: List[str]) -> List[int]:
+    return [i for i, s in enumerate(path) if s == c.get("step") and _where(c.get("where"), _args(s))]
+
+
+def _args_text(args: dict) -> str:
+    return ", ".join(f"{k}={v!r}" for k, v in list(args.items())[:3])
+
+
 def breaks(c: dict, path: List[str], finished: bool = True) -> Optional[dict]:
     """How a path breaks a contract: {"stage", "at", "detail"}, or None if it keeps it.
 
     `at` is the index in the path where it broke (None for a step that never
     ran). must_include is only judged once the document is finished, so a
-    document still in flight isn't counted as having skipped anything.
+    document still in flight isn't counted as having skipped anything. Path
+    items may be Steps carrying arguments, which `where`, `same` and
+    `identical` look at.
     """
     kind, step = c["kind"], c.get("step")
     first = {}
     for i, s in enumerate(path):
         first.setdefault(s, i)
+    hits = _hits(c, path) if step else []
     if kind == "must_include":
-        if finished and step not in first:
+        if finished and not hits:
             return {"stage": step, "at": None, "detail": f"finished without running {step}"}
     elif kind == "never":
-        if step in first:
-            return {"stage": step, "at": first[step], "detail": f"ran {step} (step {first[step] + 1})"}
+        if hits:
+            i = hits[0]
+            a = _args_text(_args(path[i]))
+            return {"stage": step, "at": i, "detail": f"ran {step} (step {i + 1}{', ' + a if a else ''})"}
     elif kind == "before":
         other = c["other"]
-        if step in first and other in first and first[other] < first[step]:
+        if hits and other in first and first[other] < hits[0]:
             return {"stage": other, "at": first[other],
-                    "detail": f"ran {other} (step {first[other] + 1}) before {step} (step {first[step] + 1})"}
+                    "detail": f"ran {other} (step {first[other] + 1}) before {step} (step {hits[0] + 1})"}
     elif kind == "only_after":
-        other = c["other"]
-        if step in first and (other not in first or first[other] > first[step]):
-            why = "without" if other not in first else "before"
-            return {"stage": step, "at": first[step], "detail": f"ran {step} (step {first[step] + 1}) {why} {other}"}
+        other, same = c["other"], c.get("same") or []
+        for i in hits:
+            ok = any(path[j] == other and all(_args(path[j]).get(k) == _args(path[i]).get(k) for k in same)
+                     for j in range(i))
+            if not ok:
+                earlier = any(path[j] == other for j in range(i))
+                why = ("after " + other + " with a different " + ", ".join(same)) if earlier and same else \
+                    ("before" if other in first else "without") + " " + other
+                a = _args_text({k: _args(path[i]).get(k) for k in same}) if same else ""
+                return {"stage": step, "at": i, "detail": f"ran {step} (step {i + 1}{', ' + a if a else ''}) {why}"}
     elif kind == "max_runs":
-        n = path.count(step)
-        if n > int(c["max_runs"]):
-            at = [i for i, s in enumerate(path) if s == step][int(c["max_runs"])]
-            return {"stage": step, "at": at, "detail": f"ran {step} {n} times (limit {c['max_runs']})"}
+        limit = int(c["max_runs"])
+        if c.get("identical"):
+            seen = defaultdict(list)
+            for i in hits:
+                seen[json.dumps(_args(path[i]), sort_keys=True, default=str)].append(i)
+            worst = max(seen.values(), key=len, default=[])
+            if len(worst) > limit:
+                a = _args_text(_args(path[worst[0]]))
+                return {"stage": step, "at": worst[limit],
+                        "detail": f"ran {step} {len(worst)} times with the same arguments ({a}; limit {limit})"}
+        elif len(hits) > limit:
+            return {"stage": step, "at": hits[limit], "detail": f"ran {step} {len(hits)} times (limit {limit})"}
     elif kind == "allowed_steps":
         allowed = set(c["steps"])
         extra = [(i, s) for i, s in enumerate(path) if s not in allowed]
@@ -172,7 +243,7 @@ def paths(source, window: Window) -> Tuple[Dict[str, List[str]], Dict[str, objec
     out, finished = {}, set()
     for d in ids:
         runs = order_steps(by_doc[d])
-        out[d] = [r.stage for r in runs]
+        out[d] = [Step(r.stage, (r.outputs or {}).get("_args")) for r in runs]
         rec = docs.get(d)
         if rec is not None:
             # Finished within the window: a backfilled window mustn't see completions from its future.
@@ -233,7 +304,7 @@ def check_document(source, document_id: str, contracts: List[dict]) -> Optional[
     if detail is None:
         return None
     doc, runs = detail[0], order_steps(detail[1])
-    path = [r.stage for r in runs]
+    path = [Step(r.stage, (r.outputs or {}).get("_args")) for r in runs]
     out = []
     for c in contracts:
         if not applies(c, doc):
@@ -413,7 +484,8 @@ def suggest(source, window: Window, existing: Iterable[dict] = (), min_docs: int
 
 def save(engine: Engine, source: str, body: dict, contract_id: Optional[int] = None) -> dict:
     t = store.path_contracts
-    fields = {k: body.get(k) for k in ("kind", "step", "other", "max_runs", "steps", "when", "unless", "note")}
+    fields = {k: body.get(k) for k in ("kind", "step", "other", "max_runs", "steps", "when", "unless", "note",
+                                       "where", "same", "identical")}
     fields["severity"] = body.get("severity") or "critical"
     with engine.begin() as conn:
         if contract_id is None:
