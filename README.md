@@ -1,20 +1,40 @@
 # Assay
 
-Evaluation and observability for document-intelligence pipelines: OCR, classification,
-splitting and field extraction, with or without LLMs.
+Evaluation and observability for AI systems: document-intelligence pipelines (OCR,
+classification, splitting, field extraction) and AI agents (reasoning, tool calls, state
+changes), with or without LLMs.
 
-Assay answers what a pipeline's own logs can't:
+Assay answers what a system's own logs can't:
 
 - Is anything broken right now?
-- Which customer, document type, stage or model is it broken for?
-- Which documents are behind the number?
-- What does a document really cost, and where does the money go?
-- Is this release safe to ship?
+- Which customer, document type, step, tool or model is it broken for?
+- Where did a wrong answer, or an agent's run, first go wrong?
+- Which of 5,000 test failures are one cause, which are flaky, and is this release safe to ship?
+- Which production failures should become regression tests?
+- What does a document or an agent run really cost, and where does the money go?
 
-It reports named measures per slice, with alerting, per-document tracing, and release gates
-that decide on real signal instead of infrastructure health.
+It reports named measures per slice, with alerting, step-by-step traces, failure causes,
+and release gates that decide on real signal instead of infrastructure health.
 
-It runs as a separate service. It **reads** your pipeline's data and never writes to it.
+It runs as a separate service. It **reads** your system's data and never writes to it. To
+send data from Python:
+
+```bash
+pip install assay-evals
+```
+
+```python
+import assay_sdk as assay
+assay.init("https://assay.example.com", key="ak_...")
+
+with assay.run("refund_request", input=message) as run:
+    run.llm(model="claude-sonnet-5", cost_usd=0.002)
+    order = run.call("get_order", get_order, order_id="O-17")
+    run.answer(reply)
+```
+
+See the [SDK](sdk/python/README.md), the [event schema](docs/event-schema.md), or the
+[setup guide](#setup-guide) for other ways in, including no code at all.
 
 ## Quick start (demo data, nothing to connect)
 
@@ -98,7 +118,7 @@ Open the dashboard, paste the key when asked, and go to **Connect**. The details
 |---|---|---|
 | **Upload a spreadsheet** | you | minutes |
 | **We use OpenTelemetry** | whoever runs the collector | about an hour, no code changes |
-| **A developer can add a few lines** (Python) | a developer | about an hour |
+| **A developer can add a few lines** (Python, `pip install assay-evals`) | a developer | about an hour |
 | **Another system can send web requests** (Zapier, n8n, a script) | whoever owns it | 1–3 hours |
 | **Our data is in a database** | whoever runs the Assay server | about a day |
 
@@ -157,7 +177,7 @@ Open the dashboard and go to **Connect**. It works as a checklist:
      the sheet holds and which column is which, and shows rows it can't read and why. You can
      correct its guesses before importing. Test sheets just need a run name.
    - **We use OpenTelemetry.** One exporter added to the collector's config.
-   - **A developer can add a few lines.** One Python file, no dependencies.
+   - **A developer can add a few lines.** `pip install assay-evals`, with no dependencies.
    - **Another system can send web requests.** Zapier, n8n, or any script.
    - **Our data is in a database.** Read-only access and a mapping file.
 
@@ -214,27 +234,31 @@ opened `READ ONLY`.
 
 ### 2. Push events
 
-If you can't expose a database, send the same records from your code. `assay/client.py` is
-one file with no dependencies beyond the standard library, so you can copy it into your project:
+If you can't expose a database, send events from your code with the
+[`assay-evals`](sdk/python/README.md) SDK (`pip install assay-evals`, standard library only):
 
 ```python
-from client import Assay   # or: from assay.client import Assay
-assay = Assay("https://assay.example.com", api_key="ak_...")   # an ingest key; it sets the tenant
-assay.document(doc_id, received_at=start, document_type="invoice", segment=customer, page_count=2)
-with assay.stage(doc_id, "field_extraction"):      # timing, status, and failures
-    result = extract(doc)
-assay.call(doc_id, stage="field_extraction", model_declared="claude-sonnet-5",
-           model_served=resp.model, latency_ms=ms, cost_usd=price, status="success")
-assay.review(doc_id, minutes=4.5)                  # people time, for cost
-assay.document(doc_id, received_at=start, completed_at=datetime.utcnow())  # only sent fields change
+import assay_sdk as assay
+assay.init("https://assay.example.com", key="ak_...")   # an ingest key; it sets the tenant
+
+with assay.run("invoice", kind="pipeline", input_ref="s3://inbox/inv-9.pdf", segment=customer) as run:
+    with run.stage("field_extraction", prompt="extract_fields@v13") as s:   # timing, status, failures
+        run.llm(model="claude-sonnet-5", tokens_in=2400, tokens_out=300, cost_usd=0.011)
+        s.outputs.update(extract(doc))                                     # so errors can be traced
+
+assay.correction(run.id, "total", expected="1240.00", observed="1204.00")   # a reviewer's fix
 ```
 
-It batches, retries, and never raises into your pipeline unless `strict=True`. Or send the
-records over HTTP directly:
+Events stream in the background. The SDK retries, and never raises into your pipeline
+unless `strict=True`. Agents use the same `run` with `run.llm`, `run.call` (tool calls),
+`run.state` and `run.answer`; see [Agents](#agents-evaluating-the-trajectory-not-just-the-answer).
 
-`POST /v1/events` with `Authorization: Bearer <ingest key>`. Or, if your pipeline already emits
-OpenTelemetry traces, add an exporter and change no code. See
-[API and authentication](#api-and-authentication).
+Other ways in:
+- **Any language:** `POST /v1/ingest` with `Authorization: Bearer <ingest key>`, using the
+  [event schema](docs/event-schema.md).
+- **OpenTelemetry:** add an exporter and change no code. See
+  [API and authentication](#api-and-authentication).
+- **Older integrations:** `assay/client.py` (per-record `POST /v1/events`) still works.
 
 ### 3. See what you get, and backfill
 
@@ -292,9 +316,9 @@ to refuse to run open.
 **New integrations should use the event schema.** [`docs/event-schema.md`](docs/event-schema.md)
 describes one contract for runs, steps and outcomes (feedback, test checks, corrections,
 expectations). It streams to `POST /v1/ingest`, and its JSON Schema is at `GET /v1/schema`.
-The Python SDK, [`assay-evals`](sdk/python/README.md), is the smallest way to send it:
-`pip install assay-evals`, with no dependencies. Until the first release is on PyPI, use
-`pip install ./sdk/python`. The endpoints below keep working.
+The Python SDK, [`assay-evals`](https://pypi.org/project/assay-evals/), is the smallest way
+to send it: `pip install assay-evals`, with no dependencies (source in
+[`sdk/python`](sdk/python/README.md)). The endpoints below keep working.
 
 **Releasing the SDK:** bump `version` in `sdk/python/pyproject.toml` and `__version__` in
 `sdk/python/assay_sdk/__init__.py`, then `git tag sdk-v<version> && git push origin
@@ -860,7 +884,7 @@ All settings are listed in `.env.example`.
 ## Layout
 
 ```
-sources/      sql.py (any database, via a mapping), events.py (pushed events)
+sources/      sql.py (any database, via a mapping), events.py (pushed events; agent steps read as stages and calls)
 measures/     operations.py, cost.py, pipeline.py, ground_truth.py; each a class with compute()
 cost.py       cost ledger: components, estimates, breakdowns
 alerts.py     bands, SLO matching, pending → open → resolved, contract alerts, webhook
@@ -874,7 +898,8 @@ trace.py      per-document trace and flags; slowest / stuck / lost finders
 rootcause.py  error localization: which step a wrong value started at, and how
 prompts.py    prompt registry, per-version results, version-vs-previous comparison, diffs
 coverage.py   what a source can answer, and which field unlocks the rest
-client.py     standard-library SDK: documents, steps, calls, agent runs, test results, inputs, feedback, release check
+schema.py     the v1 event schema (runs, steps, outcomes): models, JSON Schema, and where each event lands
+client.py     the older per-record SDK (POST /v1/events); new integrations use sdk/python
 connect.py    no-code setup: what's arrived and what it switches on, spreadsheet import, hand-off instructions
 integrations.py  Slack, Jira, Linear (secrets masked), and CI release-check jobs
 auth.py       API keys, scopes, tenant isolation, rate limits
@@ -885,8 +910,19 @@ scheduler.py  in-process periodic runs
 api.py        FastAPI; dashboard in static/index.html
 ```
 
+Outside `assay/`:
+
+```
+sdk/python/          the assay-evals SDK on PyPI (standard library only)
+docs/                event-schema.md (the design) and event-schema-v1.json (the JSON Schema)
+.github/workflows/   publish-sdk.yml: a tag sdk-v<version> → tests → TestPyPI → your approval → PyPI
+tests/               pytest, including the SDK against a real server
+```
+
 ## Not built yet
 
+- **SDKs for other languages:** only Python has an SDK. Other languages send the event
+  schema to `POST /v1/ingest` directly, or use OpenTelemetry.
 - **Accuracy from eval runs:** evaluation results are grouped into causes, but the accuracy
   measures don't read them yet.
 - **Naming causes:** cause names come from templates. An LLM could write better one-line names
