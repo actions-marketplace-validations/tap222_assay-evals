@@ -19,7 +19,7 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import alerts, auth, cost, coverage, gates, ingest, prompts, rootcause, runner, store, trace
+from assay import alerts, auth, cost, coverage, gates, ingest, prompts, rootcause, runner, store, trace, workflow
 from assay.auth import Principal
 from assay.config import Settings
 from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EventBatch, ExtractionEvent, ReviewEvent,
@@ -407,6 +407,27 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             rows = conn.execute(q).all()
         return [{"id": r.id, "created_at": r.created_at.isoformat(), "outcome": r.outcome,
                  "lineage": r.lineage, **r.detail} for r in rows]
+
+    # ---------- workflow ----------
+
+    @app.get("/v1/workflow", tags=["results"],
+             summary="The pipeline as a graph, inferred from traffic, with each step's health and errors")
+    def get_workflow(source: str, days: float = 7, p: Principal = Depends(require("read"))):
+        src = runner.CachedSource(resolve(p, source))
+        return workflow.build(src, runner.window_for_days(days), engine, source)
+
+    @app.get("/v1/workflow/steps/{stage}/errors", tags=["results"],
+             summary="Reported errors that started at one step ('(done)' for after the pipeline)")
+    def get_step_errors(stage: str, source: str, days: float = 7, p: Principal = Depends(require("read"))):
+        return workflow.stage_errors(runner.CachedSource(resolve(p, source)), runner.window_for_days(days), stage)
+
+    @app.get("/v1/workflow/documents/{document_id}", tags=["results"],
+             summary="One document's path through the workflow, with where each error started")
+    def get_document_path(document_id: str, source: str, p: Principal = Depends(require("read"))):
+        out = workflow.document_path(resolve(p, source), document_id)
+        if out is None:
+            raise HTTPException(404, f"No document '{document_id}' in {source}.")
+        return out
 
     # ---------- prompts ----------
 

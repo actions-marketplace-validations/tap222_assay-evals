@@ -219,7 +219,10 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                                        expected=expected, observed=observed, kind=kind, reported_at=reported,
                                        reporter=f"reviewer-{rng.randint(1, 6)}",
                                        source=rng.choice(["review", "review", "qa", "customer"])))
-            for s, stage in enumerate(PIPELINE):
+            # Documents that need a person take a branch through human_review.
+            touched = rng.random() < TOUCH[itype]
+            path = PIPELINE[:6] + (["human_review"] if touched else []) + PIPELINE[6:]
+            for s, stage in enumerate(path):
                 start = received + timedelta(seconds=30 * s)
                 fail_p = 0.12 if (stage == "field_extraction" and 4 <= age < 6) else 0.004
                 failed = stage not in STUBS and rng.random() < fail_p
@@ -255,7 +258,7 @@ def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: in
                     segment=segment, document_type=itype,
                     latency_ms=round(LATENCY_MS[stage] * slow * rng.lognormvariate(0, 0.35)),
                     status="error" if rng.random() < 0.008 else "success"))
-            if rng.random() < TOUCH[itype]:
+            if touched:
                 rts = received + timedelta(minutes=rng.randint(15, 240))
                 reviews.append(dict(tenant=TENANT, review_id=f"{did}-r", document_id=did, ts=rts, kind="review",
                                     minutes=round(rng.lognormvariate(1.1, 0.5) * (1 + pages / 10), 1),

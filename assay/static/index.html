@@ -128,6 +128,22 @@ svg.chart text{fill:var(--muted);font:11px var(--mono)}
 .facts dd{margin:2px 0 0;font-weight:500;overflow-wrap:anywhere}
 svg.timeline text{fill:var(--ink-2);font:11px var(--mono)}
 .keybox{display:flex;gap:8px;align-items:center}
+svg.workflow{width:100%;height:auto;display:block}
+svg.workflow .wnode{cursor:pointer}
+svg.workflow .wnode:hover rect:first-child,svg.workflow .wnode:focus rect:first-child{filter:drop-shadow(0 2px 6px rgba(0,0,0,.18))}
+svg.workflow .wnode:focus{outline:none}
+svg.workflow .wtitle{font:600 13px var(--mono);fill:var(--ink)}
+svg.workflow .wsub{font:11px var(--body);fill:var(--muted)}
+svg.workflow .wbadge{font:600 11px var(--mono);fill:#fff}
+svg.workflow .elabel{font:11px var(--mono);fill:var(--muted)}
+table.lineage th.hl,table.lineage td.hl{box-shadow:inset 2px 0 0 var(--accent),inset -2px 0 0 var(--accent)}
+.pathbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.pathbar button{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 10px;font:12px var(--mono);cursor:pointer}
+.pathbar button.err{border-color:var(--bad);color:var(--bad);font-weight:600}
+.pathbar button.fail{background:var(--bad-bg);color:var(--bad)}
+.pathbar button.noop{color:var(--muted);border-style:dashed}
+.pathbar button.hl{box-shadow:0 0 0 2px var(--accent)}
+.pathbar .arr{color:var(--muted)}
 pre.code{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font:12.5px/1.55 var(--mono);overflow-x:auto;white-space:pre}
 details summary{cursor:pointer}
 span.costbar{display:flex;height:12px;border-radius:3px;overflow:hidden;background:var(--sunk)}
@@ -154,6 +170,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
 <main>
   <nav class="tabs">
     <a href="#overview" data-tab="overview">Overview</a>
+    <a href="#workflow" data-tab="workflow">Workflow</a>
     <a href="#measures" data-tab="measures">Measures</a>
     <a href="#cost" data-tab="cost">Cost</a>
     <a href="#errors" data-tab="errors">Errors</a>
@@ -169,6 +186,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
     <button id="savekey" type="button">Use key</button>
   </div>
   <section id="tab-overview" class="stack"></section>
+  <section id="tab-workflow" class="stack" hidden></section>
   <section id="tab-measures" class="stack" hidden></section>
   <section id="tab-cost" class="stack" hidden></section>
   <section id="tab-errors" class="stack" hidden></section>
@@ -202,7 +220,7 @@ function fmt(v,unit){
   if(v==null)return"—";
   switch(unit){
     case"ratio":return (v*100).toFixed(Math.abs(v)<0.01&&v!==0?2:1)+"%";
-    case"seconds":return v<3600?(v/60).toFixed(0)+" min":v<172800?(v/3600).toFixed(1)+" h":(v/86400).toFixed(1)+" d";
+    case"seconds":return v<60?v.toFixed(v<10?1:0)+" s":v<3600?(v/60).toFixed(0)+" min":v<172800?(v/3600).toFixed(1)+" h":(v/86400).toFixed(1)+" d";
     case"ms":return v<10000?Math.round(v).toLocaleString()+" ms":(v/1000).toFixed(1)+" s";
     case"usd":return "$"+v.toFixed(2);
     case"count":return Math.round(v).toLocaleString();
@@ -270,7 +288,7 @@ async function refresh(){
 function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
-  ["overview","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
+  ["overview","workflow","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
 }
 
 /* ---------- overview ---------- */
@@ -292,6 +310,14 @@ function sloGroups(list){
       <div class="meta">${worst.map(a=>`${esc(a.slice_value)} ${esc(fmt(a.value,m.unit))}`).join(" · ")}</div></div>
       <button class="link" type="button" data-open="${esc(m.id)}" data-dim="${esc(dim)}" data-val="${esc(worst[0].slice_value)}">Investigate</button></div>`}).join("");
 }
+async function overviewFlow(){
+  const box=$("#ov-flow");if(!box)return;
+  try{const g=await api(`/v1/workflow?${q({source:src(),days:1})}`);
+    if(g.nodes.length<=2){box.remove();return}
+    box.innerHTML=`<div class="panel-head"><div><h2>Pipeline</h2><p class="sub">Last 24 hours. Click a step to see what's wrong there.</p></div><a href="#workflow" class="ref">Open workflow →</a></div><div class="scroll">${flowGraph(g,{compact:true})}</div>`;
+    wireFlow(box,st=>{location.hash="workflow/"+encodeURIComponent(st)})}
+  catch(e){box.remove()}
+}
 function renderOverview(){
   const o=S.overview;if(!o)return;
   const open=o.open_alerts,breached=o.slos.filter(s=>s.state==="breached"),judged=o.slos.filter(s=>s.state!=="unmeasured");
@@ -299,6 +325,7 @@ function renderOverview(){
   const sched=o.scheduler;
   const learning=o.run_count<4?`<div class="panel flags"><div class="flag"><span class="chip warn">learning</span>Alerts compare each slice with its recent past and need 4 runs; this source has ${o.run_count}. <a href="#connect">Backfill history</a> to get baselines now.</div></div>`:"";
   $("#tab-overview").innerHTML=learning+`
+  <div class="panel" id="ov-flow"><div class="panel-head"><h2>Pipeline</h2><a href="#workflow" class="ref">Open workflow →</a></div><p class="note">Loading…</p></div>
   <div class="strip">
     <div class="${anomalies.length?"bad":"good"}"><b>${anomalies.length}</b><span>open anomalies</span></div>
     <div class="${breached.length?"warn":"good"}"><b>${judged.length?`${judged.length-breached.length}/${judged.length}`:"—"}</b><span>SLOs met${o.slos.length>judged.length?` · ${o.slos.length-judged.length} unmeasured`:""}</span></div>
@@ -616,7 +643,7 @@ function errorCard(r,{link=true}={}){
     <div class="msg"><b class="mono">${esc(r.field)}</b> ${r.kind==="missing"?"missing":r.kind==="extra"?"shouldn't exist":r.expected?`should be <b>${esc(r.expected)}</b>${r.observed!=null?`, was <b>${esc(r.observed)}</b>`:""}`:`is wrong${r.observed!=null?`: was <b>${esc(r.observed)}</b>`:""}`} ${vchip(r.verdict)} ${r.origin_stage?`at <b class="mono">${esc(r.origin_stage)}</b>`:""}${r.origin_prompt?` <span class="ref">prompt ${esc(r.origin_prompt)}</span>`:""}</div>
     <div class="meta">${esc(r.explanation)}</div>
     ${r.signals?.length?`<div class="meta" style="color:var(--warn)">At that step: ${r.signals.map(esc).join(" · ")}</div>`:""}
-    <div class="meta">${link?`<a href="#trace/${encodeURIComponent(r.document_id)}" class="mono">${esc(r.document_id)}</a> · `:""}${esc(r.source||"reported")}${r.reporter?` by ${esc(r.reporter)}`:""}${r.reported_at?` · ${esc(ago(r.reported_at))}`:""}</div></div><span></span></div>`;
+    <div class="meta">${link?`<a href="#trace/${encodeURIComponent(r.document_id)}${r.origin_stage?"/"+encodeURIComponent(r.origin_stage):""}" class="mono" title="Open this document at the step where it went wrong">${esc(r.document_id)} → ${esc(r.origin_stage||"output")}</a> · `:""}${esc(r.source||"reported")}${r.reporter?` by ${esc(r.reporter)}`:""}${r.reported_at?` · ${esc(ago(r.reported_at))}`:""}</div></div><span></span></div>`;
 }
 function reportForm(docId="",fields=[]){
   return `<form id="report-form" class="slo-form" style="flex-wrap:wrap">
@@ -660,7 +687,7 @@ async function renderErrors(){
     <div class="panel-head"><div><h2>Where errors start</h2><p class="sub">Each reported wrong value, traced back through the document's steps to where it first went wrong. Steps in pipeline order.</p></div>
       <select id="err-days" aria-label="Window">${[7,30,90].map(d=>`<option value="${d}" ${d===days?"selected":""}>${d} days</option>`).join("")}</select></div>
     <div>${rows.map(st=>{const c=cell[st],tot=Object.values(c).reduce((a,b)=>a+b,0);
-      return `<div class="bar-row" style="grid-template-columns:170px 1fr 60px;cursor:default"><span class="lbl mono" title="${esc(st==="(none)"?"After the pipeline, or not traced":st)}">${esc(st==="(none)"?"after pipeline":st)}</span>
+      return `<div class="bar-row" style="grid-template-columns:170px 1fr 60px" onclick="location.hash='workflow/'+encodeURIComponent('${esc(st==="(none)"?"(done)":st)}')" title="Open this step in the workflow"><span class="lbl mono" title="${esc(st==="(none)"?"After the pipeline, or not traced":st)}">${esc(st==="(none)"?"after pipeline":st)}</span>
         <span class="costbar" style="width:${tot/max*100}%;height:14px">${Object.keys(VERDICT).filter(v=>c[v]).map(v=>`<i style="width:${c[v]/tot*100}%;background:${VERDICT[v][1]}" title="${esc(VERDICT[v][0])}: ${c[v]}"></i>`).join("")}</span>
         <span class="num">${tot}</span></div>`}).join("")}</div>
     <div class="legend">${Object.entries(VERDICT).filter(([v])=>s.by_verdict.some(([x])=>x===v)).map(([v,[l,c,d]])=>`<span title="${esc(d)}"><i style="background:${c}"></i>${esc(l)} · ${s.by_verdict.find(([x])=>x===v)[1]}</span>`).join("")}</div>
@@ -716,6 +743,89 @@ async function renderPrompts(){
     catch(e){box.innerHTML=`<p class="reason">${esc(e.message)}</p>`}});
 }
 
+/* ---------- workflow ---------- */
+const HEALTH={ok:"var(--good)",warn:"var(--warn)",bad:"var(--bad)"};
+const dominant=v=>Object.entries(v||{}).sort((a,b)=>b[1]-a[1])[0]?.[0];
+// The pipeline as a graph. Ranks go left to right and wrap into rows so a
+// 20-step pipeline stays readable; steps sharing a rank (branches) stack.
+function flowGraph(g,{selected=null,compact=false}={}){
+  const nodes=g.nodes,byId=Object.fromEntries(nodes.map(n=>[n.id,n]));
+  const ranks=[...new Set(nodes.map(n=>Math.round(n.position)))].sort((a,b)=>a-b);
+  const perRow=compact?7:5,BW=compact?150:196,BH=compact?58:92,GX=compact?34:52,GY=compact?46:70,PAD=14;
+  const col={},rowOf={},stack={};
+  ranks.forEach((r,i)=>{const row=Math.floor(i/perRow);nodes.filter(n=>Math.round(n.position)===r).forEach((n,k)=>{col[n.id]=i%perRow;rowOf[n.id]=row;stack[n.id]=k})});
+  const rows=Math.max(...Object.values(rowOf))+1;
+  const maxStack=r=>Math.max(1,...nodes.filter(n=>rowOf[n.id]===r).map(n=>stack[n.id]+1));
+  const rowY=[];let yAcc=PAD;for(let r=0;r<rows;r++){rowY.push(yAcc);yAcc+=maxStack(r)*(BH+14)+GY}
+  const W=PAD*2+perRow*BW+(perRow-1)*GX,H=yAcc-GY+PAD;
+  const pos=id=>({x:PAD+col[id]*(BW+GX),y:rowY[rowOf[id]]+stack[id]*(BH+14)});
+  let s="";
+  g.edges.forEach(e=>{if(!byId[e.from]||!byId[e.to])return;const a=pos(e.from),b=pos(e.to);
+    const w=1+5*e.share,hot=selected&&(e.from===selected||e.to===selected);
+    let d,lx,ly;
+    if(rowOf[e.from]===rowOf[e.to]&&col[e.to]>col[e.from]){const x1=a.x+BW,y1=a.y+BH/2,x2=b.x,y2=b.y+BH/2;d=`M${x1},${y1} C${x1+GX/2},${y1} ${x2-GX/2},${y2} ${x2},${y2}`;lx=(x1+x2)/2;ly=(y1+y2)/2-6}
+    else{const x1=a.x+BW/2,y1=a.y+BH,x2=b.x+BW/2,y2=b.y;const my=rowY[rowOf[e.to]]-GY/2;d=`M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;lx=(x1+x2)/2;ly=my-4}
+    s+=`<path d="${d}" fill="none" stroke="${hot?"var(--accent)":"var(--line-strong)"}" stroke-width="${w.toFixed(1)}" opacity="${hot?1:.8}" marker-end="url(#arrow)"/>`;
+    if(e.share<0.98&&!compact)s+=`<text x="${lx}" y="${ly}" text-anchor="middle" class="elabel">${e.documents.toLocaleString()} (${Math.round(e.share*100)}%)</text>`});
+  nodes.forEach(n=>{const {x,y}=pos(n.id),sel=n.id===selected,err=n.errors||0,v=dominant(n.errors_by_verdict);
+    const term=n.kind==="start"||n.kind==="end";
+    s+=`<g class="wnode" data-step="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.id)}">
+      <rect x="${x}" y="${y}" width="${BW}" height="${BH}" rx="${term?BH/2:8}" fill="var(--surface)" stroke="${sel?"var(--accent)":term?"var(--line-strong)":HEALTH[n.health]}" stroke-width="${sel?3:term?1.2:2}"/>
+      ${term?"":`<rect x="${x}" y="${y}" width="5" height="${BH}" rx="2" fill="${HEALTH[n.health]}"/>`}
+      <text x="${x+(term?BW/2:14)}" y="${y+(compact?20:22)}" text-anchor="${term?"middle":"start"}" class="wtitle">${esc(term?(n.kind==="start"?"Received":"Done"):n.id)}</text>
+      ${term?`<text x="${x+BW/2}" y="${y+(compact?38:44)}" text-anchor="middle" class="wsub">${n.kind==="start"?`${n.documents.toLocaleString()} documents`:`${n.documents.toLocaleString()} completed · ${n.open_documents.toLocaleString()} open`}</text>
+        ${n.kind==="end"&&err&&!compact?`<text x="${x+BW/2}" y="${y+64}" text-anchor="middle" class="wsub" style="fill:var(--warn)">${err} error${err>1?"s":""} after the pipeline</text>`:""}`
+      :`<text x="${x+14}" y="${y+(compact?38:42)}" class="wsub">${n.documents.toLocaleString()} docs · ${(n.failure_rate*100).toFixed(1)}% failed${n.noop_rate>0.5?" · did nothing":""}</text>
+        ${compact?"":`<text x="${x+14}" y="${y+60}" class="wsub">${n.duration_p95_s!=null?`p95 ${esc(fmt(n.duration_p95_s,"seconds"))}`:""}${n.cost_per_document?` · ${esc(money(n.cost_per_document))}/doc`:""}${n.fallback_rate?` · ${(n.fallback_rate*100).toFixed(0)}% fallback`:""}</text>
+        ${n.prompt?`<text x="${x+14}" y="${y+78}" class="wsub" style="fill:${n.regression?"var(--bad)":"var(--accent-ink)"}">${n.regression?"⚠ ":""}${esc(n.prompt)}</text>`:""}`}`}
+      ${err?`<g><rect x="${x+BW-(compact?38:46)}" y="${y-9}" width="${compact?44:54}" height="20" rx="10" fill="${VERDICT[v]?.[1]||"var(--bad)"}"/><text x="${x+BW-(compact?16:19)}" y="${y+5}" text-anchor="middle" class="wbadge">${err} err</text></g>`:""}
+      ${(n.open_alerts||[]).length?`<circle cx="${x+10}" cy="${y+9}" r="6" fill="var(--bad)"><title>${n.open_alerts.length} open alert(s)</title></circle>`:""}
+    </g>`});
+  return `<svg class="workflow" viewBox="0 0 ${W} ${H}" style="min-width:${compact?Math.min(W,760):Math.min(W,900)}px" role="img" aria-label="Pipeline workflow">
+    <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line-strong)"/></marker></defs>${s}</svg>`;
+}
+function wireFlow(root,onPick){root.querySelectorAll(".wnode").forEach(n=>{const go=()=>onPick(n.dataset.step);n.onclick=go;n.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();go()}}})}
+
+async function renderWorkflow(){
+  const days=+(store.get("assay-wf-days")||7);
+  let g=null,err="";try{g=await api(`/v1/workflow?${q({source:src(),days})}`)}catch(e){err=e.message}
+  if(!g||g.nodes.length<=2){$("#tab-workflow").innerHTML=`<div class="empty">${esc(err||"No stage runs yet. Send stage runs (one per step per document) and the pipeline appears here.")}</div>`;return}
+  const sel=S.wfStep;
+  $("#tab-workflow").innerHTML=`<div class="panel stack">
+    <div class="panel-head"><div><h2>Pipeline</h2><p class="sub">Drawn from what ${g.documents.toLocaleString()} documents actually did in the last ${days} days. Border color is each step's health, the badge counts reported errors that started there, and arrow width is how many documents took that path. Click a step.</p></div>
+      <select id="wf-days" aria-label="Window">${[1,7,30].map(x=>`<option value="${x}" ${x===days?"selected":""}>${x} day${x>1?"s":""}</option>`).join("")}</select></div>
+    <div class="scroll">${flowGraph(g,{selected:sel})}</div>
+    <div class="legend"><span><i style="background:var(--good)"></i>healthy</span><span><i style="background:var(--warn)"></i>worth a look</span><span><i style="background:var(--bad)"></i>failing, alerting, or a prompt regression</span>${Object.entries(VERDICT).slice(0,6).map(([k,[l,c]])=>`<span><i style="background:${c}"></i>${esc(l)}</span>`).join("")}</div>
+  </div><div id="wf-detail"></div>`;
+  $("#wf-days").onchange=e=>{store.set("assay-wf-days",e.target.value);renderWorkflow()};
+  wireFlow($("#tab-workflow"),st=>{location.hash="workflow/"+encodeURIComponent(st)});
+  if(sel)renderStepDetail(g,sel,days);
+}
+async function renderStepDetail(g,stage,days){
+  const n=g.nodes.find(x=>x.id===stage),box=$("#wf-detail");if(!n){box.innerHTML="";return}
+  const errs=await api(`/v1/workflow/steps/${encodeURIComponent(stage)}/errors?${q({source:src(),days})}`).catch(()=>[]);
+  const term=n.kind==="start"||n.kind==="end";
+  const link=d=>`#trace/${encodeURIComponent(d)}/${encodeURIComponent(stage)}`;
+  box.innerHTML=`<div class="panel stack" style="border-color:${HEALTH[n.health]||"var(--line)"}">
+    <div class="panel-head"><div><span class="ref">${term?"":"Step"}</span><h2 class="mono">${esc(term?(n.kind==="start"?"Received":"Done (after the pipeline)"):stage)}</h2></div>
+      ${term?"":`<span class="chip ${n.health==="ok"?"good":n.health==="warn"?"warn":"bad"}">${n.health==="ok"?"healthy":n.health==="warn"?"worth a look":"needs attention"}</span>`}</div>
+    ${term?"":`<dl class="facts">
+      <div><dt>Documents</dt><dd>${n.documents.toLocaleString()}</dd></div><div><dt>Failed</dt><dd>${(n.failure_rate*100).toFixed(2)}% (${n.failed})</dd></div>
+      <div><dt>Did nothing</dt><dd>${(n.noop_rate*100).toFixed(0)}%</dd></div><div><dt>p95 duration</dt><dd>${n.duration_p95_s!=null?esc(fmt(n.duration_p95_s,"seconds")):"—"}</dd></div>
+      <div><dt>Model calls</dt><dd>${n.calls.toLocaleString()}${n.latency_p95_ms?` · p95 ${esc(fmt(n.latency_p95_ms,"ms"))}`:""}</dd></div><div><dt>Cost / document</dt><dd>${n.cost_per_document?esc(money(n.cost_per_document)):"—"}</dd></div>
+      <div><dt>Fallback</dt><dd>${n.fallback_rate!=null?(n.fallback_rate*100).toFixed(1)+"%":"—"}</dd></div><div><dt>Models</dt><dd class="mono" style="font-size:12px">${esc(n.models.join(", ")||"—")}</dd></div>
+      <div><dt>Prompt</dt><dd>${n.prompts.length?n.prompts.map(p=>`<a href="#prompts" class="mono" style="font-size:12px${n.regression?";color:var(--bad)":""}">${esc(p)}</a>`).join("<br>"):"—"}</dd></div>
+    </dl>`}
+    ${(n.open_alerts||[]).length?`<div><h3 style="margin-bottom:6px">Open alerts</h3>${n.open_alerts.map(a=>`<div class="flag"><span class="chip bad">${esc(a.kind)}</span>${esc(a.message)}</div>`).join("")}</div>`:""}
+    <div><h3 style="margin-bottom:6px">Errors that started ${term?"after the pipeline":"here"} <span class="ref">${errs.length}${errs.length>=50?"+":""}</span></h3>
+      ${n.errors_by_verdict&&Object.keys(n.errors_by_verdict).length?`<p>${Object.entries(n.errors_by_verdict).map(([v,c])=>`${vchip(v)} ${c}`).join(" &nbsp; ")}</p>`:""}
+      ${errs.length?errs.slice(0,15).map(r=>errorCard({...r,origin_stage:term?null:stage})).join(""):`<p class="note">No reported errors started ${term?"after the pipeline":"at this step"}.</p>`}</div>
+    ${(n.failed_documents||[]).length?`<div><h3 style="margin-bottom:6px">Recent failed runs</h3><p>${n.failed_documents.map(f=>`<a class="mono" href="${link(f.document_id)}">${esc(f.document_id)}</a> <span class="ref">${esc(f.status)}</span>`).join(" · ")}</p></div>`:""}
+    ${term?"":`<p class="note">Measures for this step: <button class="link" type="button" data-open="stage_failure_rate" data-dim="stage" data-val="${esc(stage)}">failures</button> · <button class="link" type="button" data-open="call_latency_p95" data-dim="stage" data-val="${esc(stage)}">latency</button> · <button class="link" type="button" data-open="errors_by_origin" data-dim="origin_stage" data-val="${esc(stage)}">errors over time</button> · <button class="link" type="button" data-open="cost_per_document" data-dim="stage" data-val="${esc(stage)}">cost</button></p>`}
+  </div>`;
+  box.scrollIntoView({behavior:"smooth",block:"nearest"});
+}
+
 /* ---------- trace ---------- */
 async function renderTrace(){
   const T=S.trace;
@@ -749,15 +859,28 @@ function stepByStep(ea,id){
   const valOf=f=>ea.lineage.find(l=>l.field===f)?.values||[];
   const anyOutputs=steps.some(s=>s.records_outputs);
   const fmtv=v=>v==null?"":typeof v==="object"?JSON.stringify(v):String(v);
-  return `<div class="panel stack"><div class="panel-head"><div><h2>Step by step</h2><p class="sub">What each step produced for this document${errs.length?". Red is where a reported value was wrong, green where it was still right":""}.</p></div></div>
-    ${anyOutputs?`<div class="scroll"><table class="lineage"><tr><th>Field</th>${steps.map((s,i)=>`<th>${i+1}. ${esc(s.stage)}${s.status!=="success"?` <span class="worse">(${esc(s.status)})</span>`:""}${s.prompt?`<br><span class="ref" style="text-transform:none;letter-spacing:0">${esc(s.prompt)}</span>`:""}</th>`).join("")}</tr>
+  const hl=S.trace.step;
+  const origins={};errs.forEach(e=>{if(e.origin_stage)(origins[e.origin_stage]??=[]).push(e.field)});
+  const pathbar=`<div class="pathbar" id="pathbar">${steps.map((s,i)=>`${i?`<span class="arr">→</span>`:""}<button type="button" data-col="${esc(s.stage)}" class="${origins[s.stage]?"err":""} ${["failed","error","timeout","permanently_failed"].includes(s.status)?"fail":""} ${s.stage===hl?"hl":""}" title="${origins[s.stage]?"Errors started here: "+esc(origins[s.stage].join(", ")):esc(s.status)}">${i+1}. ${esc(s.stage)}${origins[s.stage]?` ✕ ${origins[s.stage].length}`:""}</button>`).join("")}<span class="arr">→</span><button type="button" class="${errs.some(e=>!e.origin_stage&&e.verdict==="after")?"err":""}" disabled>output</button></div>`;
+  return `<div class="panel stack" id="stepbystep"><div class="panel-head"><div><h2>Step by step</h2><p class="sub">What each step produced for this document${errs.length?". Red is where a reported value was wrong, green where it was still right":""}.</p></div></div>
+    ${pathbar}
+    ${hl&&origins[hl]?`<p class="flag"><span class="chip bad">error point</span><b class="mono">${esc(hl)}</b>&nbsp;is where ${esc(origins[hl].join(", "))} went wrong on this document.</p>`:""}
+    ${anyOutputs?`<div class="scroll"><table class="lineage"><tr><th>Field</th>${steps.map((s,i)=>`<th class="${s.stage===hl?"hl":""}">${i+1}. ${esc(s.stage)}${s.status!=="success"?` <span class="worse">(${esc(s.status)})</span>`:""}${s.prompt?`<br><span class="ref" style="text-transform:none;letter-spacing:0">${esc(s.prompt)}</span>`:""}</th>`).join("")}</tr>
       ${steps.some(s=>s.text)?`<tr><td class="ref">text output</td>${steps.map(s=>`<td class="ref" title="${esc(s.text||"")}">${s.text?esc(s.text.slice(0,28))+"…":""}</td>`).join("")}</tr>`:""}
       ${fields.map(f=>`<tr><td class="mono">${esc(f)}${errs.some(e=>e.field===f)?` <span class="chip bad">reported</span>`:""}</td>${steps.map((s,i)=>{const tl=state[f]?.[i],v=valOf(f)[i];
         const cls=tl?.state==="wrong"||tl?.state==="extra"?"v-wrong":tl?.state==="correct"?"v-correct":tl?.evidence?"v-evidence":"";
-        return `<td class="${cls}" title="${tl?.evidence?"The right value is in this step's text":""}">${esc(fmtv(v).slice(0,40))}${tl?.evidence&&v==null?`<span class="ref">✓ in text</span>`:""}</td>`}).join("")}</tr>`).join("")}</table></div>`
+        return `<td class="${cls} ${s.stage===hl?"hl":""}" title="${tl?.evidence?"The right value is in this step's text":""}">${esc(fmtv(v).slice(0,40))}${tl?.evidence&&v==null?`<span class="ref">✓ in text</span>`:""}</td>`}).join("")}</tr>`).join("")}</table></div>`
       :`<p class="note">These steps didn't send their outputs, so wrong values can't be traced to a step yet. Send <code>outputs</code> with each stage run (or <code>step.output(...)</code> in the Python client).</p>`}
     ${errs.length?`<h3>Reported errors on this document</h3>${errs.map(r=>errorCard(r,{link:false})).join("")}`:""}
     <div><h3 style="margin-bottom:6px">Report a wrong value on this document</h3>${reportForm(id,fields)}</div></div>`;
+}
+// Clicking a step in the path bar highlights its column (and keeps it in the link).
+function wireStepByStep(ea,id){
+  wireReport(()=>showTrace(id,false));
+  document.querySelectorAll("#pathbar [data-col]").forEach(b=>b.onclick=()=>{
+    S.trace.step=b.dataset.col;
+    try{history.replaceState(null,"","#trace/"+encodeURIComponent(id)+"/"+encodeURIComponent(b.dataset.col))}catch(e){}
+    $("#stepbystep").outerHTML=stepByStep(ea,id);wireStepByStep(ea,id)});
 }
 async function showTrace(id,scroll=true){
   S.trace.doc=id;const out=$("#trace-out");
@@ -794,7 +917,8 @@ async function showTrace(id,scroll=true){
         <td class="ref">${c.resolving_layer?esc(c.resolving_layer+" / "+(c.gate_reason||"?")):`<span class="warn">not recorded</span>`}</td><td class="num">${esc(fmt(c.latency_ms,"ms"))}</td>
         <td class="num">${c.cost_usd==null?`<span class="warn">none</span>`:esc(fmt(c.cost_usd,"usd"))}</td><td>${esc(c.status||"—")}</td></tr>`).join("")}</table></div>`:""}
   </div>`;
-  out.insertAdjacentHTML("beforeend",stepByStep(ea,id));wireReport(()=>showTrace(id,false));
+  out.insertAdjacentHTML("beforeend",stepByStep(ea,id));wireStepByStep(ea,id);
+  if(S.trace.step){setTimeout(()=>$("#stepbystep")?.scrollIntoView({behavior:"smooth",block:"start"}),50);scroll=false}
   if(scroll)out.scrollIntoView({behavior:"smooth",block:"start"});
 }
 
@@ -823,7 +947,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","measures","cost","errors","prompts","trace","alerts","gates","connect"];
+const TABS=["overview","workflow","measures","cost","errors","prompts","trace","alerts","gates","connect"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -831,12 +955,14 @@ async function render(){
   const t=tab(),hm=hashMeasure();
   if(t==="measures"&&hm&&hm!==S.measure){S.measure=hm;S.dim="";S.val=""}
   if(t==="measures"&&!hm)S.measure=null;
-  const hp=location.hash.slice(1).split("/");if(t==="trace"&&hp[1])S.trace.doc=decodeURIComponent(hp[1]);
+  const hp=location.hash.slice(1).split("/");if(t==="trace"&&hp[1]){S.trace.doc=decodeURIComponent(hp[1]);S.trace.step=hp[2]?decodeURIComponent(hp[2]):null}
+  if(t==="workflow")S.wfStep=hp[1]?decodeURIComponent(hp[1]):null;
   document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
   if(!S.overview&&t!=="gates"&&t!=="connect")return;
   try{
-    if(t==="overview")renderOverview();
+    if(t==="overview"){renderOverview();overviewFlow()}
+    if(t==="workflow")await renderWorkflow();
     if(t==="measures")await (S.measure?renderMeasureDetail():renderMeasureGrid());
     if(t==="cost")await renderCost();
     if(t==="errors")await renderErrors();
