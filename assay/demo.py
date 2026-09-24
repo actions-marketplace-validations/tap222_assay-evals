@@ -1,0 +1,141 @@
+"""Synthetic demo tenant so the dashboard works without a DocAI Core database.
+
+Rates are shaped after the roadmap's live findings (fallback attribution near
+zero, a third of calls unpriced, stub stages, most documents lost at the
+handoff), plus a few staged incidents so alerting has something to catch:
+
+- 6 to 4 days ago: indexing stage failures spike, then recover (alert resolves)
+- last 3 days: classification calls get slow (alert stays open)
+- last 4 days: a new county starts sending a large share of traffic (drift)
+- last 5 days: Cook IL documents stop reaching the downstream system
+
+All of it is generated. Nothing here is real pipeline data.
+"""
+from __future__ import annotations
+
+import random
+from datetime import datetime, timedelta
+
+from sqlalchemy import delete, select
+
+from sqlalchemy.engine import Engine
+
+from assay import store
+from assay.models import Window
+from assay.runner import run_measures
+from assay.sources.events import EventsSource
+
+TENANT = "demo"
+SOURCE = f"events:{TENANT}"
+COUNTIES = ["Maricopa AZ", "Harris TX", "Cook IL", "King WA", None]
+TYPES = ["deed", "mortgage", "lien", "lien_release", "deed_of_trust", None]
+STAGES = ["record_splitting", "text_extraction", "classification", "indexing"]
+MODELS = {"record_splitting": "gemini-3-flash-preview", "text_extraction": "gemini-3-flash-preview",
+          "classification": "claude-haiku-4-5", "indexing": "claude-sonnet-5"}
+LATENCY_MS = {"record_splitting": 4000, "text_extraction": 6000, "classification": 1500, "indexing": 9000}
+PIPELINE = ["file_prep", "pre_processing", "text_extraction", "classification", "indexing",
+            "recordability_checks", "highlighting", "redaction"]
+STUBS = {"recordability_checks", "highlighting", "redaction"}
+
+EXAMPLE_SLOS = [
+    ("fallback_attribution", None, None, 0.95, "Example target: every call says which tier answered"),
+    ("cost_coverage", None, None, 0.99, "Example target: spend is a total, not a floor"),
+    ("handoff_loss", "county", None, 0.05, "Example target: no county loses more than 5%"),
+    ("stage_failure_rate", None, None, 0.02, "Example target"),
+    ("call_error_rate", None, None, 0.02, "Example target"),
+    ("call_latency_p95", "stage", "indexing", 20000, "Example target"),
+    ("time_to_complete_p90", "processing_mode", "realtime", 4 * 3600, "Example target: realtime p90 under 4 h"),
+]
+
+
+def seed(engine: Engine, days: int = 56, docs_per_day: int = 120, seed_value: int = 11,
+         window_days: int = 3) -> dict:
+    rng = random.Random(seed_value)
+    now = datetime.utcnow().replace(microsecond=0)
+    ago = lambda ts: (now - ts).total_seconds() / 86400  # age in days
+    rollout = 14  # pretend DEV-NEW-3 shipped two weeks ago
+
+    with engine.begin() as conn:
+        for t in (store.event_calls, store.event_documents, store.event_stage_runs, store.event_indexed):
+            conn.execute(delete(t).where(t.c.tenant == TENANT))
+        run_ids = [r[0] for r in conn.execute(select(store.measure_runs.c.id)
+                                              .where(store.measure_runs.c.source == SOURCE))]
+        if run_ids:
+            conn.execute(delete(store.measure_results).where(store.measure_results.c.run_id.in_(run_ids)))
+            conn.execute(delete(store.measure_runs).where(store.measure_runs.c.id.in_(run_ids)))
+        conn.execute(delete(store.alerts).where(store.alerts.c.source == SOURCE))
+        conn.execute(delete(store.slos).where(store.slos.c.source == SOURCE))
+        conn.execute(store.slos.insert(), [dict(source=SOURCE, measure_id=m, dimension=d, slice_value=v,
+                                                target=t, note=n, updated_at=now)
+                                           for m, d, v, t, n in EXAMPLE_SLOS])
+
+    calls, docs, runs, indexed = [], [], [], []
+    for day in range(days):
+        for k in range(docs_per_day):
+            received = now - timedelta(days=days - day) + timedelta(minutes=rng.randint(0, 1439))
+            age = ago(received)
+            did = f"demo-{day:03d}-{k:03d}"
+            county = "Travis TX" if age < 4 and rng.random() < 0.3 else rng.choice(COUNTIES)
+            itype = rng.choice(TYPES)
+            mode = "batch" if rng.random() < 0.35 else "realtime"
+            if mode == "realtime":
+                minutes = rng.lognormvariate(3.75, 1.2)  # median ~43 min, long tail
+                completed = received + timedelta(minutes=minutes) if rng.random() < 0.97 else None
+            else:
+                completed = received + timedelta(hours=rng.uniform(2, 30)) if rng.random() < 0.32 else None
+            if completed and completed > now:
+                completed = None
+            lost_rate = 0.95 if (county == "Cook IL" and age < 5) else 0.62
+            fh = f"sha256:{rng.getrandbits(64):016x}"
+            docs.append(dict(tenant=TENANT, document_id=did, received_at=received, completed_at=completed,
+                             status="completed" if completed else "processing", processing_mode=mode,
+                             file_hash=fh, county=county, instrument_type=itype,
+                             delivered_downstream=(rng.random() >= lost_rate) if completed else None))
+            for s, stage in enumerate(PIPELINE):
+                start = received + timedelta(seconds=30 * s)
+                fail_p = 0.12 if (stage == "indexing" and 4 <= age < 6) else 0.004
+                failed = stage not in STUBS and rng.random() < fail_p
+                runs.append(dict(tenant=TENANT, document_id=did, stage=stage,
+                                 status="failed" if failed else "success", started_at=start,
+                                 finished_at=start + timedelta(seconds=0.1 if stage in STUBS else 20),
+                                 did_work=stage not in STUBS))
+            for stage in STAGES:
+                ts = received + timedelta(seconds=rng.randint(10, 600))
+                attributed = rng.random() < (0.9 if (stage == "record_splitting" and ago(ts) < rollout) else 0.002)
+                served = MODELS[stage]
+                if stage == "record_splitting" and rng.random() < 0.05:
+                    served = "gemini-3.5-flash-lite"
+                slow = 3.5 if (stage == "classification" and ago(ts) < 3) else 1.0
+                calls.append(dict(
+                    tenant=TENANT, call_id=f"{did}-{stage}", stage=stage, ts=ts, document_id=did,
+                    model_declared=MODELS[stage], model_served=served,
+                    resolving_layer=("primary" if served == MODELS[stage] else "fallback_1") if attributed else None,
+                    gate_reason=("ok" if served == MODELS[stage] else "low_confidence") if attributed else None,
+                    cost_usd=None if (stage == "text_extraction" or served != MODELS[stage] or rng.random() < 0.05)
+                    else round(rng.uniform(0.002, 0.03), 4),
+                    code_revision=None if rng.random() < 0.995 else "a1b2c3d",
+                    county=county, instrument_type=itype,
+                    latency_ms=round(LATENCY_MS[stage] * slow * rng.lognormvariate(0, 0.35)),
+                    status="error" if rng.random() < 0.008 else "success"))
+            indexed.append(dict(tenant=TENANT, document_id=did, has_positions=False,
+                                county=county, instrument_type=itype))
+
+    with engine.begin() as conn:
+        conn.execute(store.event_documents.insert(), docs)
+        conn.execute(store.event_stage_runs.insert(), runs)
+        conn.execute(store.event_calls.insert(), calls)
+        conn.execute(store.event_indexed.insert(), indexed)
+
+    # Backfill one run per day over a rolling window, oldest first, so alerts
+    # open and resolve in the order they would have live.
+    source = EventsSource(engine, TENANT)
+    run_ids = []
+    for d in range(days - 2 * window_days, -1, -1):
+        end = now - timedelta(days=d)
+        run_ids.append(run_measures(engine, source, Window(end - timedelta(days=window_days), end), as_of=end))
+    with engine.connect() as conn:
+        a = store.alerts
+        open_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "open"))).all())
+        resolved_n = len(conn.execute(select(a.c.id).where((a.c.source == SOURCE) & (a.c.state == "resolved"))).all())
+    return {"documents": len(docs), "calls": len(calls), "stage_runs": len(runs), "runs": len(run_ids),
+            "alerts_open": open_n, "alerts_resolved": resolved_n}

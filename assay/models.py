@@ -1,0 +1,83 @@
+"""Canonical records every source adapter produces.
+
+Measures only ever see these types, never a source's own tables. That is what
+lets the same measure run against DocAI Core's Postgres schema today and a
+customer's pushed events tomorrow.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+
+# Slice value used when a source does not record a dimension. Kept as a real
+# slice so "we don't know the county" is visible instead of silently dropped.
+UNRECORDED = "(unrecorded)"
+
+
+@dataclass
+class CallRecord:
+    """One AI model call made by a pipeline stage."""
+    call_id: str
+    stage: str
+    ts: datetime
+    document_id: Optional[str] = None
+    model_declared: Optional[str] = None
+    model_served: Optional[str] = None
+    resolving_layer: Optional[str] = None
+    gate_reason: Optional[str] = None
+    cost_usd: Optional[float] = None
+    code_revision: Optional[str] = None
+    county: Optional[str] = None
+    instrument_type: Optional[str] = None
+    latency_ms: Optional[float] = None
+    status: Optional[str] = None  # e.g. success / error / timeout
+
+
+@dataclass
+class DocumentRecord:
+    """One document's trip through the pipeline."""
+    document_id: str
+    received_at: datetime
+    completed_at: Optional[datetime] = None
+    status: Optional[str] = None
+    processing_mode: Optional[str] = None  # e.g. realtime / batch
+    file_hash: Optional[str] = None
+    county: Optional[str] = None
+    instrument_type: Optional[str] = None
+
+
+@dataclass
+class StageRun:
+    """One execution of one pipeline stage on one document."""
+    document_id: str
+    stage: str
+    status: str
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    # False when the stage reported success without doing any work (a stub).
+    # None when the source cannot tell.
+    did_work: Optional[bool] = None
+
+
+@dataclass
+class IndexedRecord:
+    """One indexed (structured-field) output row."""
+    document_id: str
+    has_positions: bool
+    county: Optional[str] = None
+    instrument_type: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Window:
+    start: datetime
+    end: datetime
+
+    def previous(self) -> "Window":
+        """The window of equal length immediately before this one."""
+        return Window(self.start - (self.end - self.start), self.start)
+
+
+# Statuses that count as a failure, whichever source they come from.
+FAILED_STATUSES = {"failed", "error", "permanently_failed", "timeout"}

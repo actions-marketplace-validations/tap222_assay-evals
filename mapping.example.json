@@ -1,0 +1,10 @@
+{
+  "calls": {
+    "cost_usd": "c.cost",
+    "model_declared": "NULL"
+  },
+  "documents": {
+    "completed_at": "(SELECT max(e.completed_at) FROM docai.document_stage_executions e WHERE e.document_id = d.id AND e.stage_name = 'verification_ready')",
+    "county": "NULL"
+  }
+}

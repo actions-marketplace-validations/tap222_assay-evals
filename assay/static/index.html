@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Assay</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --page:#f4f5f8;--surface:#fff;--sunk:#eceef3;--line:#d8dbe4;--line-strong:#b9bdcb;
+  --ink:#161a27;--ink-2:#3e4456;--muted:#646a7d;
+  --accent:#3346a8;--accent-soft:#e6e9f8;--accent-ink:#24348a;
+  --good:#2f6e56;--good-bg:#e2f2ea;--warn:#9a6512;--warn-bg:#fbf1dd;--bad:#b23b2e;--bad-bg:#fbe7e4;
+  --band:rgba(51,70,168,.10);
+  --display:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;
+  --page:#12141b;--surface:#1b1e28;--sunk:#171a23;--line:#2d3140;--line-strong:#454b5e;
+  --ink:#e8eaf1;--ink-2:#c3c7d4;--muted:#9398aa;--accent:#8c9cf0;--accent-soft:#252b4a;--accent-ink:#b9c3f7;
+  --good:#5fbf95;--good-bg:#183329;--warn:#e0a948;--warn-bg:#3a2c12;--bad:#ec8173;--bad-bg:#3d1f1b;
+  --band:rgba(140,156,240,.14)}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--page);color:var(--ink);font:14.5px/1.5 var(--body)}
+a{color:var(--accent-ink)}
+header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px 24px;align-items:center;justify-content:space-between;padding:10px 24px;border-bottom:1px solid var(--line);background:var(--surface)}
+.brand{display:flex;gap:10px;align-items:baseline}
+.brand b{font:600 22px var(--display)}
+.brand span{color:var(--muted);font-size:13px}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+select,button,input{font:inherit;font-size:13.5px;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:7px;padding:6px 10px}
+button{cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+@media (prefers-color-scheme:dark){button.primary{color:#12141b}}
+button.link{border:0;background:none;padding:0;color:var(--accent-ink);text-decoration:underline;font-size:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+main{max-width:1280px;margin:0 auto;padding:20px 24px 60px}
+nav.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:20px;overflow-x:auto}
+nav.tabs a{padding:10px 12px;color:var(--muted);font-weight:500;text-decoration:none;border-bottom:2px solid transparent;white-space:nowrap}
+nav.tabs a[aria-current=page]{color:var(--ink);border-bottom-color:var(--accent)}
+nav.tabs .badge{font-family:var(--mono);font-size:11px;background:var(--bad);color:#fff;border-radius:999px;padding:1px 6px;margin-left:6px}
+h2{font:600 20px var(--display);margin:0}
+h3{font:600 16px var(--display);margin:0}
+.sub{color:var(--ink-2);margin:4px 0 0}
+.ref{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.mono{font-family:var(--mono)}
+.stack{display:grid;gap:18px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+.panel-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+/* status strip */
+.strip{display:grid;grid-template-columns:repeat(4,1fr);background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.strip>div{padding:14px 16px;border-right:1px solid var(--line)}
+.strip>div:last-child{border-right:0}
+.strip b{display:block;font:600 28px var(--display);font-variant-numeric:tabular-nums;line-height:1.15}
+.strip span{font-size:12.5px;color:var(--muted)}
+.strip .bad b{color:var(--bad)}.strip .good b{color:var(--good)}.strip .warn b{color:var(--warn)}
+@media (max-width:760px){.strip{grid-template-columns:1fr 1fr}.strip>div:nth-child(2){border-right:0}.strip>div:nth-child(-n+2){border-bottom:1px solid var(--line)}}
+.two{display:grid;grid-template-columns:1.2fr 1fr;gap:18px}
+@media (max-width:980px){.two{grid-template-columns:1fr}}
+/* alert rows */
+.alert{display:grid;grid-template-columns:4px 1fr auto;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);align-items:start}
+.alert:last-child{border-bottom:0}
+.alert .stripe{align-self:stretch;border-radius:2px;background:var(--bad)}
+.alert.slo .stripe{background:var(--warn)}
+.alert.resolved .stripe{background:var(--good)}
+.alert.pending .stripe{background:var(--line-strong)}
+.alert .msg{font-size:13.5px}
+.alert .meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px}
+.chip{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;padding:2px 7px;border-radius:999px;white-space:nowrap;display:inline-block}
+.chip.good{color:var(--good);background:var(--good-bg)}.chip.warn{color:var(--warn);background:var(--warn-bg)}
+.chip.bad{color:var(--bad);background:var(--bad-bg)}.chip.neutral{color:var(--muted);background:var(--sunk)}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:500;padding:0 10px 8px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.worse{color:var(--bad)}.better{color:var(--good)}.flat{color:var(--muted)}
+tr.click{cursor:pointer}tr.click:hover td{background:var(--sunk)}
+.scroll{overflow-x:auto}
+.empty{border:1px dashed var(--line-strong);border-radius:10px;padding:22px;color:var(--ink-2);background:var(--surface)}
+code{font-family:var(--mono);font-size:12.5px;background:var(--sunk);padding:1px 5px;border-radius:4px}
+/* measure cards */
+.group-title{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:6px 0 8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:13px 15px;display:grid;gap:6px;text-align:left;cursor:pointer;position:relative;align-content:start}
+.card:hover{border-color:var(--line-strong)}
+.card.alerting{border-color:var(--bad)}
+.card .top{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.val{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.val b{font:600 26px var(--display);font-variant-numeric:tabular-nums}
+.val small{color:var(--muted);font-size:12px}
+.trend{font-family:var(--mono);font-size:11.5px}
+.reason{font-size:13px;color:var(--ink-2)}
+svg.spark{width:100%;height:34px;display:block}
+/* detail */
+.detail-head{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start}
+.picker{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+svg.chart{width:100%;height:auto;display:block}
+svg.chart text{fill:var(--muted);font:11px var(--mono)}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:18px;height:10px;vertical-align:middle;margin-right:6px;border-radius:2px}
+.dims{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:18px}
+.dim h4{margin:0 0 6px;font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:500}
+.bar-row{display:grid;grid-template-columns:130px 1fr 120px;gap:10px;align-items:center;font-size:13px;padding:3px 4px;border-radius:5px;cursor:pointer;border:0;background:none;text-align:left;width:100%}
+.bar-row:hover,.bar-row.sel{background:var(--sunk)}
+.bar-row .lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar-row .track{height:10px;background:var(--sunk);border-radius:3px;overflow:hidden}
+.bar-row:hover .track,.bar-row.sel .track{background:var(--page)}
+.bar-row .fill{display:block;height:100%;background:var(--accent)}
+.bar-row.breach .fill{background:var(--bad)}
+.bar-row.small{opacity:.55}
+.bar-row .num{font-family:var(--mono);font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.bar-row.unrec .lbl{color:var(--warn)}
+.note{font-size:12.5px;color:var(--muted)}
+.slo-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:13px}
+.slo-form input{width:110px}
+/* trace */
+.flags{display:grid;gap:6px}
+.flag{display:flex;gap:8px;align-items:baseline;font-size:13.5px}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.facts div{background:var(--sunk);border-radius:8px;padding:8px 10px}
+.facts dt{font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+.facts dd{margin:2px 0 0;font-weight:500;overflow-wrap:anywhere}
+svg.timeline text{fill:var(--ink-2);font:11px var(--mono)}
+.keybox{display:flex;gap:8px;align-items:center}
+@media (max-width:600px){main{padding:16px}header{padding:10px 16px}.bar-row{grid-template-columns:90px 1fr 100px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>Assay</b><span>Evaluation &amp; observability for document AI</span></div>
+  <div class="controls">
+    <select id="source" aria-label="Source"></select>
+    <select id="days" aria-label="Window for manual runs"><option value="1" selected>Last 24 h</option><option value="3">Last 3 days</option><option value="7">Last 7 days</option></select>
+    <button id="run" class="primary" type="button">Run now</button>
+    <span class="ref" id="updated"></span>
+  </div>
+</header>
+<main>
+  <nav class="tabs">
+    <a href="#overview" data-tab="overview">Overview</a>
+    <a href="#measures" data-tab="measures">Measures</a>
+    <a href="#trace" data-tab="trace">Trace</a>
+    <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
+    <a href="#gates" data-tab="gates">Release gates</a>
+  </nav>
+  <div id="keybox" class="panel keybox" hidden>
+    <label for="apikey">This server requires an API key:</label>
+    <input id="apikey" type="password" autocomplete="off">
+    <button id="savekey" type="button">Use key</button>
+  </div>
+  <section id="tab-overview" class="stack"></section>
+  <section id="tab-measures" class="stack" hidden></section>
+  <section id="tab-trace" class="stack" hidden></section>
+  <section id="tab-alerts" class="stack" hidden></section>
+  <section id="tab-gates" class="stack" hidden></section>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+const S={catalog:{},groups:{},overview:null,latest:null,measure:null,dim:"",val:"",trace:{view:"slowest",county:"",doc:null}};
+
+async function api(path,opts={}){
+  const key=store.get("assay-key");
+  const headers={...(opts.headers||{}),...(key?{"X-API-Key":key}:{})};
+  if(opts.body)headers["Content-Type"]="application/json";
+  const r=await fetch(path,{...opts,headers});
+  if(r.status===401){$("#keybox").hidden=false;throw new Error("API key required.")}
+  if(!r.ok){const b=await r.json().catch(()=>({}));throw new Error(typeof b.detail==="string"?b.detail:r.statusText)}
+  return r.json();
+}
+const src=()=>$("#source").value;
+const q=o=>new URLSearchParams(Object.entries(o).filter(([,v])=>v!==""&&v!=null)).toString();
+
+/* ---------- formatting ---------- */
+function fmt(v,unit){
+  if(v==null)return"—";
+  switch(unit){
+    case"ratio":return (v*100).toFixed(Math.abs(v)<0.01&&v!==0?2:1)+"%";
+    case"seconds":return v<3600?(v/60).toFixed(0)+" min":v<172800?(v/3600).toFixed(1)+" h":(v/86400).toFixed(1)+" d";
+    case"ms":return v<10000?Math.round(v).toLocaleString()+" ms":(v/1000).toFixed(1)+" s";
+    case"usd":return "$"+v.toFixed(2);
+    case"count":return Math.round(v).toLocaleString();
+    default:return v.toFixed(3);
+  }
+}
+function ago(iso){if(!iso)return"";const s=(Date.now()-new Date(iso+"Z").getTime())/1000;
+  if(s<90)return"just now";if(s<5400)return Math.round(s/60)+" min ago";if(s<129600)return Math.round(s/3600)+" h ago";return Math.round(s/86400)+" d ago"}
+function dur(a,b){const s=(new Date((b||new Date().toISOString().slice(0,19))+"Z")-new Date(a+"Z"))/1000;return s<3600?Math.round(s/60)+" min":s<172800?(s/3600).toFixed(1)+" h":(s/86400).toFixed(1)+" d"}
+const sliceName=(d,v)=>d?`${d.replace(/_/g," ")} = ${v}`:"overall";
+function direction(m,delta){if(m.higher_is_better==null||Math.abs(delta)<1e-12)return"flat";return (delta>0)===m.higher_is_better?"better":"worse"}
+
+/* ---------- charts ---------- */
+function spark(points){
+  const vals=points.map(p=>p.value).filter(v=>v!=null);if(vals.length<2)return"";
+  const min=Math.min(...vals),max=Math.max(...vals),span=max-min||1,W=240,H=34,p=3;
+  const pts=points.map((pt,i)=>pt.value==null?null:[p+i*(W-2*p)/(points.length-1),H-p-(pt.value-min)/span*(H-2*p)]).filter(Boolean);
+  const d=pts.map((x,i)=>(i?"L":"M")+x[0].toFixed(1)+","+x[1].toFixed(1)).join(" "),last=pts[pts.length-1];
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><path d="${d} L${last[0]},${H} L${pts[0][0]},${H} Z" fill="var(--accent-soft)"/><path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function chart(h,m){
+  const pts=h.points.filter(p=>p.value!=null);
+  if(pts.length<2)return`<p class="note">Not enough history to draw yet. Each run adds a point.</p>`;
+  const W=900,H=240,L=64,R=16,T=12,B=28;
+  let lo=Math.min(...pts.map(p=>p.value)),hi=Math.max(...pts.map(p=>p.value));
+  if(h.band){lo=Math.min(lo,h.band.low);hi=Math.max(hi,h.band.high)}
+  if(h.slo){lo=Math.min(lo,h.slo.target);hi=Math.max(hi,h.slo.target)}
+  if(m.unit==="ratio"||m.unit==="count"||m.unit==="ms"||m.unit==="seconds"||m.unit==="psi")lo=Math.max(0,lo);
+  const pad=(hi-lo)*0.08||Math.abs(hi)*0.1||1;lo=Math.max(m.unit==="ratio"||m.unit==="count"?0:lo-pad,lo-pad);hi+=pad;
+  if(m.unit==="ratio")hi=Math.min(hi,1.02);
+  const t0=new Date(pts[0].at).getTime(),t1=new Date(pts[pts.length-1].at).getTime()||t0+1;
+  const x=t=>L+(new Date(t).getTime()-t0)/((t1-t0)||1)*(W-L-R),y=v=>T+(1-(v-lo)/((hi-lo)||1))*(H-T-B);
+  let g="";
+  // One axis unit for every tick: switch ms to s, and seconds to hours, based on the top of the range.
+  const axis=v=>m.unit==="ms"&&hi>=10000?(v/1000).toFixed(1)+" s":m.unit==="seconds"&&hi>=3600?(v/3600).toFixed(1)+" h":fmt(v,m.unit);
+  for(let i=0;i<=4;i++){const v=lo+(hi-lo)*i/4,yy=y(v);g+=`<line x1="${L}" x2="${W-R}" y1="${yy}" y2="${yy}" stroke="var(--line)" stroke-width="1"/><text x="${L-8}" y="${yy+4}" text-anchor="end">${esc(axis(v))}</text>`}
+  const ticks=Math.min(6,pts.length);for(let i=0;i<ticks;i++){const p=pts[Math.round(i*(pts.length-1)/(ticks-1||1))];g+=`<text x="${x(p.at)}" y="${H-8}" text-anchor="middle">${p.at.slice(5,10)}</text>`}
+  if(h.band){const bx=x(pts[Math.max(0,pts.length-1-h.band.points)].at);g+=`<rect x="${bx}" y="${y(Math.min(h.band.high,hi))}" width="${W-R-bx}" height="${Math.max(0,y(Math.max(h.band.low,lo))-y(Math.min(h.band.high,hi)))}" fill="var(--band)"/>`}
+  if(h.slo)g+=`<line x1="${L}" x2="${W-R}" y1="${y(h.slo.target)}" y2="${y(h.slo.target)}" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="6 4"/><text x="${W-R}" y="${y(h.slo.target)-5}" text-anchor="end" style="fill:var(--warn)">SLO ${esc(fmt(h.slo.target,m.unit))}</text>`;
+  const d=pts.map((p,i)=>(i?"L":"M")+x(p.at).toFixed(1)+","+y(p.value).toFixed(1)).join(" ");
+  g+=`<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+  g+=pts.map((p,i)=>{const last=i===pts.length-1,out=last&&h.band&&(p.value<h.band.low||p.value>h.band.high);
+    return `<circle cx="${x(p.at)}" cy="${y(p.value)}" r="${last?4.5:2.5}" fill="${out?"var(--bad)":"var(--accent)"}"><title>${esc(p.at.slice(0,16).replace("T"," "))} · ${esc(fmt(p.value,m.unit))} · n=${p.n}</title></circle>`}).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.name)} over time">${g}</svg>
+    <div class="legend"><span><i style="background:var(--accent)"></i>value per run</span>${h.band?`<span><i style="background:var(--band)"></i>expected range from the last ${h.band.points} runs</span>`:""}${h.slo?`<span><i style="border-top:2px dashed var(--warn);height:0"></i>SLO target</span>`:""}</div>`;
+}
+
+/* ---------- sources, refresh ---------- */
+async function loadSources(){
+  const s=await api("/v1/sources");
+  const all=[...new Set([...s.configured,...s.with_results])];
+  const keep=store.get("assay-source");
+  $("#source").innerHTML=all.length?all.map(x=>`<option ${x===keep?"selected":""}>${esc(x)}</option>`).join(""):`<option value="">No sources yet</option>`;
+}
+async function refresh(){
+  if(!src()){renderEmpty();return}
+  try{S.overview=await api(`/v1/overview?${q({source:src()})}`)}catch(e){S.overview=null;renderEmpty(e.message);return}
+  try{S.latest=await api(`/v1/runs/latest?${q({source:src()})}`)}catch(e){S.latest=null}
+  const n=S.overview.open_alerts.length;$("#alert-badge").hidden=!n;$("#alert-badge").textContent=n;
+  $("#updated").textContent="Last run "+ago(S.overview.run.started_at);
+  render();
+}
+function renderEmpty(msg){
+  const html=`<div class="empty">${msg?esc(msg)+"<br><br>":""}No data yet. Load the demo with <code>python -m assay demo</code>, or set <code>ASSAY_DOCAI_URL</code> and press “Run now”.</div>`;
+  ["overview","measures","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
+}
+
+/* ---------- overview ---------- */
+function alertRow(a,{actions=true}={}){
+  const m=S.catalog[a.measure_id]||{name:a.measure_id};
+  const since=a.state==="resolved"?`resolved ${ago(a.resolved_at)} · lasted ${dur(a.opened_at,a.resolved_at)}`:`${a.state==="pending"?"pending since":"open for"} ${dur(a.opened_at)} · last seen ${ago(a.last_seen_at)}`;
+  return `<div class="alert ${a.kind} ${a.state}"><span class="stripe"></span>
+    <div><div class="msg">${esc(a.message)}</div><div class="meta">${a.kind==="slo"?"SLO breach":"Anomaly"} · ${esc(since)}${a.n?` · n=${a.n}`:""}</div></div>
+    ${actions?`<button class="link" type="button" data-open="${esc(a.measure_id)}" data-dim="${esc(a.dimension||"")}" data-val="${esc(a.slice_value||"")}">Investigate</button>`:""}</div>`;
+}
+// One line per measure and dimension, however many slices breach it.
+function sloGroups(list){
+  const groups={};list.forEach(a=>(groups[a.measure_id+"|"+(a.dimension||"")]??=[]).push(a));
+  return Object.values(groups).map(g=>{
+    if(g.length===1)return alertRow(g[0]);
+    const m=S.catalog[g[0].measure_id],dim=g[0].dimension,worst=[...g].sort((a,b)=>m.higher_is_better?a.value-b.value:b.value-a.value);
+    return `<div class="alert slo open"><span class="stripe"></span><div>
+      <div class="msg">${esc(m.name)}: ${g.length} ${esc(dim.replace(/_/g," "))} slices breach the SLO of ${m.higher_is_better?"≥":"≤"} ${esc(fmt(g[0].target,m.unit))}.</div>
+      <div class="meta">${worst.map(a=>`${esc(a.slice_value)} ${esc(fmt(a.value,m.unit))}`).join(" · ")}</div></div>
+      <button class="link" type="button" data-open="${esc(m.id)}" data-dim="${esc(dim)}" data-val="${esc(worst[0].slice_value)}">Investigate</button></div>`}).join("");
+}
+function renderOverview(){
+  const o=S.overview;if(!o)return;
+  const open=o.open_alerts,breached=o.slos.filter(s=>s.state==="breached"),judged=o.slos.filter(s=>s.state!=="unmeasured");
+  const anomalies=open.filter(a=>a.kind==="anomaly"),sloAlerts=open.filter(a=>a.kind==="slo");
+  const sched=o.scheduler;
+  $("#tab-overview").innerHTML=`
+  <div class="strip">
+    <div class="${anomalies.length?"bad":"good"}"><b>${anomalies.length}</b><span>open anomalies</span></div>
+    <div class="${breached.length?"warn":"good"}"><b>${judged.length?`${judged.length-breached.length}/${judged.length}`:"—"}</b><span>SLOs met${o.slos.length>judged.length?` · ${o.slos.length-judged.length} unmeasured`:""}</span></div>
+    <div><b>${o.counts.measured}/${o.counts.measured+o.counts.unmeasured}</b><span>measures with data</span></div>
+    <div><b style="font-size:20px;padding-top:6px">${esc(ago(o.run.started_at))}</b><span>${sched.enabled?`auto-runs every ${sched.every_minutes} min`:"scheduler off (runs on demand)"}</span></div>
+  </div>
+  <div class="two">
+    <div class="panel"><div class="panel-head"><h2>Needs attention</h2><a href="#alerts" class="ref">All alerts →</a></div>
+      ${anomalies.length?anomalies.map(a=>alertRow(a)).join(""):`<p class="note">No open anomalies. Every measured slice is inside its expected range.</p>`}
+      ${sloAlerts.length?`<h3 style="margin-top:14px">SLO breaches</h3>${sloGroups(sloAlerts)}`:""}
+    </div>
+    <div class="stack">
+      <div class="panel"><div class="panel-head"><h2>What changed</h2><span class="ref">since the previous run</span></div>
+        ${o.changes.length?`<div class="scroll"><table><tr><th>Measure</th><th>Slice</th><th class="num">Before</th><th class="num">Now</th></tr>
+          ${o.changes.map(c=>{const m=S.catalog[c.measure_id];return `<tr class="click" data-open="${esc(c.measure_id)}" data-dim="${esc(c.dimension||"")}" data-val="${esc(c.slice||"")}">
+            <td>${esc(m.name)}</td><td class="ref">${esc(sliceName(c.dimension,c.slice))}</td>
+            <td class="num">${esc(fmt(c.previous,m.unit))}</td><td class="num ${c.worse===true?"worse":c.worse===false?"better":"flat"}">${esc(fmt(c.current,m.unit))}</td></tr>`}).join("")}</table></div>`
+          :`<p class="note">Nothing moved by more than 5% between the last two runs.</p>`}
+      </div>
+      <div class="panel"><div class="panel-head"><h2>SLOs</h2><span class="ref">set targets on any measure's page</span></div>
+        ${o.slos.length?`<div class="scroll"><table><tr><th>Measure</th><th>Scope</th><th class="num">Target</th><th>State</th></tr>
+          ${o.slos.map(s=>{const m=S.catalog[s.measure_id];return `<tr class="click" data-open="${esc(s.measure_id)}" data-dim="${esc(s.dimension||"")}" data-val="${esc(s.slice_value||"")}">
+            <td>${esc(m.name)}</td><td class="ref">${esc(s.dimension?(s.slice_value?sliceName(s.dimension,s.slice_value):"every "+s.dimension.replace(/_/g," ")):"overall")}</td>
+            <td class="num">${m.higher_is_better?"≥":"≤"} ${esc(fmt(s.target,m.unit))}</td>
+            <td><span class="chip ${s.state==="met"?"good":s.state==="breached"?"bad":"neutral"}">${s.state}</span>${s.failing_slices.length?` <span class="ref">${esc(s.failing_slices.slice(0,3).join(", "))}${s.failing_slices.length>3?` +${s.failing_slices.length-3}`:""}</span>`:""}</td></tr>`}).join("")}</table></div>`
+          :`<p class="note">No SLOs yet. Open a measure and set a target.</p>`}
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ---------- measures ---------- */
+function openAlertsFor(mid){return (S.overview?.open_alerts||[]).filter(a=>a.measure_id===mid)}
+async function renderMeasureGrid(){
+  const L=S.latest;if(!L){$("#tab-measures").innerHTML=`<div class="empty">No runs yet.</div>`;return}
+  const ids=Object.keys(S.catalog);
+  const hist=Object.fromEntries(await Promise.all(ids.map(async id=>[id,(await api(`/v1/measures/${id}/history?${q({source:src()})}`).catch(()=>({points:[]}))).points])));
+  const card=id=>{
+    const m=S.catalog[id],r=L.measures[id]||{status:"unmeasured",reason:"Not computed in this run."},on=r.status==="measured"&&r.overall;
+    const al=openAlertsFor(id),slo=(S.overview?.slos||[]).filter(s=>s.measure_id===id);
+    const pts=hist[id].filter(p=>p.value!=null);let tr="";
+    if(on&&pts.length>1){const d=pts[pts.length-1].value-pts[pts.length-2].value,k=direction(m,d);tr=`<span class="trend ${k}">${k==="flat"?"no change":(d>0?"▲ ":"▼ ")+fmt(Math.abs(d),m.unit)} vs previous run</span>`}
+    const chips=[al.length?`<span class="chip bad">${al.length} alert${al.length>1?"s":""}</span>`:"",
+      slo.some(s=>s.state==="breached")?`<span class="chip warn">SLO breached</span>`:slo.some(s=>s.state==="met")?`<span class="chip good">SLO met</span>`:"",
+      on?"":`<span class="chip neutral">unmeasured</span>`].join(" ");
+    return `<button class="card ${al.some(a=>a.kind==="anomaly")?"alerting":""}" type="button" data-open="${id}">
+      <div class="top"><span class="ref">${esc(m.roadmap_ref)}</span><span>${chips}</span></div>
+      <h3>${esc(m.name)}</h3>
+      ${on?`<div class="val"><b>${esc(fmt(r.overall.value,m.unit))}</b><small>n = ${r.overall.n.toLocaleString()}</small></div>${tr}${spark(hist[id])}`:`<p class="reason">${esc(r.reason)}</p>`}
+    </button>`};
+  $("#tab-measures").innerHTML=Object.entries(S.groups).map(([g,ids])=>`<div><div class="group-title">${esc(g)}</div><div class="grid">${ids.filter(i=>S.catalog[i]).map(card).join("")}</div></div>`).join("")
+    +`<p class="note">Run ${L.run_id} · window ${L.window[0].slice(0,16).replace("T"," ")} → ${L.window[1].slice(0,16).replace("T"," ")} UTC</p>`;
+}
+async function renderMeasureDetail(){
+  const id=S.measure,m=S.catalog[id],r=S.latest?.measures[id];if(!m)return;
+  const dims=r?.slices||{};
+  const h=await api(`/v1/measures/${id}/history?${q({source:src(),dimension:S.dim,slice_value:S.dim?S.val:""})}`).catch(()=>({points:[],band:null,slo:null}));
+  const sloList=(await api("/v1/slos").catch(()=>[])).filter(s=>s.measure_id===id&&(s.source===src()||s.source==="*"));
+  const sloHere=sloList.find(s=>(s.dimension||"")===S.dim&&(s.slice_value||"")===(S.dim?S.val:""))||(S.dim?sloList.find(s=>s.dimension===S.dim&&!s.slice_value):null);
+  const al=openAlertsFor(id);
+  const cur=S.dim?(dims[S.dim]||[]).find(x=>x.slice===S.val):r?.overall;
+  const minN=30;
+  const bars=Object.entries(dims).map(([dim,rows])=>{
+    const max=Math.max(...rows.map(x=>Math.abs(x.value||0)),m.unit==="ratio"?0.0001:0)||1;
+    const target=(sloList.find(s=>s.dimension===dim&&!s.slice_value)||{}).target;
+    return `<div class="dim"><h4>By ${esc(dim.replace(/_/g," "))}</h4>${rows.map(x=>{
+      const t=(sloList.find(s=>s.dimension===dim&&s.slice_value===x.slice)||{}).target??target;
+      const breach=t!=null&&x.value!=null&&(m.higher_is_better?x.value<t:x.value>t)&&x.n>=minN;
+      const alerted=al.some(a=>a.dimension===dim&&a.slice_value===x.slice);
+      return `<button type="button" class="bar-row ${x.slice==="(unrecorded)"?"unrec":""} ${breach||alerted?"breach":""} ${m.unit!=="count"&&x.n<minN?"small":""} ${S.dim===dim&&S.val===x.slice?"sel":""}" data-dim="${esc(dim)}" data-val="${esc(x.slice)}" title="${esc(x.note||"")}${m.unit!=="count"&&x.n<minN?" (too few to alert on)":""}">
+        <span class="lbl">${alerted?"● ":""}${esc(x.slice)}</span><span class="track"><span class="fill" style="width:${Math.min(100,Math.abs(x.value||0)/max*100)}%"></span></span><span class="num">${esc(fmt(x.value,m.unit))} · ${x.n}</span></button>`}).join("")}</div>`}).join("");
+  const dimOpts=Object.keys(dims);
+  $("#tab-measures").innerHTML=`
+  <div><button class="link" type="button" id="back">← All measures</button></div>
+  <div class="panel stack">
+    <div class="detail-head">
+      <div><span class="ref">${esc(m.roadmap_ref)} · ${m.higher_is_better==null?"no good direction; alerts on moves either way":m.higher_is_better?"higher is better":"lower is better"}</span>
+        <h2>${esc(m.name)}</h2><p class="sub">${esc(m.question)}</p></div>
+      <div class="picker">
+        <select id="dim" aria-label="Slice by"><option value="">Overall</option>${dimOpts.map(d=>`<option value="${esc(d)}" ${d===S.dim?"selected":""}>By ${esc(d.replace(/_/g," "))}</option>`).join("")}</select>
+        ${S.dim?`<select id="val" aria-label="Slice value">${(dims[S.dim]||[]).map(x=>`<option ${x.slice===S.val?"selected":""}>${esc(x.slice)}</option>`).join("")}</select>`:""}
+      </div>
+    </div>
+    ${r?.status!=="measured"?`<p class="reason">${esc(r?.reason||"Not computed yet.")}</p>`:""}
+    ${cur?`<div class="val"><b>${esc(fmt(cur.value,m.unit))}</b><small>${esc(sliceName(S.dim,S.val))} · n = ${cur.n}</small>${cur.note?`<small>· ${esc(cur.note)}</small>`:""}</div>`:""}
+    ${al.filter(a=>(a.dimension||"")===S.dim&&(a.slice_value||"")===(S.dim?S.val:"")).map(a=>alertRow(a,{actions:false})).join("")}
+    ${chart(h,m)}
+    ${m.higher_is_better!=null&&r?.status==="measured"?`<div class="slo-form">
+      <label for="slo-target">SLO for <b>${esc(sliceName(S.dim,S.val))}</b>: ${m.higher_is_better?"at least":"at most"}</label>
+      <input id="slo-target" type="number" step="any" value="${sloHere?(m.unit==="ratio"?+(sloHere.target*100).toFixed(4):sloHere.target):""}" placeholder="${m.unit==="ratio"?"%":m.unit}">
+      <span class="ref">${m.unit==="ratio"?"%":m.unit==="seconds"?"seconds":m.unit==="ms"?"ms":""}</span>
+      ${S.dim?`<label><input type="checkbox" id="slo-all" ${sloHere&&!sloHere.slice_value?"checked":""}> every ${esc(S.dim.replace(/_/g," "))}</label>`:""}
+      <button type="button" id="slo-save">Save target</button>
+      ${sloHere?`<button type="button" id="slo-del" data-id="${sloHere.id}">Remove</button>`:""}
+      <span class="note" id="slo-msg"></span></div>`:""}
+    ${["handoff_loss","time_to_complete_p90"].includes(id)?`<p class="note">See the documents behind this number: <button class="link" type="button" id="to-trace">open ${id==="handoff_loss"?"lost":"slowest"} documents${S.dim==="county"?" in "+esc(S.val):""}</button></p>`:""}
+  </div>
+  ${bars?`<div class="panel stack"><div class="panel-head"><h3>Latest run by slice</h3><span class="note">Click a slice to chart it. Faded rows are below 30 and never alert. Red rows breach an SLO or have an open alert.</span></div><div class="dims">${bars}</div>
+    ${Object.values(dims).flat().some(x=>x.slice==="(unrecorded)")?`<p class="note">“(unrecorded)” means the source doesn't record that dimension for those rows. It's kept visible on purpose.</p>`:""}</div>`:""}`;
+  $("#back").onclick=()=>{S.measure=null;location.hash="measures"};
+  $("#dim").onchange=e=>{S.dim=e.target.value;S.val=S.dim?(dims[S.dim]?.[0]?.slice||""):"";renderMeasureDetail()};
+  $("#val")&&($("#val").onchange=e=>{S.val=e.target.value;renderMeasureDetail()});
+  document.querySelectorAll(".bar-row").forEach(b=>b.onclick=()=>{S.dim=b.dataset.dim;S.val=b.dataset.val;renderMeasureDetail();window.scrollTo({top:0,behavior:"smooth"})});
+  $("#to-trace")&&($("#to-trace").onclick=()=>{S.trace={view:id==="handoff_loss"?"lost":"slowest",county:S.dim==="county"?S.val:"",doc:null};location.hash="trace"});
+  const save=$("#slo-save");if(save)save.onclick=async()=>{
+    const raw=parseFloat($("#slo-target").value);if(isNaN(raw)){$("#slo-msg").textContent="Enter a number first.";return}
+    const all=$("#slo-all")?.checked;
+    try{await api("/v1/slos",{method:"PUT",body:JSON.stringify({source:src(),measure_id:id,dimension:S.dim||null,slice_value:S.dim&&!all?S.val:null,target:m.unit==="ratio"?raw/100:raw})});
+      $("#slo-msg").textContent="Saved. The next run checks it.";S.overview=await api(`/v1/overview?${q({source:src()})}`);renderMeasureDetail()}
+    catch(e){$("#slo-msg").textContent=e.message}};
+  const del=$("#slo-del");if(del)del.onclick=async()=>{await api(`/v1/slos/${del.dataset.id}`,{method:"DELETE"});S.overview=await api(`/v1/overview?${q({source:src()})}`);renderMeasureDetail()};
+}
+
+/* ---------- trace ---------- */
+async function renderTrace(){
+  const T=S.trace;
+  const views=[["slowest","Slowest"],["incomplete","Never finished"],["lost","Lost at handoff"],["recent","Most recent"]];
+  let list=[],err="";
+  try{list=await api(`/v1/documents?${q({source:src(),view:T.view,days:7,county:T.county,limit:30})}`)}catch(e){err=e.message}
+  $("#tab-trace").innerHTML=`
+  <div class="panel stack">
+    <div class="panel-head"><div><h2>Trace a document</h2><p class="sub">Follow one document through every stage and model call, with what went wrong flagged.</p></div>
+      <form id="find" class="picker"><input id="docid" placeholder="Document ID" aria-label="Document ID" value="${esc(T.doc||"")}"><button type="submit">Trace</button></form></div>
+    <div class="picker">${views.map(([k,l])=>`<button type="button" class="${T.view===k?"primary":""}" data-view="${k}">${l}</button>`).join("")}
+      ${T.county?`<span class="chip neutral">county = ${esc(T.county)}</span> <button class="link" type="button" id="clear-county">clear</button>`:""}<span class="ref">last 7 days</span></div>
+    ${err?`<p class="reason">${esc(err)}</p>`:list.length?`<div class="scroll"><table><tr><th>Document</th><th>Received</th><th class="num">Took</th><th>County</th><th>Type</th><th>Mode</th></tr>
+      ${list.map(d=>`<tr class="click" data-doc="${esc(d.document_id)}"><td class="mono">${esc(d.document_id)}</td><td class="ref">${esc(d.received_at.slice(0,16).replace("T"," "))}</td>
+        <td class="num">${d.duration_s!=null?esc(fmt(d.duration_s,"seconds")):`<span class="warn">${esc(dur(d.received_at))} so far</span>`}</td><td>${esc(d.county||"(unrecorded)")}</td><td>${esc(d.instrument_type||"—")}</td><td>${esc(d.processing_mode||"—")}</td></tr>`).join("")}</table></div>`
+      :`<p class="note">${T.view==="lost"?"No lost documents, or no downstream system is configured to check against.":"No documents in this view."}</p>`}
+  </div>
+  <div id="trace-out"></div>`;
+  document.querySelectorAll("[data-view]").forEach(b=>b.onclick=()=>{T.view=b.dataset.view;renderTrace()});
+  $("#clear-county")&&($("#clear-county").onclick=()=>{T.county="";renderTrace()});
+  document.querySelectorAll("[data-doc]").forEach(r=>r.onclick=()=>showTrace(r.dataset.doc));
+  $("#find").onsubmit=e=>{e.preventDefault();const v=$("#docid").value.trim();if(v)showTrace(v)};
+  if(T.doc)showTrace(T.doc,false);
+}
+async function showTrace(id,scroll=true){
+  S.trace.doc=id;const out=$("#trace-out");
+  try{history.replaceState(null,"","#trace/"+encodeURIComponent(id))}catch(e){}
+  let t;try{t=await api(`/v1/trace/${encodeURIComponent(id)}?${q({source:src()})}`)}catch(e){out.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
+  const d=t.document,sev={bad:"bad",warn:"warn",info:"neutral"};
+  const t0=new Date(d.received_at).getTime();
+  const ends=[...t.stages.map(s=>s.finished_at),...t.calls.map(c=>c.ts),d.completed_at].filter(Boolean).map(x=>new Date(x).getTime()+0);
+  const t1=Math.max(t0+1000,...ends,...t.calls.map(c=>new Date(c.ts).getTime()+(c.latency_ms||0)));
+  const W=900,L=150,R=12,row=22,rows=t.stages.length+t.calls.length,H=rows*row+34;
+  const x=ms=>L+(ms-t0)/(t1-t0)*(W-L-R);
+  let g=`<line x1="${L}" x2="${W-R}" y1="${H-18}" y2="${H-18}" stroke="var(--line)"/><text x="${L}" y="${H-4}">received</text><text x="${W-R}" y="${H-4}" text-anchor="end">+${esc(fmt((t1-t0)/1000,"seconds"))}</text>`;
+  t.stages.forEach((s,i)=>{const a=s.started_at?new Date(s.started_at).getTime():t0,b=s.finished_at?new Date(s.finished_at).getTime():a;const yy=i*row+4;
+    const col=s.status&&["failed","error","permanently_failed","timeout"].includes(s.status)?"var(--bad)":s.did_work===false?"var(--line-strong)":"var(--accent)";
+    g+=`<text x="${L-8}" y="${yy+13}" text-anchor="end">${esc(s.stage)}</text><rect x="${x(a)}" y="${yy+3}" width="${Math.max(3,x(b)-x(a))}" height="12" rx="2" fill="${col}"><title>${esc(s.stage)} · ${esc(s.status)}${s.did_work===false?" · did no work":""}</title></rect>`});
+  t.calls.forEach((c,i)=>{const a=new Date(c.ts).getTime(),b=a+(c.latency_ms||0),yy=(t.stages.length+i)*row+4;
+    const col=["failed","error","timeout"].includes(c.status)?"var(--bad)":c.model_declared&&c.model_served&&c.model_declared!==c.model_served?"var(--warn)":"var(--good)";
+    g+=`<text x="${L-8}" y="${yy+13}" text-anchor="end">↳ ${esc(c.stage)} call</text><rect x="${x(a)}" y="${yy+5}" width="${Math.max(3,x(b)-x(a))}" height="8" rx="2" fill="${col}"><title>${esc(c.model_served||"")} · ${esc(fmt(c.latency_ms,"ms"))} · ${esc(c.status||"")}</title></rect>`});
+  out.innerHTML=`<div class="panel stack">
+    <div class="panel-head"><div><span class="ref">Trace</span><h2 class="mono" style="font-size:18px">${esc(d.document_id)}</h2></div>
+      <span class="chip ${d.completed_at?"good":"warn"}">${d.completed_at?"completed":"not completed"}</span></div>
+    <dl class="facts">
+      <div><dt>Took</dt><dd>${d.duration_s!=null?esc(fmt(d.duration_s,"seconds")):esc(dur(d.received_at))+" so far"}</dd></div>
+      <div><dt>County</dt><dd>${esc(d.county||"(unrecorded)")}</dd></div><div><dt>Type</dt><dd>${esc(d.instrument_type||"—")}</dd></div>
+      <div><dt>Mode</dt><dd>${esc(d.processing_mode||"—")}</dd></div><div><dt>AI spend</dt><dd>${esc(fmt(t.cost_usd,"usd"))}${t.calls.some(c=>c.cost_usd==null)?" (floor)":""}</dd></div>
+      <div><dt>Downstream</dt><dd>${d.delivered_downstream==null?"not checked":d.delivered_downstream?"delivered":"missing"}</dd></div>
+    </dl>
+    ${t.flags.length?`<div class="flags">${t.flags.map(f=>`<div class="flag"><span class="chip ${sev[f.severity]}">${f.severity==="info"?"note":f.severity==="bad"?"problem":"warning"}</span>${esc(f.text)}</div>`).join("")}</div>`:`<p class="note">Nothing flagged on this document.</p>`}
+    <div class="scroll"><svg class="timeline" viewBox="0 0 ${W} ${H}" style="min-width:640px;width:100%">${g}</svg></div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>stage did work</span><span><i style="background:var(--line-strong)"></i>stage reported success, did no work</span><span><i style="background:var(--good)"></i>AI call</span><span><i style="background:var(--warn)"></i>served by a different model</span><span><i style="background:var(--bad)"></i>failed</span></div>
+    ${t.calls.length?`<div class="scroll"><table><tr><th>Stage</th><th>Declared</th><th>Served</th><th>Tier / reason</th><th class="num">Latency</th><th class="num">Cost</th><th>Status</th></tr>
+      ${t.calls.map(c=>`<tr><td>${esc(c.stage)}</td><td class="ref">${esc(c.model_declared||"—")}</td><td class="ref ${c.model_declared&&c.model_served&&c.model_declared!==c.model_served?"worse":""}">${esc(c.model_served||"—")}</td>
+        <td class="ref">${c.resolving_layer?esc(c.resolving_layer+" / "+(c.gate_reason||"?")):`<span class="warn">not recorded</span>`}</td><td class="num">${esc(fmt(c.latency_ms,"ms"))}</td>
+        <td class="num">${c.cost_usd==null?`<span class="warn">none</span>`:esc(fmt(c.cost_usd,"usd"))}</td><td>${esc(c.status||"—")}</td></tr>`).join("")}</table></div>`:""}
+  </div>`;
+  if(scroll)out.scrollIntoView({behavior:"smooth",block:"start"});
+}
+
+/* ---------- alerts ---------- */
+async function renderAlerts(){
+  const st=store.get("assay-alert-state")||"open";
+  const list=await api(`/v1/alerts?${q({source:src(),state:st==="pending"?"all":st,limit:200})}`).catch(()=>[]);
+  const shown=st==="pending"?list.filter(a=>a.state==="pending"):st==="all"?list:list.filter(a=>a.state===st);
+  $("#tab-alerts").innerHTML=`<div class="panel">
+    <div class="panel-head"><div><h2>Alerts</h2><p class="sub">An alert opens after its condition holds on two runs in a row, and resolves on the first run where it no longer holds. Pending alerts have been seen once and haven't notified anyone.</p></div>
+      <div class="picker">${["open","pending","resolved","all"].map(s=>`<button type="button" class="${s===st?"primary":""}" data-state="${s}">${s[0].toUpperCase()+s.slice(1)}</button>`).join("")}</div></div>
+    ${shown.length?shown.map(a=>alertRow(a)).join(""):`<p class="note">No ${st==="all"?"":st} alerts.</p>`}
+  </div>`;
+  document.querySelectorAll("[data-state]").forEach(b=>b.onclick=()=>{store.set("assay-alert-state",b.dataset.state);renderAlerts()});
+}
+
+/* ---------- gates ---------- */
+async function renderGates(){
+  const g=await api("/v1/gates").catch(()=>[]);
+  $("#tab-gates").innerHTML=`<div class="panel"><div class="panel-head"><div><h2>Release gates</h2><p class="sub">Every promote, hold or rollback decision, with the lineage that produced it. CI submits them to <code>POST /v1/gates/evaluate</code> (<a href="/docs#/default/evaluate_gate_v1_gates_evaluate_post">API docs</a>).</p></div></div>
+    ${g.length?`<div class="scroll"><table><tr><th>When</th><th>Outcome</th><th>Lineage</th><th>Deciding slices</th></tr>
+    ${g.map(d=>`<tr><td class="ref">${esc(d.created_at.slice(0,16).replace("T"," "))}</td><td><span class="chip ${d.outcome==="advance"?"good":d.outcome==="hold"?"warn":"bad"}">${d.outcome}</span></td>
+      <td class="ref">${Object.entries(d.lineage).map(([k,v])=>`${esc(k)}=${esc(v)}`).join("<br>")}</td>
+      <td>${d.slices.filter(s=>s.outcome!=="advance").map(s=>`<div><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}: ${esc(s.reason)}</div>`).join("")||"All slices within limits."}</td></tr>`).join("")}</table></div>`
+    :`<div class="empty">No gate decisions yet. Wire <code>POST /v1/gates/evaluate</code> into CI after the smoke gate (DEV-NEW-5).</div>`}</div>`;
+}
+
+/* ---------- routing ---------- */
+const TABS=["overview","measures","trace","alerts","gates"];
+// Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
+function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
+function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
+async function render(){
+  const t=tab(),hm=hashMeasure();
+  if(t==="measures"&&hm&&hm!==S.measure){S.measure=hm;S.dim="";S.val=""}
+  if(t==="measures"&&!hm)S.measure=null;
+  const hp=location.hash.slice(1).split("/");if(t==="trace"&&hp[1])S.trace.doc=decodeURIComponent(hp[1]);
+  document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
+  TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
+  if(!S.overview&&t!=="gates")return;
+  try{
+    if(t==="overview")renderOverview();
+    if(t==="measures")await (S.measure?renderMeasureDetail():renderMeasureGrid());
+    if(t==="trace")await renderTrace();
+    if(t==="alerts")await renderAlerts();
+    if(t==="gates")await renderGates();
+  }catch(e){$("#tab-"+t).innerHTML=`<div class="empty">${esc(e.message)}</div>`}
+}
+document.addEventListener("click",e=>{
+  const el=e.target.closest("[data-open]");if(!el)return;
+  S.measure=el.dataset.open;S.dim=el.dataset.dim||"";S.val=el.dataset.val||"";
+  const target="#measures/"+encodeURIComponent(S.measure);
+  if(location.hash!==target)location.hash=target;else render();
+  window.scrollTo({top:0});
+});
+window.addEventListener("hashchange",render);
+$("#source").onchange=()=>{store.set("assay-source",src());S.measure=null;refresh()};
+$("#run").onclick=async()=>{
+  if(!src())return;const b=$("#run");b.disabled=true;b.textContent="Running…";
+  try{await api("/v1/runs",{method:"POST",body:JSON.stringify({source:src(),days:+$("#days").value})});await refresh()}
+  catch(e){$("#updated").textContent="Run failed: "+e.message}
+  finally{b.disabled=false;b.textContent="Run now"}
+};
+$("#savekey").onclick=()=>{store.set("assay-key",$("#apikey").value);$("#keybox").hidden=true;boot()};
+async function boot(){
+  try{
+    const ms=await api("/v1/measures");ms.forEach(m=>S.catalog[m.id]=m);
+    S.groups={};ms.forEach(m=>(S.groups[m.group||"Other"]??=[]).push(m.id));
+    await loadSources();await refresh();
+  }catch(e){renderEmpty(e.message)}
+}
+boot();
+// Keep the overview live without a manual refresh.
+setInterval(()=>{if(!document.hidden&&tab()==="overview"&&src())refresh()},60000);
+</script>
+</body>
+</html>

@@ -1,0 +1,244 @@
+"""Alerting: learned baselines, SLO targets, and an open → resolved lifecycle.
+
+Two independent conditions are checked for every measured slice after a run:
+
+- anomaly: the value leaves the band learned from the previous runs of the same
+  slice (median ± 3 robust deviations, with a minimum width). The minimum width
+  matters: a zero-width band would make every ordinary week look like a
+  regression, which is the roadmap's Measure 5 caveat.
+- slo: the value is on the wrong side of a target someone set.
+
+A condition seen once makes the alert *pending*; it only *opens* (and
+notifies) when it holds on `after_runs` consecutive runs, so a one-run blip
+never pages anyone. An open alert stays open while the condition holds and
+resolves on the first run where the slice is measured and the condition no
+longer holds. A slice that stops being measured does not resolve its alert.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import urllib.request
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from statistics import median
+from typing import Callable, Dict, List, Optional, Tuple
+
+from sqlalchemy import and_, desc, or_, select
+from sqlalchemy.engine import Engine
+
+from assay import store
+from assay.measures import REGISTRY
+from assay.units import fmt
+
+log = logging.getLogger(__name__)
+
+MIN_POINTS = 4  # runs of history needed before a band is trusted
+LOOKBACK = 8
+K = 3.0  # band half-width in robust standard deviations / standard errors
+MIN_WIDTH = {"ratio": 0.005, "psi": 0.05, "count": 1.0, "ms": 1.0, "seconds": 1.0, "usd": 0.01}
+# Quantiles of long-tailed timings are noisy in ways a standard error for a
+# mean doesn't capture, so they get a wider relative floor.
+REL_FLOOR = {"ratio": 0.1, "count": 0.1, "ms": 0.25, "seconds": 0.25, "usd": 0.1, "psi": 0.0}
+
+Key = Tuple[str, Optional[str], Optional[str]]  # measure_id, dimension, slice_value
+
+
+@dataclass
+class Band:
+    low: float
+    high: float
+    center: float
+    points: int
+
+
+def sampling_error(center: float, n: Optional[int], unit: str) -> float:
+    """Standard error expected from sample size alone, where there is a formula for it."""
+    if not n:
+        return 0.0
+    if unit == "ratio":
+        p = min(max(center, 1 / n), 1 - 1 / n)  # a 0% baseline still has uncertainty
+        return math.sqrt(p * (1 - p) / n)
+    if unit == "count":
+        return math.sqrt(max(center, 1.0))  # Poisson
+    return 0.0
+
+
+def learn_band(history: List[Optional[float]], unit: str, n: Optional[int] = None) -> Optional[Band]:
+    """Expected range for the next value: the widest of run-to-run spread,
+    sampling error at this sample size, and a minimum width."""
+    vals = [v for v in history if v is not None][-LOOKBACK:]
+    if len(vals) < MIN_POINTS:
+        return None
+    med = median(vals)
+    mad = median(abs(v - med) for v in vals)
+    half = max(K * 1.4826 * mad, K * sampling_error(med, n, unit),
+               REL_FLOOR.get(unit, 0.1) * abs(med), MIN_WIDTH.get(unit, 0.0))
+    return Band(med - half, med + half, med, len(vals))
+
+
+def outside(value: float, band: Band, higher_is_better: Optional[bool]) -> bool:
+    if higher_is_better is True:
+        return value < band.low
+    if higher_is_better is False:
+        return value > band.high
+    return value < band.low or value > band.high
+
+
+def breaches(value: float, target: float, higher_is_better: Optional[bool]) -> bool:
+    return value < target if higher_is_better else value > target
+
+
+def slice_label(dimension: Optional[str], slice_value: Optional[str]) -> str:
+    return "overall" if dimension is None else f"{dimension}={slice_value}"
+
+
+# ---------- SLOs ----------
+
+def slo_for(slos: List[dict], measure_id: str, dimension: Optional[str],
+            slice_value: Optional[str]) -> Optional[dict]:
+    """Most specific SLO that applies: exact slice, then whole dimension, then overall."""
+    best, best_rank = None, -1
+    for s in slos:
+        if s["measure_id"] != measure_id:
+            continue
+        if s["dimension"] is None and dimension is None:
+            rank = 1
+        elif s["dimension"] == dimension and s["slice_value"] is None and dimension is not None:
+            rank = 2
+        elif s["dimension"] == dimension and s["slice_value"] == slice_value and dimension is not None:
+            rank = 3
+        else:
+            continue
+        rank += 10 if s["source"] != "*" else 0  # source-specific beats global
+        if rank > best_rank:
+            best, best_rank = s, rank
+    return best
+
+
+def load_slos(conn, source: str) -> List[dict]:
+    t = store.slos
+    return [dict(r._mapping) for r in conn.execute(select(t).where(or_(t.c.source == source, t.c.source == "*")))]
+
+
+# ---------- history ----------
+
+def history_by_key(conn, source: str, before_run_id: int, limit_runs: int = LOOKBACK) -> Dict[Key, List[Optional[float]]]:
+    runs, res = store.measure_runs, store.measure_results
+    run_ids = [r[0] for r in conn.execute(
+        select(runs.c.id).where(and_(runs.c.source == source, runs.c.id < before_run_id))
+        .order_by(desc(runs.c.id)).limit(limit_runs))]
+    out: Dict[Key, List[Optional[float]]] = defaultdict(list)
+    if not run_ids:
+        return out
+    rows = conn.execute(select(res.c.run_id, res.c.measure_id, res.c.dimension, res.c.slice_value, res.c.value)
+                        .where(and_(res.c.run_id.in_(run_ids), res.c.status == "measured"))
+                        .order_by(res.c.run_id)).all()
+    for r in rows:
+        out[(r.measure_id, r.dimension, r.slice_value)].append(r.value)
+    return out
+
+
+# ---------- evaluation ----------
+
+def evaluate_run(engine: Engine, run_id: int, min_n: int = 30,
+                 notify: Optional[Callable[[str, dict], None]] = None,
+                 after_runs: int = 2) -> Dict[str, List[dict]]:
+    runs, res, alerts = store.measure_runs, store.measure_results, store.alerts
+    opened, resolved = [], []
+    with engine.begin() as conn:
+        run = conn.execute(select(runs).where(runs.c.id == run_id)).first()
+        now = run.started_at
+        current = conn.execute(select(res).where(and_(res.c.run_id == run_id, res.c.status == "measured",
+                                                      res.c.value.is_not(None)))).all()
+        hist = history_by_key(conn, run.source, run_id)
+        slos = load_slos(conn, run.source)
+        open_rows = {(a.measure_id, a.dimension, a.slice_value, a.kind): a for a in conn.execute(
+            select(alerts).where(and_(alerts.c.source == run.source, alerts.c.state.in_(("open", "pending")))))}
+
+        evaluated = set()
+        for r in current:
+            m = REGISTRY.get(r.measure_id)
+            if m is None:
+                continue
+            if m.unit != "count" and (r.n or 0) < min_n:
+                continue  # too small to judge; a count of zero is still judged
+            key = (r.measure_id, r.dimension, r.slice_value)
+            where = slice_label(r.dimension, r.slice_value)
+            checks = {}
+            band = learn_band(hist.get(key, []), m.unit, r.n)
+            if band and outside(r.value, band, m.higher_is_better):
+                checks["anomaly"] = dict(
+                    expected_low=band.low, expected_high=band.high, target=None,
+                    message=(f"{m.name} [{where}] is {fmt(r.value, m.unit)}; the last {band.points} runs "
+                             f"put it between {fmt(max(band.low, 0), m.unit)} and {fmt(band.high, m.unit)}."))
+            slo = slo_for(slos, r.measure_id, r.dimension, r.slice_value) if m.higher_is_better is not None else None
+            if slo and breaches(r.value, slo["target"], m.higher_is_better):
+                op = "≥" if m.higher_is_better else "≤"
+                checks["slo"] = dict(
+                    expected_low=None, expected_high=None, target=slo["target"],
+                    message=f"{m.name} [{where}] is {fmt(r.value, m.unit)}; SLO is {op} {fmt(slo['target'], m.unit)}.")
+            for kind in ("anomaly", "slo"):
+                evaluated.add(key + (kind,))
+                existing = open_rows.get(key + (kind,))
+                if kind in checks:
+                    fields = dict(last_seen_at=now, run_id=run_id, value=r.value, n=r.n, **checks[kind])
+                    if existing is None:
+                        streak = 1
+                        row = dict(source=run.source, measure_id=r.measure_id, dimension=r.dimension,
+                                   slice_value=r.slice_value, kind=kind, opened_at=now, streak=streak,
+                                   state="open" if streak >= after_runs else "pending", **fields)
+                        row["id"] = conn.execute(alerts.insert().values(**row)).inserted_primary_key[0]
+                        if row["state"] == "open":
+                            opened.append(row)
+                    else:
+                        streak = (existing.streak or 1) + 1
+                        promote = existing.state == "pending" and streak >= after_runs
+                        conn.execute(alerts.update().where(alerts.c.id == existing.id).values(
+                            streak=streak, **fields, **({"state": "open"} if promote else {})))
+                        if promote:
+                            opened.append(dict(existing._mapping) | fields | {"state": "open", "streak": streak})
+                elif existing is not None and existing.state == "pending":
+                    conn.execute(alerts.delete().where(alerts.c.id == existing.id))  # blip, never fired
+                elif existing is not None:
+                    conn.execute(alerts.update().where(alerts.c.id == existing.id)
+                                 .values(state="resolved", resolved_at=now, value=r.value, run_id=run_id))
+                    resolved.append(dict(existing._mapping) | {"value": r.value, "resolved_at": now})
+
+    if notify:
+        for a in opened:
+            notify("opened", a)
+        for a in resolved:
+            notify("resolved", a)
+    return {"opened": opened, "resolved": resolved}
+
+
+# ---------- notification ----------
+
+def webhook_notifier(url: str, fmt_kind: str = "slack", public_url: Optional[str] = None) -> Callable[[str, dict], None]:
+    """Build a notifier that POSTs each alert change. Failures are logged, never raised."""
+
+    def send(event: str, alert: dict) -> None:
+        icon = ":red_circle:" if event == "opened" else ":white_check_mark:"
+        text = f"{icon} Assay alert {event} ({alert['kind']}, {alert['source']}): {alert['message']}"
+        if event == "resolved":
+            text = (f"{icon} Resolved ({alert['kind']}, {alert['source']}): "
+                    f"{REGISTRY[alert['measure_id']].name} [{slice_label(alert['dimension'], alert['slice_value'])}] "
+                    f"is back to {fmt(alert['value'], REGISTRY[alert['measure_id']].unit)}.")
+        if public_url:
+            text += f" {public_url.rstrip('/')}/#measures/{alert['measure_id']}"
+        if fmt_kind == "slack":
+            body = {"text": text}
+        else:
+            body = {"event": event, "text": text,
+                    "alert": {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in alert.items()}}
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=5).close()
+        except Exception:
+            log.exception("Alert webhook failed for alert %s", alert.get("id"))
+
+    return send
