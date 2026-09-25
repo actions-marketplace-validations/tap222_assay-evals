@@ -1,8 +1,23 @@
 [project]
-name = "assay"
+name = "assay-server"
 version = "0.1.0"
-description = "Evaluation and observability for document-intelligence pipelines"
+description = "Assay server: evaluation and observability for AI pipelines and agents, with a dashboard and demo data"
+readme = "docs/assay-server.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "tap222" }]
 requires-python = ">=3.10"
+keywords = ["llm", "agents", "evaluation", "observability", "document-ai", "ai"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Testing",
+]
 dependencies = [
   "fastapi>=0.110",
   "uvicorn>=0.27",
@@ -14,11 +29,16 @@ dependencies = [
 postgres = ["psycopg[binary]>=3.1"]
 dev = ["pytest>=8", "httpx>=0.27"]
 
+[project.urls]
+Homepage = "https://github.com/tap222/docai-eval"
+Documentation = "https://github.com/tap222/docai-eval#setup-guide"
+Issues = "https://github.com/tap222/docai-eval/issues"
+
 [project.scripts]
 assay = "assay.__main__:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

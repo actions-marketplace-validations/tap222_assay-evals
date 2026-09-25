@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
-COPY pyproject.toml ./
+COPY pyproject.toml LICENSE ./
+COPY docs/assay-server.md ./docs/
 COPY assay ./assay
 RUN pip install --no-cache-dir ".[postgres]"
 ENV ASSAY_STORE_URL=sqlite:////data/assay.db

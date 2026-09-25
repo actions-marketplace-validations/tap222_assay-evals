@@ -1,0 +1,92 @@
+# Publishes the server (repo root, "assay-server") when a tag like server-v0.1.0 is pushed.
+#
+#   git tag server-v0.1.0 && git push origin server-v0.1.0
+#
+# Uses PyPI trusted publishing: no tokens are stored anywhere. One-time setup:
+#   1. pypi.org and test.pypi.org → Account → Publishing → Add a new pending publisher:
+#        project assay-server · owner tap222 · repository docai-eval
+#        workflow publish-server.yml · environment pypi (on test.pypi.org: testpypi)
+#   2. GitHub → Settings → Environments: "testpypi" and "pypi", shared with publish-sdk.yml.
+name: Publish server
+
+on:
+  push:
+    tags: ["server-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: The tag matches the package version
+        run: |
+          TAG="${GITHUB_REF_NAME#server-v}"
+          PKG=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          CODE=$(python -c "import re; print(re.search(r'__version__ = \"(.+?)\"', open('assay/__init__.py').read())[1])")
+          echo "tag $TAG · pyproject $PKG · __version__ $CODE"
+          test "$TAG" = "$PKG" && test "$PKG" = "$CODE"
+      - name: Test
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build --outdir dist
+          twine check --strict dist/*
+      - name: The wheel includes the dashboard
+        run: python -c "import zipfile,glob; assert 'assay/static/index.html' in zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist()"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Installs from TestPyPI, loads the demo and serves the dashboard
+        run: |
+          VERSION="${GITHUB_REF_NAME#server-v}"
+          for i in 1 2 3 4 5 6; do
+            pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ \
+              "assay-server==$VERSION" && break
+            sleep 20
+          done
+          cd "$RUNNER_TEMP"
+          assay demo > /dev/null
+          assay serve --port 8400 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8400/ > page.html && break; sleep 1; done
+          grep -q "<title>Assay</title>" page.html
+
+  pypi:
+    needs: testpypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

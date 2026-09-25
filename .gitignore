@@ -7,3 +7,5 @@ venv/
 .env
 *.db
 .vercel
+build/
+dist/
