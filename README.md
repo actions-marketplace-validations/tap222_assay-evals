@@ -74,6 +74,54 @@ before and after a prompt release, with one of each agent failure mode built in 
 
 None of it is real data.
 
+## Test your AI app locally (no server, no account)
+
+`assay test` works like pytest for an AI feature. It runs your tests with the SDK recording,
+checks every run, and compares the results with the last run that passed:
+
+```bash
+pip install assay-server
+assay init        # assay.toml and a small example agent you can run straight away
+assay test        # exit code 1 when something regressed
+```
+
+```
+Assay test  t-20260925-075556-815
+────────────────────────────────────────────
+2 cases · 1 attempt each · compared with the baseline, t-20260925-075426-902
+
+✗ Answer      1/2   100% → 50%
+✗ Tool usage  1/2   100% → 50%
+✗ Safety      1/2   100% → 50%
+✗ Efficiency  1/2   100% → 50%
+
+⚠ 1 case regressed (4 checks)
+
+1. refund_not_delivered  Answer, Efficiency, Safety, Tool usage
+   Unsafe action: Broke “delete_order never runs”: ran delete_order (step 2, order_id='O-18').
+   Looped: Took 4 steps; the budget is 3.
+
+Failed.
+```
+
+- **Your tests:** in the code `assay test` runs, record each case with
+  `assay.run(..., test="<case>")` and say what it should do with `assay.expect(...)`: the
+  tool calls, the answer, and a step budget. For pipelines, send field results with
+  `assay.check(None, "<case>", "pass" | "fail", field=..., expected=..., actual=...)`.
+- **Safety rules:** go in `assay.toml` as path contracts, e.g. `never delete_order`, or
+  `refund only_after get_order`. Every agent run is checked against them.
+- **Baseline:** the last run that passed. A failing run never becomes the baseline. If your
+  suite has known failures, `assay accept` makes the latest run the baseline, and later
+  runs then fail only on what got worse.
+- **Flakiness:** `repeat = 3` (or `assay test --repeat 3`) runs each case several times. A
+  check that varied the same way before is reported as flaky and doesn't block. A drop that
+  could be chance says so.
+- **Where things live:** everything goes in `.assay/` (recordings, the store, the baseline),
+  which ignores itself in git. `assay test -- pytest -q tests/ai` overrides the command.
+
+To see the recorded runs in the dashboard:
+`ASSAY_STORE_URL=sqlite:///.assay/assay.db assay serve`, then open source `events:local`.
+
 ## Setup guide
 
 Setting up Assay has two stages. Installing it is done once by someone technical and takes

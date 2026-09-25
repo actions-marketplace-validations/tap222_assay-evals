@@ -40,7 +40,7 @@ assay.expect("case-17", calls=[{"tool": "get_order", "args": {"order_id": "O-17"
 
 | Call | Records |
 |---|---|
-| `assay.run(task, kind="agent"\|"pipeline", input=, version=, test={"run", "case", "attempt"})` | one run; an exception ends it as failed |
+| `assay.run(task, kind="agent"\|"pipeline", input=, version=, test="case-17")` | one run; an exception ends it as failed. `test` can also be `{"run", "case", "attempt"}`: under `assay test` the run and attempt are filled in |
 | `run.llm(...)`, `run.tool(name, args, result)`, `run.call(name, fn, **args)`, `run.state(obj, op, value)`, `run.answer(text)`, `with run.stage(name) as s` | its steps, in order |
 | `assay.feedback`, `assay.check`, `assay.correction`, `assay.expect` | outcomes, sent whenever they're known |
 | `assay.flush()` | send now (short-lived scripts); also happens every second and at exit |
@@ -80,3 +80,7 @@ assay serve           # http://127.0.0.1:8400, source events:local
 ```
 
 Loading the same file twice changes nothing, because every event has an id.
+
+To test with it, `assay test` (in `assay-server`) runs your code with the SDK recording,
+checks each run against its `assay.expect(...)`, and compares with the last run that passed.
+See [Test your AI app locally](https://github.com/tap222/docai-eval#test-your-ai-app-locally-no-server-no-account).

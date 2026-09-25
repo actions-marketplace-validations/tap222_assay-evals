@@ -54,9 +54,30 @@ def main(argv=None) -> int:
     ld = sub.add_parser("load", help="Load events the SDK recorded locally (no server set) into the store")
     ld.add_argument("file", nargs="?", default=".assay/events.jsonl")
     ld.add_argument("--tenant", default="local", help="Tenant to load them into (default: local)")
+    sub.add_parser("init", help="Set up local testing here: assay.toml and a runnable example")
+    t = sub.add_parser("test", help="Run your tests with the SDK recording, check every run, compare with the "
+                                    "last run that passed")
+    t.add_argument("--repeat", type=int, metavar="N", help="Attempts per case (overrides assay.toml)")
+    t.add_argument("--baseline", metavar="RUN", help="Compare with this run instead of the last that passed; "
+                                                     "'none' for no baseline")
+    t.add_argument("command", nargs=argparse.REMAINDER, help="-- <command> (overrides assay.toml)")
+    a = sub.add_parser("accept", help="Make the latest test run the baseline, known failures and all")
+    a.add_argument("run", nargs="?", help="A run id instead of the latest")
     sub.add_parser("schema", help="Print the v1 event schema as JSON Schema")
 
     args = p.parse_args(argv)
+    if args.cmd in ("init", "test", "accept"):
+        from pathlib import Path
+        from assay import local
+        root = Path.cwd()
+        if args.cmd == "accept":
+            return local.accept(root, args.run)
+        if args.cmd == "test":
+            return local.test(root, local.split_command(args.command), args.repeat, args.baseline)
+        made = local.init(root)
+        print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
+        print("Next: `assay test`. Then point command in assay.toml at your own tests.")
+        return 0
     if args.cmd == "schema":
         from assay.schema import json_schema
         print(json.dumps(json_schema(), indent=1))
@@ -172,32 +193,16 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "load":
-        from pydantic import ValidationError
-        from assay import schema
+        from assay.local import load_file
         try:
-            with open(args.file, encoding="utf-8") as f:
-                lines = [(n, line) for n, line in enumerate(f, 1) if line.strip()]
+            by_type, bad = load_file(engine, args.file, args.tenant)
         except OSError as exc:
             print(f"Can't read {args.file}: {exc.strerror}", file=sys.stderr)
             return 2
-        events, bad = [], []
-        for n, line in lines:  # check every line first, so a bad file loads nothing
-            try:
-                events.append(schema.EVENTS.validate_python([json.loads(line)])[0])
-            except json.JSONDecodeError as exc:
-                bad.append(f"line {n}: not JSON ({exc.msg})")
-            except ValidationError as exc:
-                err = exc.errors()[0]
-                field = ".".join(str(x) for x in err["loc"][2:])
-                bad.append(f"line {n}: {field + ': ' if field else ''}{err['msg']}")
         if bad:
             print(f"{len(bad)} bad line(s) in {args.file}; nothing loaded:", *bad[:20], sep="\n  ", file=sys.stderr)
             return 1
-        by_type: dict = {}
-        for i in range(0, len(events), 5000):
-            for k, v in schema.ingest(engine, events[i:i + 5000], args.tenant).items():
-                by_type[k] = by_type.get(k, 0) + v
-        print(f"Loaded {len(events)} events into tenant '{args.tenant}': "
+        print(f"Loaded {sum(by_type.values())} events into tenant '{args.tenant}': "
               + (", ".join(f"{v} {k}" for k, v in by_type.items()) or "none"))
         print(f"Loading the same file again changes nothing. See them with: python -m assay serve "
               f"(source events:{args.tenant})")

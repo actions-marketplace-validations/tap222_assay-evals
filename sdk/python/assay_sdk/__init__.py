@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 __all__ = ["init", "run", "feedback", "check", "correction", "expect", "flush", "shutdown", "Run"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 log = logging.getLogger("assay_sdk")
 SCHEMA = 1
@@ -192,7 +192,7 @@ def _file_transport(path: str) -> Callable[[List[dict]], None]:
             if not os.path.isdir(folder):
                 os.makedirs(folder, exist_ok=True)
                 with open(os.path.join(folder, ".gitignore"), "w") as f:  # recorded inputs stay out of git
-                    f.write("*.jsonl\n")
+                    f.write("*\n")
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
             try:
                 while data:
@@ -200,6 +200,17 @@ def _file_transport(path: str) -> Callable[[List[dict]], None]:
             finally:
                 os.close(fd)
     return write
+
+
+def _test(test: Any) -> Optional[Dict[str, Any]]:
+    """test="case-17" or {"case": ...}; `assay test` fills in the run and the attempt."""
+    if test is None:
+        return None
+    test = {"case": test} if isinstance(test, str) else dict(test)
+    test.setdefault("run", os.environ.get("ASSAY_TEST_RUN") or "local")
+    if "attempt" not in test and os.environ.get("ASSAY_TEST_ATTEMPT"):
+        test["attempt"] = int(os.environ["ASSAY_TEST_ATTEMPT"])
+    return test
 
 
 _client: Optional[_Client] = None
@@ -326,9 +337,10 @@ class _Stage:
 @contextmanager
 def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str = "agent", input: Any = None,
         input_ref: Optional[str] = None, version: Optional[Dict[str, str]] = None, segment: Optional[str] = None,
-        test: Optional[Dict[str, Any]] = None, parent: Optional[Run] = None, tags: Optional[Dict[str, Any]] = None):
+        test: Any = None, parent: Optional[Run] = None, tags: Optional[Dict[str, Any]] = None):
     """Record one run. kind is "agent" (llm/tool/state/answer steps) or "pipeline" (stages).
-    test={"run": "nightly-0924", "case": "case-17", "attempt": 0} marks a test-case run.
+    test="case-17" (or {"run": "nightly-0924", "case": "case-17", "attempt": 0}) marks a test-case run;
+    under `assay test`, the run and attempt are filled in.
     An exception inside the block ends the run as failed (and is re-raised)."""
     c = _c()
     rid = run_id or uuid.uuid4().hex
@@ -336,7 +348,7 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
     r = Run(c, rid, recorded)
     if recorded:
         c.emit({"type": "run.start", "run_id": rid, "kind": kind, "task": task, "segment": segment,
-                "input": c.clean(input), "input_ref": input_ref, "version": version, "test": test,
+                "input": c.clean(input), "input_ref": input_ref, "version": version, "test": _test(test),
                 "parent_run_id": parent.id if parent else None, "tags": tags})
     status, error = "completed", None
     try:
@@ -354,14 +366,16 @@ def feedback(run_id: str, kind: str, note: Optional[str] = None) -> None:
     _c().emit({"type": "feedback", "run_id": run_id, "kind": kind, "note": note})
 
 
-def check(test_run: str, case: str, status: str, *, attempt: Optional[int] = None, run_id: Optional[str] = None,
+def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[int] = None, run_id: Optional[str] = None,
           field: Optional[str] = None, expected: Any = None, actual: Any = None, evaluator: Optional[str] = None,
           score: Optional[float] = None, reason: Optional[str] = None,
           version: Optional[Dict[str, str]] = None) -> None:
-    """One result from a test run: status pass, fail, or error (the check couldn't run). Send passes too."""
+    """One result from a test run: status pass, fail, or error (the check couldn't run). Send passes too.
+    test_run None: the run `assay test` is doing (else "local")."""
     s = lambda v: None if v is None else v if isinstance(v, str) else json.dumps(_json_safe(v))
-    _c().emit({"type": "check", "test": {k: v for k, v in {"run": test_run, "case": case, "attempt": attempt}.items()
-                                         if v is not None},
+    t = _test({"case": case, **({"run": test_run} if test_run else {}),
+               **({"attempt": attempt} if attempt is not None else {})})
+    _c().emit({"type": "check", "test": t,
                "status": status, "run_id": run_id, "field": field, "expected": s(expected), "actual": s(actual),
                "evaluator": evaluator, "score": score, "reason": reason, "version": version})
 

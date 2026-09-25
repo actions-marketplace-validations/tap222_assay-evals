@@ -212,7 +212,7 @@ def test_sdk_records_locally_without_a_server_and_load_brings_it_in(tmp_path, mo
     log = tmp_path / ".assay" / "events.jsonl"
     lines = log.read_text().splitlines()
     assert [json.loads(x)["type"] for x in lines] == ["run.start", "step", "step", "run.end", "check"]
-    assert (tmp_path / ".assay" / ".gitignore").read_text() == "*.jsonl\n"  # recorded inputs stay out of git
+    assert (tmp_path / ".assay" / ".gitignore").read_text() == "*\n"  # recorded inputs stay out of git
 
     monkeypatch.setenv("ASSAY_STORE_URL", f"sqlite:///{tmp_path / 'store.db'}")
     assert main(["load"]) == 0 and "Loaded 5 events into tenant 'local'" in capsys.readouterr().out
