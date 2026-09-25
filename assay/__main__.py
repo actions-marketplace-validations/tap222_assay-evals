@@ -89,7 +89,11 @@ def main(argv=None) -> int:
                               args.junit)
         made = local.init(root)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
-        print("Next: `assay test`. Then point command in assay.toml at your own tests.")
+        try:
+            import pytest  # noqa: F401
+            print("Next: `pytest --assay tests/ai`. Then add your own tests next to the example.")
+        except ImportError:
+            print("Next: `pip install pytest`, then `pytest --assay tests/ai`.")
         return 0
     if args.cmd == "schema":
         from assay.schema import json_schema

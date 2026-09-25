@@ -74,35 +74,50 @@ before and after a prompt release, with one of each agent failure mode built in 
 
 None of it is real data.
 
-## Test your AI app locally (no server, no account)
+## Test your AI app locally: it's pytest (no server, no account)
 
-`assay test` works like pytest for an AI feature. It runs your tests with the SDK recording,
-checks every run, and compares the results with the last run that passed:
+Your AI tests are pytest tests: `tests/ai/test_support.py`, `test_tool_selection.py`,
+`test_security.py`, `test_document_extraction.py`. Each test records what the agent did, fails
+when the run breaks a rule or misses what the test expects, and, with `--assay`, is compared
+with its own last passing run:
 
 ```bash
-pip install assay-server
-assay init        # assay.toml and a small example agent you can run straight away
-assay test        # exit code 1 when something regressed
+pip install assay-server pytest     # assay-server brings the SDK, assay-evals, and its pytest plugin
+assay init                          # assay.toml, and tests/ai/test_support.py with an example agent
+pytest --assay tests/ai             # exit code 1 when something regressed
 ```
 
 ```
-Assay test  t-20260925-075556-815
-────────────────────────────────────────────
-2 cases · 1 attempt each · compared with the baseline, t-20260925-075426-902
+    def test_no_refund_before_delivery(assay_case):
+        assay_case.expect(calls=[{"tool": "get_order", "args": {"order_id": "O-18"}}], answer="hasn't arrived")
+        support_agent(assay_case, "Can I get a refund for O-18?", "O-18")
+>       assert_not_called(assay_case, "refund")
+E       AssertionError: refund shouldn't have been called, but was: refund(order_id='O-18', amount=12.0) (step 1).
 
-✗ Answer      1/2   100% → 50%
-✗ Tool usage  1/2   100% → 50%
-✗ Safety      1/2   100% → 50%
-✗ Efficiency  1/2   100% → 50%
+==================================== assay =====================================
+2 cases · 1 attempt each · compared with each case's last passing run (2 of 2 cases have one, from 1 run)
 
-⚠ 1 case regressed (4 checks)
+✗ tests/ai/test_support.py  1/2
 
-1. refund_not_delivered  Answer, Efficiency, Safety, Tool usage
-   Unsafe action: Broke “delete_order never runs”: ran delete_order (step 2, order_id='O-18').
-   Looped: Took 4 steps; the budget is 3.
+⚠ 1 case regressed (3 checks)
+
+1. tests/ai/test_support.py::test_no_refund_before_delivery  Answer, Your asserts, Tool usage
+   Wrong tool: Called refund(order_id='O-18', amount=12.0), which the reference doesn't expect.
 
 Failed.
 ```
+
+Plain `pytest` works too: red or green, with Assay's checks. `--assay` adds the comparison
+with each test's last passing run, and decides the exit code: 0 nothing got worse, 1 a
+regression, 6 inconclusive (nothing got worse, but some results couldn't be judged). A test
+that failed in its baseline too doesn't fail the session; a failing test that doesn't take
+the fixture does, as always. It works with `pytest -n` (xdist) and `-k`: running a subset only
+moves the baselines of the tests it ran. `--assay-baseline RUN` compares with one run instead,
+and `--assay-upload` sends the run to a server.
+
+`assay test` does the same from outside pytest (or around any command that records with the
+SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its exit codes are
+0, 1, 2 (setup problem) and 3 (inconclusive).
 
 - **Your tests:** with pytest, take the `assay_case` fixture (it comes with `assay-evals`)
   and set `command = "pytest -q tests/ai"`. Each test is then a case, and pytest's own

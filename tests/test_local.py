@@ -36,24 +36,35 @@ def test_init_writes_a_runnable_setup_once(project, capsys):
     assert (project / "assay.toml").read_text() == "# mine\n"
 
 
-def test_the_example_passes_then_a_bad_change_fails_then_the_fix_passes(project, capsys):
+# In this repo the pytest plugin isn't installed as a package, so name it.
+PYTEST = f"{sys.executable} -m pytest -q -p no:cacheprovider -p assay_sdk.pytest_plugin"
+
+
+def init_pytest_example(project):
     main(["init"])
-    config(project, f"{sys.executable} {local.EXAMPLE}",
-           contracts='[[contracts]]\nkind = "never"\nstep = "delete_order"\n')
+    toml = (project / "assay.toml").read_text()
+    (project / "assay.toml").write_text(toml.replace('command = "pytest -q tests/ai"', f'command = "{PYTEST} tests/ai"'))
+
+
+def test_the_example_passes_then_a_bad_change_fails_then_the_fix_passes(project, capsys):
+    init_pytest_example(project)
     assert main(["test"]) == 0
     out = capsys.readouterr().out
-    assert "2 cases · 1 attempt each · no baseline yet" in out and "✓ Safety      2/2" in out
+    assert "2 cases · 1 attempt each · no baseline yet" in out and "✓ Safety        2/2" in out
+    assert "✓ tests/ai/test_support.py  2/2" in out
     first = json.loads((project / ".assay" / "state.json").read_text())["last"]
 
     good = (project / local.EXAMPLE).read_text()
-    (project / local.EXAMPLE).write_text(good.replace(
-        '        run.answer(f"Order {order_id} hasn\'t arrived yet, so it can\'t be refunded.")\n        return\n',
-        '        run.call("delete_order", lambda order_id: None, order_id=order_id)\n'))
+    bad = good.replace('        reply = f"Order {order_id} hasn\'t arrived yet, so it can\'t be refunded."\n',
+                       '        run.call("delete_order", lambda order_id: None, order_id=order_id)\n'
+                       '        reply = "Done."\n')
+    assert bad != good
+    (project / local.EXAMPLE).write_text(bad)
     assert main(["test"]) == 1
     out = capsys.readouterr().out
     assert "compared with each case's last passing run (2 of 2 cases have one, from 1 run)" in out
-    assert "⚠ 1 case regressed (4 checks)" in out
-    assert "refund_not_delivered" in out and "delete_order never runs" in out and "Failed." in out
+    assert "⚠ 1 case regressed" in out and "test_no_refund_before_delivery" in out
+    assert "delete_order never runs" in out and "Failed." in out
     base = json.loads((project / ".assay" / "state.json").read_text())["baseline_cases"]
     assert set(base.values()) == {first}  # a failing run doesn't become anyone's baseline
 
@@ -188,7 +199,7 @@ def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_p
     from fastapi.testclient import TestClient
     from assay.api import create_app
     from assay.config import Settings
-    main(["init"])
+    init_pytest_example(project)
     main(["test"])
     capsys.readouterr()
     server = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path_factory.mktemp('srv') / 's.db'}")))
@@ -352,3 +363,47 @@ def test_report_by_test_file_and_junit(project, capsys):
     assert set(bad) == {"test_breaks_a_contract", "test_helper"}
     assert bad["test_breaks_a_contract"].startswith("Safety: Unsafe action")  # not also "Your asserts"
     assert suite[0].get("classname") == "tests.test_agent"
+
+
+def test_pytest_assay_compares_the_session_like_assay_test(project, monkeypatch):
+    import subprocess
+    init_pytest_example(project)
+    run = lambda *extra: subprocess.run([*PYTEST.split(), "--assay", "tests/ai", *extra], capture_output=True,
+                                        text=True, cwd=project)
+    for k in ("ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION"):
+        monkeypatch.delenv(k, raising=False)
+    first = run()
+    assert first.returncode == 0 and "= assay =" in first.stdout and "Its cases' results are now their baseline" \
+        in first.stdout
+
+    example = project / local.EXAMPLE
+    good = example.read_text()
+    example.write_text(good.replace('        reply = f"Order {order_id} hasn\'t arrived yet, so it can\'t be refunded."\n',
+                                    '        run.call("delete_order", lambda order_id: None, order_id=order_id)\n'
+                                    '        reply = "Done."\n'))
+    worse = run()
+    assert worse.returncode == 1 and "⚠ 1 case regressed" in worse.stdout
+    assert "compared with each case's last passing run" in worse.stdout
+
+    assert main(["accept"]) == 0  # known now: the same failure doesn't fail the session
+    known = run()
+    assert known.returncode == 0 and "also failed in the baseline" in known.stdout and "1 failed" in known.stdout
+
+    (project / "tests" / "ai" / "test_plain.py").write_text("def test_bug():\n    assert 1 == 2\n")
+    plain = run()  # a failing test Assay knows nothing about still fails the session
+    assert plain.returncode == 1 and "1 failing test doesn't take the assay_case fixture" in plain.stdout
+    (project / "tests" / "ai" / "test_plain.py").unlink()
+
+    toml = (project / "assay.toml").read_text()
+    (project / "assay.toml").write_text(toml.replace(f'{PYTEST} tests/ai"', f'{PYTEST} --assay tests/ai"'))
+    out = subprocess.run([sys.executable, "-m", "assay", "test"], capture_output=True, text=True, cwd=project)
+    assert out.stdout.count("Assay test  t-") == 1 and "= assay =" not in out.stdout  # compared once
+
+
+def test_pytest_assay_without_the_server_says_what_to_install(project):
+    import subprocess
+    (project / "test_x.py").write_text("def test_x(assay_case):\n    pass\n")
+    env = {**os.environ, "PYTHONPATH": SDK}  # the SDK, without assay-server
+    out = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "assay_sdk.pytest_plugin", "--assay",
+                          "test_x.py"], capture_output=True, text=True, cwd=project, env=env)
+    assert out.returncode == 4 and "pip install assay-server" in out.stderr + out.stdout

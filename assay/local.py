@@ -43,18 +43,18 @@ except ModuleNotFoundError:  # Python 3.10
 CONFIG = "assay.toml"
 HOME = ".assay"
 TENANT = "local"
-EXAMPLE = "assay_example.py"
-CHECK_NAMES = {"completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state", "safety": "Safety",
-               "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts"}
+EXAMPLE = "tests/ai/test_support.py"
+CHECK_NAMES = {"completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state",
+               "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts"}
 PII_EVALUATOR = "assay.pii@1"
 
 CONFIG_TEMPLATE = '''\
-# Assay: `assay test` runs the command below with the SDK recording, checks every run,
-# and compares the results with the last run that passed.
+# Assay: your AI tests are pytest tests. `pytest --assay` runs them, checks every run, and
+# compares each test with its last passing run; `assay test` does the same, with repeats.
 # Docs: https://github.com/tap222/docai-eval/tree/main/sdk/python#readme
 
 [test]
-command = "python {example}"   # your tests, e.g. "pytest -q tests/ai" with the assay_case fixture
+command = "pytest -q tests/ai"   # what `assay test` runs
 repeat = 1        # attempts per case; 3 or more lets Assay tell a flaky case from a broken one
 tolerance = 0.01  # a drop in the pass rate smaller than this doesn't fail the run
 
@@ -74,14 +74,23 @@ other = "get_order"
 [pii]
 check = true
 allow = {{}}
+
+# A test fails when its run fails these checks, not only on its own asserts.
+[pytest]
+checks = true
 '''
 
 EXAMPLE_TEMPLATE = '''\
-"""An example for `assay test`: a small support agent that needs no LLM. Replace it with yours.
+"""AI tests are pytest tests. This one tests a small support agent that needs no LLM: replace it
+with yours, and add files next to this one (test_tool_selection.py, test_security.py, ...).
 
-Each case runs inside assay.run(..., test="<case>"), and assay.expect() says what the case
-should do. `assay test` runs this file, records every step, and checks each run."""
-import assay_sdk as assay
+A test that takes the `assay_case` fixture records its run. The test fails when the run breaks a
+rule in assay.toml, or misses what the test expects, as well as on its own asserts.
+
+    pytest tests/ai            # red or green, like any test
+    pytest --assay tests/ai    # also compared with each test's last passing run
+"""
+from assay_sdk.testing import assert_called, assert_max_steps, assert_not_called
 
 ORDERS = {"O-17": {"price": 27.61, "status": "delivered"}, "O-18": {"price": 12.00, "status": "shipped"}}
 
@@ -94,31 +103,31 @@ def refund(order_id, amount):
     return {"refunded": amount}
 
 
-def agent(run, message, order_id):
-    """Your agent goes here. This one looks the order up and refunds it if it was delivered."""
+def support_agent(run, message, order_id):
+    """Your agent goes here. Record what it does on `run`: run.call() for a tool, run.llm() for a
+    model call, run.answer() for the reply."""
     order = run.call("get_order", get_order, order_id=order_id)
     if order["status"] != "delivered":
-        run.answer(f"Order {order_id} hasn't arrived yet, so it can't be refunded.")
-        return
-    run.call("refund", refund, order_id=order_id, amount=order["price"])
-    run.answer(f"Refunded ${order['price']:.2f}.")
+        reply = f"Order {order_id} hasn't arrived yet, so it can't be refunded."
+    else:
+        run.call("refund", refund, order_id=order_id, amount=order["price"])
+        reply = f"Refunded ${order['price']:.2f}."
+    run.answer(reply)
+    return reply
 
 
-CASES = {
-    "refund_delivered": ("Refund order O-17 please", "O-17", dict(
-        calls=[{"tool": "get_order", "args": {"order_id": "O-17"}},
-               {"tool": "refund", "args": {"order_id": "O-17"}}],
-        answer="27.61", max_steps=4)),
-    "refund_not_delivered": ("Can I get a refund for O-18?", "O-18", dict(
-        calls=[{"tool": "get_order", "args": {"order_id": "O-18"}}],
-        answer="hasn't arrived", max_steps=3)),
-}
+def test_refunds_a_delivered_order(assay_case):
+    reply = support_agent(assay_case, "Refund order O-17 please", "O-17")
+    assert_called(assay_case, "refund", order_id="O-17")
+    assert_max_steps(assay_case, 4)
+    assert "27.61" in reply
 
-assay.init()  # no server: records locally
-for case, (message, order_id, expected) in CASES.items():
-    assay.expect(case, **expected)
-    with assay.run("refund_request", input=message, test=case) as run:
-        agent(run, message, order_id)
+
+def test_no_refund_before_delivery(assay_case):
+    # What the run should do: checked by Assay after the test, like the rules in assay.toml.
+    assay_case.expect(calls=[{"tool": "get_order", "args": {"order_id": "O-18"}}], answer="hasn't arrived")
+    support_agent(assay_case, "Can I get a refund for O-18?", "O-18")
+    assert_not_called(assay_case, "refund")
 '''
 
 
@@ -215,10 +224,11 @@ def init(root: Path) -> List[str]:
     ensure_home(root)
     made = []
     if not (root / EXAMPLE).exists():
+        (root / EXAMPLE).parent.mkdir(parents=True, exist_ok=True)
         (root / EXAMPLE).write_text(EXAMPLE_TEMPLATE)
         made.append(EXAMPLE)
     if not (root / CONFIG).exists():
-        (root / CONFIG).write_text(CONFIG_TEMPLATE.format(example=EXAMPLE))
+        (root / CONFIG).write_text(CONFIG_TEMPLATE.format())
         made.append(CONFIG)
     return made
 
@@ -670,6 +680,10 @@ def sdk_problem() -> Optional[str]:
     return None
 
 
+def new_run_id() -> str:
+    return datetime.now().strftime("t-%Y%m%d-%H%M%S-%f")[:-3]
+
+
 def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Optional[str],
          send: Optional[dict] = None, junit: Optional[str] = None) -> int:
     """`assay test`. Prints the report; returns the exit code."""
@@ -690,6 +704,29 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     repeat = repeat or cfg["repeat"]
     home = ensure_home(root)
     (home / "runs").mkdir(exist_ok=True)
+    run_id = new_run_id()
+    events = home / "runs" / f"{run_id}.jsonl"
+    codes = run_command(command, events, run_id, repeat)
+    if not events.exists():
+        print(f"\n`{command}` recorded nothing. Does it call assay.init() and record runs with "
+              "assay.run(..., test=\"<case>\")?", file=sys.stderr)
+        return 2
+    code, text = finish(root, cfg, run_id, repeat, codes, baseline, junit)
+    print("\n" + text, file=sys.stderr if code == 2 else sys.stdout)
+    if send is not None and code != 2:
+        print()
+        sent = upload(root, run_id, **send)
+        code = code or sent  # a failed upload fails a run that passed; a failing run stays 1
+    return code
+
+
+def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], baseline: Optional[str],
+           junit: Optional[str] = None) -> Tuple[int, str]:
+    """Load a recorded test run, check it, compare it with the baseline, and move the baseline on
+    if it passed. (exit code, report): 0 passed, 1 failed, 2 nothing to check, 3 inconclusive.
+    Shared by `assay test` and `pytest --assay`."""
+    home = ensure_home(root)
+    events = home / "runs" / f"{run_id}.jsonl"
     engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
     state = _migrate(engine, home, _state(home))
     explicit = baseline not in (None, "none")
@@ -698,23 +735,13 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     elif baseline is None:
         baseline = BASELINE if state.get("baseline_cases") else None
     sync_contracts(engine, cfg["contracts"])
-
-    run_id = datetime.now().strftime("t-%Y%m%d-%H%M%S-%f")[:-3]
-    events = home / "runs" / f"{run_id}.jsonl"
-    codes = run_command(command, events, run_id, repeat)
-    if not events.exists():
-        print(f"\n`{command}` recorded nothing. Does it call assay.init() and record runs with "
-              "assay.run(..., test=\"<case>\")?", file=sys.stderr)
-        return 2
     _, bad = load_file(engine, str(events), TENANT)
     if bad:
-        print(f"{len(bad)} bad line(s) in {events}:", *bad[:20], sep="\n  ", file=sys.stderr)
-        return 2
+        return 2, "\n  ".join([f"{len(bad)} bad line(s) in {events}:", *bad[:20]])
     result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"])
     if result is None:
-        print("\nNothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "
-              "should do with assay.expect(), or send results with assay.check().", file=sys.stderr)
-        return 2
+        return 2, ("Nothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "
+                   "should do with assay.expect(), or send results with assay.check().")
     ran = {case for case, _ in result["attempts"]}
     known = {c: r for c, r in (state.get("baseline_cases") or {}).items() if c in ran}
     if baseline == BASELINE and not known:
@@ -724,7 +751,6 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
         (f"compared with each case's last passing run ({len(known)} of {len(ran)} cases have one, from "
          f"{_n(len(set(known.values())), 'run')})")
     text, passed = report(run_id, baseline, result, repeat, codes, against)
-    print("\n" + text)
     if junit:
         write_junit(junit, run_id, result, verdict(result, bool(baseline))[1])
     state["last"] = run_id
@@ -732,12 +758,7 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     if passed and not inconclusive:
         state["baseline_cases"] = {**(state.get("baseline_cases") or {}), **{c: run_id for c in promote(engine, run_id)}}
     _save_state(home, state)
-    code = 1 if not passed else 3 if inconclusive else 0
-    if send is not None:
-        print()
-        sent = upload(root, run_id, **send)
-        code = code or sent  # a failed upload fails a run that passed; a failing run stays 1
-    return code
+    return (1 if not passed else 3 if inconclusive else 0), text
 
 
 def _migrate(engine, home: Path, state: dict) -> dict:

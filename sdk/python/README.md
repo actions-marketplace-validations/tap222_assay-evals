@@ -113,6 +113,9 @@ For the test body, `assay_sdk.testing` has `assert_called(run, tool, **args)`,
 `assert_not_called`, `assert_called_before(run, first, then)`, `assert_max_steps(run, n)`,
 `assert_answer_contains` and `assert_no_pii`. Each fails with what the run actually did.
 
+`pytest --assay` (with `assay-server` installed) also compares each test with its last passing
+run, prints Assay's report in pytest's summary, and exits 1 only when something got worse.
+
 To test with it, `assay test` (in `assay-server`) runs your code with the SDK recording,
 checks each run against its `assay.expect(...)`, and compares with the last run that passed.
-See [Test your AI app locally](https://github.com/tap222/docai-eval#test-your-ai-app-locally-no-server-no-account).
+See [Test your AI app locally](https://github.com/tap222/docai-eval#test-your-ai-app-locally-its-pytest-no-server-no-account).

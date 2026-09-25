@@ -11,11 +11,12 @@ assay demo      # synthetic tenant, 7 weeks of daily runs, staged incidents
 assay serve     # http://127.0.0.1:8400  (API docs at /docs)
 ```
 
-To test an AI feature on your own machine, like pytest (no server, no account):
+To test an AI feature on your own machine, as pytest tests (no server, no account):
 
 ```bash
-assay init      # assay.toml and a small example agent
-assay test      # checks every run, compares with the last run that passed; exit code 1 on a regression
+pip install assay-server pytest
+assay init                  # assay.toml, and tests/ai/test_support.py with an example agent
+pytest --assay tests/ai     # checks every run, compares each test with its last passing run
 ```
 
 By default, results go to SQLite in the current directory. For production, add the Postgres
