@@ -19,7 +19,7 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import (agents, alerts, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, prompts, rootcause, runner, store, trace, workflow)
+from assay import (agents, alerts, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, lifecycle, prompts, rootcause, runner, store, trace, workflow)
 from assay.auth import Principal
 from assay.config import Settings
 from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EvalResultEvent, EventBatch, ExtractionEvent,
@@ -529,7 +529,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
               summary="Check every trajectory in a run against its reference and contracts; stored as eval results")
     def evaluate_agent_run(run_id: str, source: str, p: Principal = Depends(require("manage"))):
         out = agents.evaluate_run(engine, resolve(p, source), _tenant(source), run_id)
-        if not out["trajectories"]:
+        if not out["trajectories"] and not out["running"]:
             raise HTTPException(404, f"No trajectories in run '{run_id}' for {source}.")
         return out
 
@@ -548,7 +548,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         out = agents.detail(engine, resolve(p, source), _tenant(source), trajectory_id)
         if out is None:
             raise HTTPException(404, f"No trajectory '{trajectory_id}' in {source}.")
-        return out
+        return out | {"evaluation": lifecycle.get(engine, _tenant(source), trajectory_id)}
+
+    @app.get("/v1/agents/lifecycle", tags=["results"],
+             summary="Agent runs by lifecycle: running, awaiting evaluation, evaluated, abandoned; latest failures")
+    def agent_lifecycle(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return lifecycle.overview(engine, _tenant(source)) | {"abandon_minutes": settings.abandon_minutes}
 
     # ---------- the v1 event schema ----------
 
@@ -568,7 +574,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(422, [{"event": err["loc"][0] if err["loc"] else None,
                                        "field": ".".join(str(x) for x in err["loc"][2:]) or None,
                                        "problem": err["msg"]} for err in e.errors()[:50]])
-        return {"accepted": len(events), "by_type": schema.ingest(engine, events, tenant)}
+        counts = schema.ingest(engine, events, tenant)
+        # Runs this batch ended (or added late data to) are evaluated now, not after a delay.
+        lifecycle.after_ingest(engine, tenant, {e.run_id for e in events if getattr(e, "run_id", None)},
+                               settings.abandon_minutes)
+        return {"accepted": len(events), "by_type": counts}
 
     @app.get("/v1/schema", tags=["ingest"], summary="The v1 event schema, as JSON Schema")
     def get_schema():
@@ -1002,9 +1012,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         process (Vercel Cron). Requires CRON_SECRET."""
         if not settings.cron_secret or authorization != f"Bearer {settings.cron_secret}":
             raise HTTPException(401, "Set CRON_SECRET and send it as a Bearer token.")
-        if not settings.schedule_sources:
-            raise HTTPException(422, "Set ASSAY_SCHEDULE_SOURCES to the sources to run.")
-        scheduler.run_once()
+        scheduler.sweep()  # agent runs that went quiet, and any run not yet evaluated
+        if settings.schedule_sources:
+            scheduler.run_once()
         return scheduler.status()
 
     # ---------- keys ----------

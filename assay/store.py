@@ -227,8 +227,20 @@ agent_trajectories = Table(
     Column("started_at", DateTime, nullable=False, index=True),
     Column("finished_at", DateTime),
     Column("answer", Text),  # the final answer
-    Column("status", String(32)),  # completed | failed | max_steps | …
+    Column("status", String(32)),  # running | completed | failed | abandoned | …
     Column("lineage", JSON),
+    Column("updated_at", DateTime, index=True),  # server time of the latest event; see assay/lifecycle.py
+)
+
+# The latest evaluation of each agent run, made when the run ended (assay/lifecycle.py).
+run_checks = Table(
+    "run_checks", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("trajectory_id", String(128), primary_key=True),
+    Column("evaluated_at", DateTime, nullable=False, index=True),
+    Column("status", String(32)),  # the run's status when evaluated: completed | failed | abandoned
+    Column("checks", JSON),  # [{"check", "status": pass | fail, "reason"}]
+    Column("failed", Integer, nullable=False),  # how many checks failed
 )
 
 agent_steps = Table(

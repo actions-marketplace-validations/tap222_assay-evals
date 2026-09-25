@@ -102,6 +102,10 @@ Fields for each kind:
 | `answer` | string | the final answer, if there was no `answer` step |
 | `error` | string | why it failed |
 
+Send `run.end` when the run is over: that's when Assay evaluates it, however long the run
+took. A run that never sends it is marked `abandoned` after `ASSAY_ABANDON_MINUTES` (30) with
+no events, then evaluated. The SDK sends it when the `with assay.run(...)` block exits.
+
 ## Outcome events
 
 ### `feedback`: what a user did

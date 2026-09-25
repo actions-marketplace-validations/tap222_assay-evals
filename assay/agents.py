@@ -365,32 +365,39 @@ def run_trajectories(engine: Engine, tenant: str, run_id: str) -> List[dict]:
     t = store.agent_trajectories
     with engine.connect() as conn:
         return [dict(r._mapping) for r in conn.execute(select(t.c.trajectory_id, t.c.case_id, t.c.attempt,
-                                                              t.c.lineage, t.c.started_at, t.c.task)
+                                                              t.c.lineage, t.c.started_at, t.c.task, t.c.status)
                                                        .where(and_(t.c.tenant == tenant, t.c.run_id == run_id)))]
+
+
+def result_rows(tenant: str, run_id: str, head: dict, checks: List[dict], evaluator: str = EVALUATOR) -> List[dict]:
+    """A trajectory's checks as evaluation results of its test run (stable ids: re-checking replaces)."""
+    from assay import ingest
+    case = head["case_id"] or head["trajectory_id"]
+    return [{"tenant": tenant, "result_id": ingest._derive(run_id, case, c["field"], evaluator, head["attempt"]),
+             "run_id": run_id, "case_id": case, "document_id": head["trajectory_id"], "evaluator": evaluator,
+             "attempt": head["attempt"], "ts": head["started_at"], "lineage": head["lineage"], "score": None, **c}
+            for c in checks]
 
 
 def evaluate_run(engine: Engine, source, tenant: str, run_id: str) -> dict:
     """Check every trajectory in an evaluation run against its case's reference and the
-    source's contracts, and store the checks as evaluation results (idempotent)."""
+    source's contracts, and store the checks as evaluation results (idempotent). A trajectory
+    still running is left for later: judged half-way, it would fail for not being done."""
     from assay import ingest
     heads = run_trajectories(engine, tenant, run_id)
+    running = sum(1 for h in heads if h["status"] == "running")
+    heads = [h for h in heads if h["status"] != "running"]
     trajs = source.trajectories([h["trajectory_id"] for h in heads])
     refs = references(engine, tenant, {h["case_id"] for h in heads if h["case_id"]})
     rules = contracts_mod.load(engine, source.name)
     rows = []
     for h in heads:
         traj = trajs.get(h["trajectory_id"])
-        if traj is None:
-            continue
-        for c in checks_for(traj, refs.get(h["case_id"]), rules):
-            rows.append({"tenant": tenant, "result_id": ingest._derive(run_id, h["case_id"] or h["trajectory_id"],
-                                                                        c["field"], EVALUATOR, h["attempt"]),
-                         "run_id": run_id, "case_id": h["case_id"] or h["trajectory_id"],
-                         "document_id": h["trajectory_id"], "evaluator": EVALUATOR, "attempt": h["attempt"],
-                         "ts": h["started_at"], "lineage": h["lineage"], "score": None, **c})
+        if traj is not None:
+            rows += result_rows(tenant, run_id, h, checks_for(traj, refs.get(h["case_id"]), rules))
     ingest.upsert(engine, store.eval_results, rows, "result_id")
     counts = Counter((r["field"], r["status"]) for r in rows)
-    return {"run_id": run_id, "trajectories": len(heads), "results": len(rows),
+    return {"run_id": run_id, "trajectories": len(heads), "running": running, "results": len(rows),
             "checks": {f: {"pass": counts[(f, "pass")], "fail": counts[(f, "fail")]} for f in CHECKS
                        if counts[(f, "pass")] + counts[(f, "fail")]}}
 

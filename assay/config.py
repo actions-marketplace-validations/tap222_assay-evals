@@ -36,6 +36,10 @@ class Settings:
     # Vercel Cron sends "Authorization: Bearer $CRON_SECRET" to /v1/cron.
     cron_secret: Optional[str] = None
 
+    # agent runs: evaluated when they end; quiet this long means abandoned (assay/lifecycle.py)
+    abandon_minutes: float = 30.0
+    evaluate_seconds: int = 60  # how often the sweep looks for abandoned and unevaluated runs (0 = off)
+
     # built-in scheduler (0 = off)
     schedule_minutes: int = 0
     schedule_sources: List[str] = field(default_factory=list)
@@ -59,6 +63,8 @@ class Settings:
             public_url=e("ASSAY_PUBLIC_URL"),
             alert_min_n=int(e("ASSAY_ALERT_MIN_N", "30")),
             alert_after_runs=int(e("ASSAY_ALERT_AFTER_RUNS", "2")),
+            abandon_minutes=float(e("ASSAY_ABANDON_MINUTES", "30")),
+            evaluate_seconds=int(e("ASSAY_EVALUATE_SECONDS", "60")),
             schedule_minutes=int(e("ASSAY_SCHEDULE_MINUTES", "0")),
             schedule_sources=_list(e("ASSAY_SCHEDULE_SOURCES")),
             schedule_window_days=float(e("ASSAY_SCHEDULE_WINDOW_DAYS", "1")),

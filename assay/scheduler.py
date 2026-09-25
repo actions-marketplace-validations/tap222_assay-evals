@@ -23,7 +23,9 @@ class Scheduler:
         self.engine, self.settings = engine, settings
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._sweeper: Optional[threading.Thread] = None
         self.last: Dict[str, dict] = {}
+        self.last_sweep: Optional[dict] = None
 
     @property
     def enabled(self) -> bool:
@@ -33,6 +35,25 @@ class Scheduler:
         if self.enabled and not self._thread:
             self._thread = threading.Thread(target=self._loop, name="assay-scheduler", daemon=True)
             self._thread.start()
+        if self.settings.evaluate_seconds > 0 and not self._sweeper:
+            self._sweeper = threading.Thread(target=self._sweep_loop, name="assay-lifecycle", daemon=True)
+            self._sweeper.start()
+
+    def sweep(self) -> dict:
+        """Mark quiet agent runs abandoned and evaluate every run that ended (assay/lifecycle.py)."""
+        from assay import lifecycle
+        try:
+            out = lifecycle.sweep(self.engine, self.settings.abandon_minutes)
+            self.last_sweep = {"at": datetime.utcnow().isoformat(), "ok": True, **out}
+        except Exception as exc:
+            log.exception("Lifecycle sweep failed")
+            self.last_sweep = {"at": datetime.utcnow().isoformat(), "ok": False, "error": str(exc)}
+        return self.last_sweep
+
+    def _sweep_loop(self) -> None:
+        while not self._stop.is_set():
+            self.sweep()
+            self._stop.wait(self.settings.evaluate_seconds)
 
     def stop(self) -> None:
         self._stop.set()
@@ -59,7 +80,9 @@ class Scheduler:
     def status(self) -> dict:
         return {"enabled": self.enabled, "every_minutes": self.settings.schedule_minutes,
                 "window_days": self.settings.schedule_window_days,
-                "sources": self.settings.schedule_sources, "last": self.last}
+                "sources": self.settings.schedule_sources, "last": self.last,
+                "lifecycle": {"every_seconds": self.settings.evaluate_seconds,
+                              "abandon_minutes": self.settings.abandon_minutes, "last": self.last_sweep}}
 
 
 def _notifier(engine, source_name, settings):

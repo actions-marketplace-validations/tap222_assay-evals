@@ -82,8 +82,10 @@ def test_a_streamed_run_lands_whole_and_resending_changes_nothing(client):
     assert len(t["steps"]) == 4 and t["answer"] == "Refunded $27.61." and t["status"] == "completed"
     assert t["run_id"] == "nightly" and t["case_id"] == "c17" and t["lineage"] == {"prompt": "p@v5"}
     st = client.get("/v1/connect/status", params={"source": "events:t"}).json()["records"]
+    # eval_results: the check sent, and the trajectory's own checks (finished, efficiency),
+    # made automatically when it ended
     assert (st["trajectories"]["total"], st["feedback"]["total"], st["eval_results"]["total"],
-            st["inputs"]["total"]) == (1, 1, 1, 1)
+            st["inputs"]["total"]) == (1, 1, 3, 1)
     runs = client.get("/v1/evals/runs", params={"source": "events:t"}).json()
     assert runs[0]["lineage"] == {"prompt": "p@v5"}  # checks inherit the run's versions
 

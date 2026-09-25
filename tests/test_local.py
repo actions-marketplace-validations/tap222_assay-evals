@@ -200,3 +200,22 @@ def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_p
     assert local.upload(project, None, "http://assay.test", None, None, http=http) == 0  # again: no doubles
     assert server.get("/v1/agents/runs", params={"source": "events:default"}).json()[0]["trajectories"] == 2
     assert local.upload(project, None, None, None, None, http=http) == 2  # nowhere to send it
+
+
+def test_a_run_the_command_left_open_is_reported_not_skipped(project, capsys):
+    (project / "agent.py").write_text('''
+import os
+import assay_sdk as assay
+assay.init()
+with assay.run("t", test="ok") as run:
+    run.answer("done")
+run = assay.run("t", test="killed").__enter__()
+run.tool("lookup", {"id": 1}, {"ok": True})
+assay.flush()
+os._exit(1)  # killed mid-run: run.end never comes
+''')
+    config(project, f"{sys.executable} agent.py")
+    assert main(["test"]) == 1
+    out = capsys.readouterr().out
+    assert "✗ Finished    1/2" in out and "killed  Finished" in out
+    assert "Never finished after step 0: the command exited first." in out

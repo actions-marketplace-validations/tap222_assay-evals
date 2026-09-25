@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import delete, select
 
-from assay import agents, contracts, failures, ingest, learn, schema, store
+from assay import agents, contracts, failures, ingest, learn, lifecycle, schema, store
 from assay.sources.events import EventsSource
 
 try:
@@ -44,7 +44,7 @@ CONFIG = "assay.toml"
 HOME = ".assay"
 TENANT = "local"
 EXAMPLE = "assay_example.py"
-CHECK_NAMES = {"answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state", "safety": "Safety",
+CHECK_NAMES = {"completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state", "safety": "Safety",
                "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts"}
 PII_EVALUATOR = "assay.pii@1"
 
@@ -271,8 +271,12 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
              pii: Optional[dict] = None) -> Optional[dict]:
     """Check the run and compare it with the baseline. None if the run recorded nothing to check."""
     source = EventsSource(engine, TENANT)
-    if agents.run_trajectories(engine, TENANT, run_id):
-        agents.evaluate_run(engine, source, TENANT, run_id)
+    heads = agents.run_trajectories(engine, TENANT, run_id)
+    if heads:
+        # The command has exited: a run it left open will never end. Say so, instead of skipping it.
+        lifecycle.abandon(engine, tenant=TENANT, ids=[h["trajectory_id"] for h in heads if h["status"] == "running"])
+        lifecycle.evaluate(engine, lifecycle.pending(engine, TENANT, [h["trajectory_id"] for h in heads]),
+                           abandoned_why="the command exited first")
         if pii and pii["check"]:
             check_pii(engine, source, run_id, pii["allow"])
     # "" means no baseline: failures.evaluation would otherwise pick the run before this one.

@@ -369,11 +369,16 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
     status, error = "completed", None
     try:
         yield r
+    except GeneratorExit:
+        # Not from inside a `with` block: the run was dropped without being exited, so how it ended
+        # is unknown. Leave it open; the server marks it abandoned once it goes quiet.
+        status = None
+        raise
     except BaseException as e:
         status, error = "failed", f"{type(e).__name__}: {e}"[:2000]
         raise
     finally:
-        if recorded:
+        if recorded and status:
             c.emit({"type": "run.end", "run_id": rid, "status": status, "error": error})
 
 

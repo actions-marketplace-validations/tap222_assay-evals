@@ -306,6 +306,11 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
         _upsert(conn, engine, store.eval_results, rows["checks"], ["tenant", "result_id"])
         _upsert(conn, engine, store.event_errors, rows["errors"], ["tenant", "error_id"])
         _upsert(conn, engine, store.agent_references, rows["refs"], ["tenant", "case_id"])
+        # Server time of the latest event, per trajectory: when to evaluate again (assay/lifecycle.py).
+        touched = {r["trajectory_id"] for r in rows["heads"]} | {r["trajectory_id"] for r in rows["steps"]}
+        if touched:
+            conn.execute(heads.update().where(and_(heads.c.tenant == tenant, heads.c.trajectory_id.in_(list(touched))))
+                         .values(updated_at=datetime.utcnow()))
         # An answer step is the run's answer unless run.end said otherwise.
         answered = {r["trajectory_id"]: r["text"] for r in sorted(rows["steps"], key=lambda r: r["seq"])
                     if r["kind"] == "answer"}

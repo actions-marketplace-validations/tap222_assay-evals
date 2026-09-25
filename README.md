@@ -177,6 +177,8 @@ Save the printed key. It isn't shown again.
 - `ASSAY_PUBLIC_URL`: the dashboard's address, so alerts and tickets link back to it.
 - `ASSAY_SCHEDULE_MINUTES=60` and `ASSAY_SCHEDULE_SOURCES=events:acme`: recompute every hour.
   On Vercel, use the cron setup under [Deploy](#deploy) instead.
+- `ASSAY_ABANDON_MINUTES=30`: an agent run with no events for this long is marked abandoned
+  and evaluated. `ASSAY_EVALUATE_SECONDS=60`: how often that's checked (0 turns it off).
 
 **5. Hand over the dashboard address and the admin key** to whoever will set up the
 integrations.
@@ -679,14 +681,34 @@ graph, path contracts and shifts apply to tool sequences, Trace shows any run st
 against its reference, and the measures count tool failures and model cost. A document
 pipeline is just an agent with a fixed path.
 
+### When a run is evaluated: when it ends, not on a timer
+
+An agent can take ten seconds or five minutes, so Assay doesn't evaluate after a fixed
+delay. Each run goes through a lifecycle:
+
+- **running:** `run.start` (or its first step) has arrived, and `run.end` hasn't. It isn't
+  judged half-way.
+- **ended:** `run.end` says `completed` or `failed`. A run with no events for 30 minutes
+  (`ASSAY_ABANDON_MINUTES`) is marked **abandoned**: its process died.
+- **evaluated:** in the same request that ended it, once its child runs (`parent_run_id`)
+  have ended too.
+- **evaluated again:** if more events arrive after that, e.g. a late step.
+
+Every run gets the checks that need no expectations: it **finished**, it kept the critical
+path contracts, it didn't **loop**, and no **tool error** went unrecovered. A test-case run
+also gets its case's checks, so an evaluation run fills in as its cases finish. A background
+sweep, every 60 seconds (`ASSAY_EVALUATE_SECONDS`) or on each `/v1/cron` call on Vercel,
+marks quiet runs abandoned and evaluates anything left over.
+
 | Endpoint | Returns |
 |---|---|
+| `GET /v1/agents/lifecycle?source=…` | how many runs are running, awaiting evaluation, evaluated, abandoned or failing, and the latest failures |
 | `POST /v1/events/trajectories` | ingest trajectories (steps inline) |
 | `POST /v1/agents/references`, `GET /v1/agents/references?source=…` | what cases expect |
 | `GET /v1/agents/runs?source=…` | agent runs, newest first |
-| `POST /v1/agents/runs/{run}/evaluate?source=…` | run the five checks, stored as eval results |
+| `POST /v1/agents/runs/{run}/evaluate?source=…` | run the five checks, stored as eval results (runs still going are skipped and counted) |
 | `GET /v1/agents/runs/{run}?source=…` | pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline |
-| `GET /v1/agents/trajectories/{id}?source=…` | one run step by step: divergence, end state, contract breaks, cost |
+| `GET /v1/agents/trajectories/{id}?source=…` | one run step by step: divergence, end state, contract breaks, cost, and its latest evaluation |
 
 ## Failure causes: many failures, a few causes
 
@@ -947,9 +969,11 @@ because Vercel detects the FastAPI `app` in the root `app.py`.
   That's fine for a showcase.
 - **For real use**, set `ASSAY_STORE_URL` to a Postgres URL, for example from Neon in the
   Vercel marketplace. Also set `ASSAY_SOURCE_URL` and `ASSAY_SOURCE_MAPPING`, or use events.
-- **Scheduled runs:** serverless has no background process. Set `CRON_SECRET` and
-  `ASSAY_SCHEDULE_SOURCES`, then add a `vercel.json` with
-  `"crons": [{"path": "/v1/cron", "schedule": "0 6 * * *"}]`.
+- **Scheduled runs:** serverless has no background process. Set `CRON_SECRET` (and
+  `ASSAY_SCHEDULE_SOURCES` for scheduled measures), then add a `vercel.json` with
+  `"crons": [{"path": "/v1/cron", "schedule": "0 6 * * *"}]`. Each call also marks quiet
+  agent runs abandoned and evaluates them. Runs that end are evaluated when they end,
+  without cron.
 - Create keys (`python -m assay keys create …`) or set `ASSAY_ADMIN_KEY` before sharing the URL.
   Until then the server is in open mode.
 
