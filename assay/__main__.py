@@ -61,6 +61,7 @@ def main(argv=None) -> int:
     t.add_argument("--baseline", metavar="RUN", help="Compare with this run instead of the last that passed; "
                                                      "'none' for no baseline")
     t.add_argument("--upload", action="store_true", help="Also send the run to a server (ASSAY_URL, ASSAY_KEY)")
+    t.add_argument("--junit", metavar="PATH", help="Also write JUnit XML, for CI to show each case")
     t.add_argument("command", nargs=argparse.REMAINDER, help="-- <command> (overrides assay.toml)")
     u = sub.add_parser("upload", help="Send a test run (the latest, by default) to an Assay server")
     u.add_argument("run", nargs="?", help="A run id instead of the latest")
@@ -84,7 +85,8 @@ def main(argv=None) -> int:
             return local.accept(root, args.run)
         if args.cmd == "test":
             send = {"url": args.url, "key": args.key, "tenant": args.send_tenant} if args.upload else None
-            return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send)
+            return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,
+                              args.junit)
         made = local.init(root)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
         print("Next: `assay test`. Then point command in assay.toml at your own tests.")

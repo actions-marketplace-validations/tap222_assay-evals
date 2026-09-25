@@ -16,7 +16,8 @@ SDK = str(Path(__file__).resolve().parents[1] / "sdk" / "python")
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ASSAY_URL", raising=False)
-    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([SDK, os.environ.get("PYTHONPATH", "")]))
+    repo = str(Path(__file__).resolve().parents[1])  # the server package, for in-process checks
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([SDK, repo, os.environ.get("PYTHONPATH", "")]))
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.syspath_prepend(SDK)  # `assay test` checks the SDK's version in its own process
     return tmp_path
@@ -42,7 +43,7 @@ def test_the_example_passes_then_a_bad_change_fails_then_the_fix_passes(project,
     assert main(["test"]) == 0
     out = capsys.readouterr().out
     assert "2 cases · 1 attempt each · no baseline yet" in out and "✓ Safety      2/2" in out
-    first = json.loads((project / ".assay" / "state.json").read_text())["baseline"]
+    first = json.loads((project / ".assay" / "state.json").read_text())["last"]
 
     good = (project / local.EXAMPLE).read_text()
     (project / local.EXAMPLE).write_text(good.replace(
@@ -50,12 +51,14 @@ def test_the_example_passes_then_a_bad_change_fails_then_the_fix_passes(project,
         '        run.call("delete_order", lambda order_id: None, order_id=order_id)\n'))
     assert main(["test"]) == 1
     out = capsys.readouterr().out
-    assert f"compared with the baseline, {first}" in out and "⚠ 1 case regressed (4 checks)" in out
+    assert "compared with each case's last passing run (2 of 2 cases have one, from 1 run)" in out
+    assert "⚠ 1 case regressed (4 checks)" in out
     assert "refund_not_delivered" in out and "delete_order never runs" in out and "Failed." in out
-    assert json.loads((project / ".assay" / "state.json").read_text())["baseline"] == first  # a failure isn't one
+    base = json.loads((project / ".assay" / "state.json").read_text())["baseline_cases"]
+    assert set(base.values()) == {first}  # a failing run doesn't become anyone's baseline
 
     (project / local.EXAMPLE).write_text(good)
-    assert main(["test"]) == 0 and "This run is now the baseline." in capsys.readouterr().out
+    assert main(["test"]) == 0 and "Its cases' results are now their baseline." in capsys.readouterr().out
 
 
 EXTRACT = '''
@@ -238,3 +241,114 @@ for case, q, reply in (("c1", "Refund O-17 please", "Refunded $27.61."), ("c2", 
     assert "? 1 result judged on data that doesn't match the trace (not counted)" in out
     assert "c2  helpful  helpful@1  (fail)" in out and "the app answered “It ships tomorrow.”" in out
     assert "✓ helpful     1/1" in out
+
+
+SUBSET = '''
+import os, sys
+import assay_sdk as assay
+assay.init()
+broken = os.environ.get("BROKEN") == "1"
+only = os.environ.get("ONLY")
+for case in ("security", "tools", "extraction"):
+    if only and case != only:
+        continue
+    with assay.run("t", test=case) as run:
+        run.answer("ok")
+    run.check("result", "fail" if broken and case == "extraction" else "pass")
+'''
+
+
+def test_a_subset_run_only_moves_its_own_cases_baseline(project, capsys, monkeypatch):
+    (project / "suite.py").write_text(SUBSET)
+    config(project, f"{sys.executable} suite.py")
+    assert main(["test"]) == 0  # all three pass: each case's baseline
+    full = json.loads((project / ".assay" / "state.json").read_text())["last"]
+    monkeypatch.setenv("ONLY", "security")
+    assert main(["test"]) == 0  # just one case
+    capsys.readouterr()
+    base = json.loads((project / ".assay" / "state.json").read_text())["baseline_cases"]
+    assert base["tools"] == base["extraction"] == full and base["security"] != full
+    monkeypatch.delenv("ONLY")
+    monkeypatch.setenv("BROKEN", "1")
+    assert main(["test"]) == 1  # extraction broke: a regression, not "a new case"
+    out = capsys.readouterr().out
+    assert "3 of 3 cases have one, from 2 runs" in out and "⚠ 1 case regressed" in out
+
+
+def test_an_old_whole_run_baseline_becomes_per_case(project, capsys):
+    (project / "suite.py").write_text(SUBSET)
+    config(project, f"{sys.executable} suite.py")
+    main(["test"])
+    state_file = project / ".assay" / "state.json"
+    state = json.loads(state_file.read_text())
+    state_file.write_text(json.dumps({"last": state["last"], "baseline": state["last"]}))  # the old shape
+    capsys.readouterr()
+    assert main(["test"]) == 0
+    assert "3 of 3 cases have one" in capsys.readouterr().out
+    assert "baseline" not in json.loads(state_file.read_text())
+
+
+PYTEST_AGENT = '''
+from assay_sdk.testing import assert_called, assert_not_called, assert_called_before, assert_max_steps, \
+    assert_answer_contains, assert_no_pii
+
+def agent(run, order_id, bad=False):
+    run.call("get_order", lambda order_id: {"price": 5}, order_id=order_id)
+    if bad:
+        run.call("delete_order", lambda order_id: None, order_id=order_id)
+    run.answer("Refunded $5.00.")
+
+def test_good(assay_case):
+    agent(assay_case, "O-1")
+    assert_called(assay_case, "get_order", order_id="O-1")
+    assert_not_called(assay_case, "delete_order")
+    assert_called_before(assay_case, "get_order", "refund")
+    assert_max_steps(assay_case, 2)
+    assert_answer_contains(assay_case, "refunded")
+    assert_no_pii(assay_case)
+
+def test_breaks_a_contract(assay_case):   # its own asserts pass; Assay's checks don't
+    agent(assay_case, "O-2", bad=True)
+
+def test_helper(assay_case):
+    agent(assay_case, "O-3")
+    assert_called(assay_case, "get_order", order_id="O-9")
+'''
+
+
+def test_plain_pytest_fails_a_test_whose_run_fails_assays_checks(project):
+    import subprocess
+    (project / "test_agent.py").write_text(PYTEST_AGENT)
+    (project / "assay.toml").write_text('[[contracts]]\nkind = "never"\nstep = "delete_order"\n')
+    pytest_cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "assay_sdk.pytest_plugin",
+                  "test_agent.py"]
+    out = subprocess.run(pytest_cmd, capture_output=True, text=True, cwd=project).stdout
+    assert "2 failed, 1 passed" in out
+    assert "The run failed Assay's checks:" in out
+    assert "Answer, Tool usage, Safety: Unsafe action: Broke “delete_order never runs”" not in out  # no answer ref
+    assert "Safety: Unsafe action: Broke “delete_order never runs”: ran delete_order (step 2" in out
+    assert "Expected a call to get_order(order_id='O-9'); get_order was called with get_order(order_id='O-3')" in out
+    assert "testing.py" not in out  # the helper's frames are hidden: the failure points at the test
+
+    (project / "assay.toml").write_text('[[contracts]]\nkind = "never"\nstep = "delete_order"\n'
+                                        '[pytest]\nchecks = false\n')
+    out = subprocess.run(pytest_cmd, capture_output=True, text=True, cwd=project).stdout
+    assert "1 failed, 2 passed" in out  # only the test's own assert
+
+
+def test_report_by_test_file_and_junit(project, capsys):
+    import xml.etree.ElementTree as ET
+    (project / "tests").mkdir()
+    (project / "tests" / "test_agent.py").write_text(PYTEST_AGENT)
+    (project / "tests" / "test_other.py").write_text("def test_ok(assay_case):\n    assay_case.answer('fine')\n")
+    config(project, f"{sys.executable} -m pytest -q -p no:cacheprovider -p assay_sdk.pytest_plugin tests",
+           contracts='[[contracts]]\nkind = "never"\nstep = "delete_order"\n')
+    assert main(["test", "--junit", "out.xml"]) == 1
+    out = capsys.readouterr().out
+    assert "✗ tests/test_agent.py  1/3" in out and "✓ tests/test_other.py  1/1" in out
+    suite = ET.parse(project / "out.xml").getroot()
+    assert (suite.get("tests"), suite.get("failures"), suite.get("skipped")) == ("4", "2", "0")
+    bad = {tc.get("name"): tc.find("failure").get("message") for tc in suite if tc.find("failure") is not None}
+    assert set(bad) == {"test_breaks_a_contract", "test_helper"}
+    assert bad["test_breaks_a_contract"].startswith("Safety: Unsafe action")  # not also "Your asserts"
+    assert suite[0].get("classname") == "tests.test_agent"

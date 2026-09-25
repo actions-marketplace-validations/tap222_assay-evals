@@ -154,7 +154,56 @@ def load_config(root: Path) -> dict:
             raise SetupError(f"{CONFIG}, [pii] allow.{tool}: a list of kinds from {', '.join(learn.PII)}.")
     return {"command": test.get("command"), "repeat": int(test.get("repeat", 1)),
             "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
-            "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()}}}
+            "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()}},
+            "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))}}
+
+
+DEFAULT_CONFIG = {"contracts": [], "pii": {"check": True, "allow": {}}, "pytest": {"checks": True}}
+
+
+def find_config(start: Path) -> dict:
+    """assay.toml from `start` or the nearest folder above it; the defaults without one."""
+    for folder in (start, *start.parents):
+        if (folder / CONFIG).exists():
+            return load_config(folder)
+    return DEFAULT_CONFIG
+
+
+def as_trajectory(steps: List[dict], answer: Optional[str]) -> dict:
+    """SDK steps (assay_sdk.Run.steps) in the shape the checks read (assay/agents.py)."""
+    out = []
+    for s in steps:
+        kind = "reason" if s["kind"] == "llm" else s["kind"]
+        state = s["kind"] == "state"
+        out.append({"seq": s["seq"], "kind": kind, "name": s.get("name"), "parent_seq": s.get("parent_seq"),
+                    "args": {"op": s.get("op") or "update"} if state else s.get("args"),
+                    "result": s.get("value") if state else s.get("result"), "error": s.get("error"),
+                    "text": s.get("text"), "model": s.get("model"),
+                    "tokens": (s.get("tokens_in") or 0) + (s.get("tokens_out") or 0) or None,
+                    "cost_usd": s.get("cost_usd"), "started_at": None, "finished_at": None})
+    return {"steps": out, "answer": answer, "task": None, "status": "completed",
+            "started_at": None, "finished_at": None}
+
+
+def check_run(steps: List[dict], expected: Optional[dict], answer: Optional[str], cfg: dict) -> List[str]:
+    """The checks `assay test` makes, on one run held in memory: its case's expectations, the
+    contracts, PII and loops. What failed, as "Check: why" lines."""
+    traj = as_trajectory(steps, answer)
+    ref = None
+    if expected:
+        ref = {"calls": expected.get("calls") or [], "answer": expected.get("answer"),
+               "answer_match": expected.get("answer_match") or "contains", "state": expected.get("state") or [],
+               "allow_extra": expected.get("allow_extra") or [], "max_steps": expected.get("max_steps")}
+    rules = [{"severity": "critical", **c} for c in cfg["contracts"]]
+    by_reason: Dict[str, List[str]] = {}  # one line per reason: several checks often share one
+    for c in agents.checks_for(traj, ref, rules):
+        if c["status"] == "fail":
+            by_reason.setdefault(c["reason"], []).append(CHECK_NAMES.get(c["field"], c["field"]))
+    if cfg["pii"]["check"]:
+        found = pii_findings(traj, cfg["pii"]["allow"])
+        if found:
+            by_reason[f"Personal data in tool arguments: {'; '.join(found)}"] = ["PII"]
+    return [f"{', '.join(checks)}: {why}" for why, checks in by_reason.items()]
 
 
 class SetupError(Exception):
@@ -246,6 +295,26 @@ def pii_findings(traj: dict, allow: Dict[str, set]) -> List[str]:
     return out
 
 
+BASELINE = "baseline"  # the per-case baseline, kept as an evaluation run of its own
+
+
+def promote(engine, run_id: str) -> List[str]:
+    """Make this run each of its cases' baseline: its results replace those cases' results in the
+    baseline, and only theirs, so running a subset leaves every other case's baseline alone."""
+    t = store.eval_results
+    rows = _rows(engine, run_id)
+    cases = sorted({r.case_id for r in rows})
+    copies = [{**dict(r._mapping), "run_id": BASELINE, "result_id": ingest._derive(BASELINE, r.result_id)}
+              for r in rows]
+    with engine.begin() as conn:
+        for i in range(0, len(cases), 500):
+            conn.execute(t.delete().where((t.c.tenant == TENANT) & (t.c.run_id == BASELINE)
+                                          & t.c.case_id.in_(cases[i:i + 500])))
+        if copies:
+            conn.execute(t.insert(), copies)
+    return cases
+
+
 def check_pii(engine, source, run_id: str, allow: Dict[str, set]) -> None:
     """One PII result per agent run, stored like the trajectory checks."""
     heads = agents.run_trajectories(engine, TENANT, run_id)
@@ -286,6 +355,8 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
     # Results whose evaluator was given the wrong data (assay/audit.py) say nothing about the AI:
     # they're listed on their own and left out of every count below.
     rows, base_rows = _rows(engine, run_id), _rows(engine, baseline) if baseline else []
+    ran = {r.case_id for r in rows}
+    base_rows = [r for r in base_rows if r.case_id in ran]  # a subset is compared on its own cases
     found = audit.audit_rows(engine, TENANT, rows)
     rows = [r for r in rows if r.result_id not in found]
     base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, TENANT, base_rows)]
@@ -436,14 +507,80 @@ def _explain(ps: List[dict], fails: dict, repeat: int) -> List[str]:
     return lines
 
 
-def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, codes: List[int]) -> Tuple[str, bool]:
+def case_states(result: dict, c: dict) -> Dict[str, str]:
+    """Per case: failed (a problem: fails the run), known (failing, but flaky or failing in the
+    baseline too), or passed."""
+    problems = {p["case_id"] for p in c["problems"]}
+    out = {}
+    for (case, _), a in result["attempts"].items():
+        state = "failed" if case in problems else "known" if not all(a) else "passed"
+        prev = out.get(case, "passed")
+        out[case] = state if ["passed", "known", "failed"].index(state) > ["passed", "known", "failed"].index(prev) \
+            else prev
+    return out
+
+
+def _file(case: str) -> Optional[str]:
+    return case.split("::")[0] if "::" in case else None  # a pytest test id: tests/test_x.py::test_y
+
+
+def files_block(states: Dict[str, str]) -> List[str]:
+    """Per test file, for pytest suites: how many of its tests passed."""
+    by_file: Dict[str, List[str]] = defaultdict(list)
+    for case, st in states.items():
+        if _file(case):
+            by_file[_file(case)].append(st)
+    if not by_file:
+        return []
+    width = max(len(f) for f in by_file)
+    out = []
+    for f, sts in sorted(by_file.items()):
+        mark = _paint("✗", "red") if "failed" in sts else _paint("~", "yellow") if "known" in sts else \
+            _paint("✓", "green")
+        out.append(f"{mark} {f:<{width}}  {sts.count('passed')}/{len(sts)}")
+    return out + [""]
+
+
+def _reason(f: dict) -> str:
+    return f["reason"] or f"expected {f['expected']}, got {f['actual']}"
+
+
+def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
+    """JUnit XML, so CI shows each case: a problem is a failure, a known failure is skipped, flaky
+    cases pass with a note."""
+    import xml.etree.ElementTree as ET
+    states, fails = case_states(result, c), result["failing"]
+    flaky = {p["case_id"] for p in c["flaky"]}
+    suite = ET.Element("testsuite", name=f"assay {run_id}", tests=str(len(states)),
+                       failures=str(sum(1 for v in states.values() if v == "failed")),
+                       skipped=str(sum(1 for v in states.values() if v == "known")))
+    for case, st in sorted(states.items()):
+        f = _file(case)
+        tc = ET.SubElement(suite, "testcase", classname=f.replace("/", ".").removesuffix(".py") if f else "assay",
+                           name=case.split("::", 1)[1] if f else case)
+        grouped: Dict[str, List[str]] = {}
+        for k, v in fails.items():
+            if k[0] == case:
+                grouped.setdefault(_reason(v), []).append(_label(k[1]))
+        why = [f"{', '.join(labels)}: {r}" for r, labels in grouped.items()]
+        if st == "failed":
+            ET.SubElement(tc, "failure", message=(why or ["failed"])[0][:500]).text = "\n".join(why)
+        elif st == "known":
+            ET.SubElement(tc, "skipped", message=("flaky: passes some attempts, as before" if case in flaky else
+                                                  "failing in the baseline too") + (f": {why[0]}"[:500] if why else ""))
+    ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
+
+
+def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, codes: List[int],
+           against: Optional[str] = None) -> Tuple[str, bool]:
     passed, c = verdict(result, bool(baseline))
     st, fails, fields = result["stability"], result["failing"], result["fields"]
     cases = len({case for case, _ in result["attempts"]})
     out = [_paint("Assay test", "bold") + f"  {run_id}", "─" * 44]
-    against = f"compared with the baseline, {baseline}" if baseline else \
+    against = (against or f"compared with the baseline, {baseline}") if baseline else \
         "no baseline yet: every failing check counts"
     out += [f"{_n(cases, 'case')} · {_n(repeat, 'attempt')} each · {against}", ""]
+    out += files_block(case_states(result, c))
     width = max((len(f["label"]) for f in fields), default=0)
     for f in fields:
         mark = _paint("✓", "green") if f["passed"] == f["total"] else _paint("✗", "red")
@@ -494,7 +631,7 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     if any(codes):
         out.append(_paint(f"Your command exited with {', '.join(str(x) for x in codes if x)}.", "yellow"))
     out.append(_paint("Passed." if passed else "Failed.", "green" if passed else "red") +
-               (" This run is now the baseline." if passed else ""))
+               (" Its cases' results are now their baseline." if passed else ""))
     return "\n".join(out), passed
 
 
@@ -515,7 +652,7 @@ def sdk_problem() -> Optional[str]:
 
 
 def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Optional[str],
-         send: Optional[dict] = None) -> int:
+         send: Optional[dict] = None, junit: Optional[str] = None) -> int:
     """`assay test`. Prints the report; returns the exit code."""
     try:
         cfg = load_config(root)
@@ -534,12 +671,13 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     repeat = repeat or cfg["repeat"]
     home = ensure_home(root)
     (home / "runs").mkdir(exist_ok=True)
-    state = _state(home)
-    if baseline is None:
-        baseline = state.get("baseline")
-    elif baseline == "none":
-        baseline = None
     engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
+    state = _migrate(engine, home, _state(home))
+    explicit = baseline not in (None, "none")
+    if baseline == "none":
+        baseline = None
+    elif baseline is None:
+        baseline = BASELINE if state.get("baseline_cases") else None
     sync_contracts(engine, cfg["contracts"])
 
     run_id = datetime.now().strftime("t-%Y%m%d-%H%M%S-%f")[:-3]
@@ -558,9 +696,22 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
         print("\nNothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "
               "should do with assay.expect(), or send results with assay.check().", file=sys.stderr)
         return 2
-    text, passed = report(run_id, baseline, result, repeat, codes)
+    ran = {case for case, _ in result["attempts"]}
+    known = {c: r for c, r in (state.get("baseline_cases") or {}).items() if c in ran}
+    if baseline == BASELINE and not known:
+        baseline = None  # none of these cases has a baseline yet
+        result = evaluate(engine, run_id, None, cfg["tolerance"], cfg["pii"])
+    against = None if baseline is None else f"compared with the baseline, {baseline}" if explicit else \
+        (f"compared with each case's last passing run ({len(known)} of {len(ran)} cases have one, from "
+         f"{_n(len(set(known.values())), 'run')})")
+    text, passed = report(run_id, baseline, result, repeat, codes, against)
     print("\n" + text)
-    _save_state(home, {**state, "last": run_id, **({"baseline": run_id} if passed else {})})
+    if junit:
+        write_junit(junit, run_id, result, verdict(result, bool(baseline))[1])
+    state["last"] = run_id
+    if passed:
+        state["baseline_cases"] = {**(state.get("baseline_cases") or {}), **{c: run_id for c in promote(engine, run_id)}}
+    _save_state(home, state)
     code = 0 if passed else 1
     if send is not None:
         print()
@@ -569,10 +720,24 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     return code
 
 
+def _migrate(engine, home: Path, state: dict) -> dict:
+    """A whole-run baseline (before per-case baselines) becomes each of its cases' baseline."""
+    if state.get("baseline") and "baseline_cases" not in state:
+        run = state.pop("baseline")
+        state["baseline_cases"] = {c: run for c in promote(engine, run)}
+        _save_state(home, state)
+    return state
+
+
 def accept(root: Path, run_id: Optional[str]) -> int:
-    """`assay accept`: make a run (the latest, by default) the baseline, failures and all."""
+    """`assay accept`: make a run (the latest, by default) the baseline of each of its cases,
+    failures and all."""
     home = root / HOME
-    state = _state(home)
+    if not (home / "assay.db").exists():
+        print("No test run yet. Run `assay test` first.", file=sys.stderr)
+        return 2
+    engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
+    state = _migrate(engine, home, _state(home))
     run_id = run_id or state.get("last")
     if not run_id:
         print("No test run yet. Run `assay test` first.", file=sys.stderr)
@@ -580,8 +745,11 @@ def accept(root: Path, run_id: Optional[str]) -> int:
     if not (home / "runs" / f"{run_id}.jsonl").exists():
         print(f"No run {run_id} in {home / 'runs'}.", file=sys.stderr)
         return 2
-    _save_state(home, {**state, "baseline": run_id})
-    print(f"{run_id} is now the baseline. `assay test` fails only on what gets worse than it.")
+    cases = promote(engine, run_id)
+    state["baseline_cases"] = {**(state.get("baseline_cases") or {}), **{c: run_id for c in cases}}
+    _save_state(home, state)
+    print(f"{run_id} is now the baseline of its {_n(len(cases), 'case')}. `assay test` fails only on what "
+          "gets worse than it.")
     return 0
 
 

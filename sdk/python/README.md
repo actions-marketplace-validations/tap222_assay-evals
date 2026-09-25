@@ -100,6 +100,19 @@ The fixture wraps the test in `assay.run(<test name>, test=<test id>)`. It also 
 test's own outcome as a check on the field `pytest`, so failing asserts count too. Tests
 that don't take the fixture are left alone.
 
+With [`assay-server`](https://pypi.org/project/assay-server/) installed, the test also fails
+when its run fails Assay's checks: its `expect(...)`, and the contracts and PII rules in
+`assay.toml`. So plain `pytest` goes red on an unsafe tool call:
+
+```
+The run failed Assay's checks:
+  Safety: Unsafe action: Broke “delete_order never runs”: ran delete_order (step 2, order_id='O-2').
+```
+
+For the test body, `assay_sdk.testing` has `assert_called(run, tool, **args)`,
+`assert_not_called`, `assert_called_before(run, first, then)`, `assert_max_steps(run, n)`,
+`assert_answer_contains` and `assert_no_pii`. Each fails with what the run actually did.
+
 To test with it, `assay test` (in `assay-server`) runs your code with the SDK recording,
 checks each run against its `assay.expect(...)`, and compares with the last run that passed.
 See [Test your AI app locally](https://github.com/tap222/docai-eval#test-your-ai-app-locally-no-server-no-account).

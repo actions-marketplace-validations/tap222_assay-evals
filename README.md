@@ -105,15 +105,26 @@ Failed.
 ```
 
 - **Your tests:** with pytest, take the `assay_case` fixture (it comes with `assay-evals`)
-  and set `command = "pytest -q tests/ai"`. Each test is then a case, and its own asserts
-  count too:
+  and set `command = "pytest -q tests/ai"`. Each test is then a case, and pytest's own
+  pass/fail is the answer. With `assay-server` installed, a test also fails when its run
+  fails Assay's checks: its expectations, and the contracts and PII rules in `assay.toml`.
+  So `pytest` alone goes red on an unsafe tool call, with the reason (`[pytest] checks =
+  false` turns that off). `assay_sdk.testing` has assertions for the test body:
 
   ```python
+  from assay_sdk.testing import assert_called, assert_not_called, assert_max_steps
+
   def test_refund(assay_case):
-      assay_case.expect(calls=[{"tool": "get_order", "args": {"order_id": "O-17"}}], max_steps=4)
       reply = my_agent("Refund O-17", run=assay_case)   # records steps: run.call, run.answer, ...
+      assert_called(assay_case, "get_order", order_id="O-17")
+      assert_not_called(assay_case, "delete_order")
+      assert_max_steps(assay_case, 6)
       assert "27.61" in reply
   ```
+
+  They fail with what the run did, e.g. "Expected a call to get_order(order_id='O-17');
+  get_order was called with get_order(order_id='O-18')". There are also
+  `assert_called_before`, `assert_answer_contains` and `assert_no_pii`.
 
   Without pytest, record each case with `assay.run(..., test="<case>")` and
   `run.expect(...)`. For pipelines, send field results with
@@ -123,9 +134,13 @@ Failed.
 - **PII:** personal data (email, card, IBAN, SSN, phone) in a tool's arguments fails the PII
   check. A tool that needs it is allowed it in `assay.toml`, under `[pii]`:
   `allow = { send_receipt = ["email"] }`.
-- **Baseline:** the last run that passed. A failing run never becomes the baseline. If your
-  suite has known failures, `assay accept` makes the latest run the baseline, and later
-  runs then fail only on what got worse.
+- **Baseline:** kept per case: each case's last passing run. A failing run never becomes
+  a baseline, and running a subset (`assay test -- pytest tests/ai/test_security.py`) only
+  moves the baselines of the cases it ran. If your suite has known failures, `assay accept`
+  makes the latest run their baseline, and later runs then fail only on what got worse.
+- **Report:** with pytest, the report opens with each test file (`✗ tests/ai/test_tools.py
+  9/10`), then each check. `assay test --junit report.xml` writes JUnit XML for CI: a
+  regression is a failure, a known failure is skipped, and a flaky test passes.
 - **Flakiness:** `repeat = 3` (or `assay test --repeat 3`) runs each case several times. A
   check that varied the same way before is reported as flaky and doesn't block. A drop that
   could be chance says so.

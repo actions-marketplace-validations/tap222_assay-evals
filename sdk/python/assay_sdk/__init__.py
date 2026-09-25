@@ -256,6 +256,8 @@ class Run:
         self._seq, self._lock, self._parents = 0, threading.Lock(), []
         self.answer_text: Optional[str] = None
         self.test: Optional[Dict[str, Any]] = None  # {"run", "case", "attempt"} for a test-case run
+        self.steps: List[Dict[str, Any]] = []  # what was recorded, in order: for assertions (assay_sdk.testing)
+        self.expected: Optional[Dict[str, Any]] = None  # what run.expect() said
 
     def _case(self) -> Dict[str, Any]:
         if not self.test:
@@ -265,6 +267,7 @@ class Run:
     def expect(self, **kwargs) -> None:
         """assay.expect() for this run's test case: calls=, answer=, state=, allow_extra=, max_steps=."""
         expect(self._case()["case"], **kwargs)
+        self.expected = kwargs
 
     def check(self, field: str, status: str, **kwargs) -> None:
         """assay.check() for this run's test case, e.g. run.check("total", "fail", expected=..., actual=...)."""
@@ -275,9 +278,10 @@ class Run:
         with self._lock:
             seq, self._seq = self._seq, self._seq + 1
             parent = self._parents[-1] if self._parents else None
+        step = {"seq": seq, "kind": kind, "parent_seq": parent, "ts": _ts(started) or _now(), **fields}
+        self.steps.append(step)
         if self._on:
-            self._c.emit({"type": "step", "run_id": self.id, "seq": seq, "kind": kind, "parent_seq": parent,
-                          "ts": _ts(started) or _now(), **fields})
+            self._c.emit({"type": "step", "run_id": self.id, **step})
         return seq
 
     def llm(self, model: Optional[str] = None, tokens_in: Optional[int] = None, tokens_out: Optional[int] = None,
