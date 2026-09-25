@@ -50,7 +50,8 @@ def test_the_example_passes_then_a_bad_change_fails_then_the_fix_passes(project,
     init_pytest_example(project)
     assert main(["test"]) == 0
     out = capsys.readouterr().out
-    assert "2 cases · 1 attempt each · no baseline yet" in out and "✓ Safety        2/2" in out
+    assert "2 cases · 1 attempt each · no baseline yet" in out
+    assert any(line.startswith("✓ Safety") and line.endswith(" 2/2") for line in out.splitlines())
     assert "✓ tests/ai/test_support.py  2/2" in out
     first = json.loads((project / ".assay" / "state.json").read_text())["last"]
 
@@ -407,3 +408,46 @@ def test_pytest_assay_without_the_server_says_what_to_install(project):
     out = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "assay_sdk.pytest_plugin", "--assay",
                           "test_x.py"], capture_output=True, text=True, cwd=project, env=env)
     assert out.returncode == 4 and "pip install assay-server" in out.stderr + out.stdout
+
+
+BEHAVIOR = '''
+import os
+V2 = os.environ.get("PROMPT") == "v2"
+
+def test_refund(assay_case):
+    assay_case.llm(model="m", tokens_in=9000 if V2 else 1200, cost_usd=0.012 if V2 else 0.004,
+                   tools=[f"t{i}" for i in range(30 if V2 else 8)])
+    assay_case.approval("refund", "rejected" if V2 else "approved", by="policy")
+    assay_case.answer("ok")
+    assay_case.outcome("unresolved" if V2 else "resolved")
+'''
+
+
+def test_behavior_that_got_worse_fails_the_session(project, monkeypatch):
+    import subprocess
+    (project / "tests").mkdir()
+    (project / "tests" / "test_b.py").write_text(BEHAVIOR)
+    for k in ("ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "PROMPT"):
+        monkeypatch.delenv(k, raising=False)
+    run = lambda: subprocess.run([*PYTEST.split(), "--assay", "tests"], capture_output=True, text=True, cwd=project)
+    assert run().returncode == 0
+    monkeypatch.setenv("PROMPT", "v2")
+    out = run()
+    assert out.returncode == 1 and "1 passed" in out.stdout  # its own asserts pass; its behavior doesn't
+    assert "⚠ 1 case behaved worse than their baseline" in out.stdout
+    for line in ("Cost: $0.0040 → $0.0120 (3.0×)", "Context: 1,200 tokens → 9,000 tokens (7.5×)",
+                 "Tools exposed: 8 tools → 30 tools (3.8×)", "Outcome: resolved → unresolved",
+                 "Approval for refund: approved → rejected"):
+        assert line in out.stdout
+    assert "✗ tests/test_b.py  0/1" in out.stdout
+
+    (project / "assay.toml").write_text("[behavior]\nfail = false\n")
+    out = run()
+    assert out.returncode == 0 and "(not failing: [behavior] fail = false)" in out.stdout
+    (project / "assay.toml").write_text("[behavior]\ncost = 2\n")
+    assert "unknown cost" in run().stdout + run().stderr
+
+
+def test_the_defaults_without_assay_toml_have_every_setting(tmp_path):
+    (tmp_path / "assay.toml").write_text("")
+    assert set(local.DEFAULT_CONFIG) == set(local.load_config(tmp_path))  # else pytest --assay without one breaks

@@ -150,13 +150,23 @@ def pytest_terminal_summary(terminalreporter, config):
 def pytest_runtest_call(item):
     out = yield  # a failing test raises here, and fails as it would anyway
     run = getattr(item, "_assay_run", None)
-    cfg = _config(item.config) if run is not None else None
+    if run is None:
+        return out
+    problems = []
+    for e in run.expectations:  # expect(run): checked now that the test body is done
+        if not e.verified:
+            problems += e.failures()
+            try:
+                e.verify()
+            except AssertionError:
+                pass
+    cfg = _config(item.config)
     if cfg and cfg["pytest"]["checks"]:
         from assay import local
-        problems = local.check_run(run.steps, run.expected, run.answer_text, cfg)
-        if problems:
-            item._assay_checks_failed = True  # the test's own asserts passed: record them as such
-            pytest.fail("The run failed Assay's checks:\n  " + "\n  ".join(problems), pytrace=False)
+        problems += local.check_run(run.steps, run.expected, run.answer_text, cfg)
+    if problems:
+        item._assay_checks_failed = True  # the test's own asserts passed: record them as such
+        pytest.fail("The run failed Assay's checks:\n  " + "\n  ".join(problems), pytrace=False)
     return out
 
 

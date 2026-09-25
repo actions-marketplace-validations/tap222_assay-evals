@@ -11,6 +11,8 @@ rules someone agreed to:
 - only_after     step, other     step runs only once other has run
 - max_runs       step, max_runs  at most this many runs of step per document (retries)
 - allowed_steps  steps           nothing outside this list runs
+- requires_approval  step        step runs only once it's approved (an approval step for it
+                                 whose decision is "approved"; a later rejection takes it back)
 
 A contract can be scoped with `when` (the document must match every listed
 attribute) and `unless` (a document matching any listed attribute is exempt),
@@ -51,7 +53,9 @@ KINDS = {
     "only_after": (("step", "other"), "{step} runs only after {other}"),
     "max_runs": (("step", "max_runs"), "{step} runs at most {max_runs}× per document"),
     "allowed_steps": (("steps",), "Only these steps run: {steps}"),
+    "requires_approval": (("step",), "{step} runs only once it's approved"),
 }
+APPROVAL = "approval:"  # an approval in a path: approval:<action>, its decision in the args
 SEVERITIES = ("critical", "warning")
 
 
@@ -217,9 +221,18 @@ def breaks(c: dict, path: List[str], finished: bool = True) -> Optional[dict]:
                         "detail": f"ran {step} {len(worst)} times with the same arguments ({a}; limit {limit})"}
         elif len(hits) > limit:
             return {"stage": step, "at": hits[limit], "detail": f"ran {step} {len(hits)} times (limit {limit})"}
+    elif kind == "requires_approval":
+        decision = None
+        for i, s in enumerate(path):
+            if s == APPROVAL + step:
+                decision = _args(s).get("decision")
+            elif i in hits and decision != "approved":
+                why = "without an approval" if decision is None else f"after it was {decision}, not approved"
+                a = _args_text(_args(s))
+                return {"stage": step, "at": i, "detail": f"ran {step} (step {i + 1}{', ' + a if a else ''}) {why}"}
     elif kind == "allowed_steps":
         allowed = set(c["steps"])
-        extra = [(i, s) for i, s in enumerate(path) if s not in allowed]
+        extra = [(i, s) for i, s in enumerate(path) if s not in allowed and not s.startswith(APPROVAL)]
         if extra:
             names = list(dict.fromkeys(s for _, s in extra))
             return {"stage": names[0], "at": extra[0][0], "detail": f"ran {', '.join(names)}, not an allowed step"}

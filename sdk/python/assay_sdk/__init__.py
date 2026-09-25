@@ -202,6 +202,18 @@ def _file_transport(path: str) -> Callable[[List[dict]], None]:
     return write
 
 
+def _tool_names(tools: Optional[List[Any]]) -> Optional[List[str]]:
+    """Names from what a model is given: "get_order", {"name": ...}, or {"function": {"name": ...}}."""
+    if tools is None:
+        return None
+    out = []
+    for t in tools:
+        if isinstance(t, dict):
+            t = t.get("name") or (t.get("function") or {}).get("name")
+        out.append(str(t)[:128])
+    return out
+
+
 def _test(test: Any) -> Optional[Dict[str, Any]]:
     """test="case-17" or {"case": ...}; `assay test` fills in the run and the attempt."""
     if test is None:
@@ -258,6 +270,9 @@ class Run:
         self.test: Optional[Dict[str, Any]] = None  # {"run", "case", "attempt"} for a test-case run
         self.steps: List[Dict[str, Any]] = []  # what was recorded, in order: for assertions (assay_sdk.testing)
         self.expected: Optional[Dict[str, Any]] = None  # what run.expect() said
+        self.outcome_value: Optional[str] = None  # run.outcome()
+        self.started, self.ended = time.monotonic(), None  # for the run's latency
+        self.expectations: List[Any] = []  # assay_sdk.testing.expect(run): checked when the test ends
 
     def _case(self) -> Dict[str, Any]:
         if not self.test:
@@ -286,11 +301,23 @@ class Run:
 
     def llm(self, model: Optional[str] = None, tokens_in: Optional[int] = None, tokens_out: Optional[int] = None,
             cost_usd: Optional[float] = None, prompt: Optional[str] = None, text: Optional[str] = None,
-            started: Optional[datetime] = None, ended: Optional[datetime] = None, error: Optional[str] = None) -> None:
-        """A model call. prompt is "id@version"; text is the output (or a summary of it)."""
+            started: Optional[datetime] = None, ended: Optional[datetime] = None, error: Optional[str] = None,
+            tools: Optional[List[Any]] = None) -> None:
+        """A model call. prompt is "id@version"; text is the output (or a summary of it); tools are the
+        tools the model was offered (names, or the tool definitions you passed the model)."""
         self._step("llm", started, model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
                    prompt=prompt, text=self._c.clean(text), ended_at=_ts(ended),
-                   status="error" if error else "ok", error=error)
+                   status="error" if error else "ok", error=error, tools=_tool_names(tools))
+
+    def approval(self, action: str, decision: str = "approved", by: Optional[str] = None,
+                 reason: Optional[str] = None) -> None:
+        """A decision to allow an action, e.g. approval("refund", "approved", by="manager"). decision:
+        approved, rejected or pending. Contracts (requires_approval) and expect(run) check it."""
+        self._step("approval", name=action, decision=decision, by=by, text=self._c.clean(reason))
+
+    def outcome(self, value: str) -> None:
+        """Whether the run did what was asked: resolved, unresolved, or escalated (handed to a person)."""
+        self.outcome_value = value
 
     def tool(self, name: str, args: Optional[Dict[str, Any]] = None, result: Any = None, error: Optional[str] = None,
              started: Optional[datetime] = None, ended: Optional[datetime] = None) -> None:
@@ -382,8 +409,9 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
         status, error = "failed", f"{type(e).__name__}: {e}"[:2000]
         raise
     finally:
+        r.ended = time.monotonic()
         if recorded and status:
-            c.emit({"type": "run.end", "run_id": rid, "status": status, "error": error})
+            c.emit({"type": "run.end", "run_id": rid, "status": status, "error": error, "outcome": r.outcome_value})
 
 
 def feedback(run_id: str, kind: str, note: Optional[str] = None) -> None:

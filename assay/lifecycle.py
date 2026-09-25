@@ -28,7 +28,7 @@ from typing import Dict, Iterable, List, Optional
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.engine import Engine
 
-from assay import agents, contracts, ingest, store
+from assay import agents, behavior, contracts, ingest, store
 from assay.sources.events import EventsSource
 
 log = logging.getLogger(__name__)
@@ -119,6 +119,14 @@ def _checks_for_run(tenant: str, h: dict, traj: dict, rules: List[dict], refs: d
     return found, agents.result_rows(tenant, h["run_id"], h, case)
 
 
+def metric_row(tenant: str, h: dict, traj: dict) -> dict:
+    """A test-case run's behavior (assay/behavior.py), stored like its results so baselines carry it."""
+    case = h["case_id"] or h["trajectory_id"]
+    return {"tenant": tenant, "metric_id": ingest._derive(h["run_id"], case, h["attempt"]), "run_id": h["run_id"],
+            "case_id": case, "attempt": h["attempt"], "trajectory_id": h["trajectory_id"],
+            "metrics": behavior.measure(traj)}
+
+
 def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON_MINUTES,
              abandoned_why: Optional[str] = None) -> int:
     """Evaluate these ended runs and store the results. Returns how many were evaluated."""
@@ -138,7 +146,7 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
         for tid, traj in trajs.items():
             traj["error"] = errors.get(tid)
         refs = agents.references(engine, tenant, {h["case_id"] for h in hs if h["case_id"]})
-        checks, results = [], []
+        checks, results, metrics = [], [], []
         for h in hs:
             traj = trajs.get(h["trajectory_id"])
             if traj is None:
@@ -150,10 +158,13 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
                 found, case_rows = [{"check": "evaluation", "status": "error",
                                      "reason": f"{type(exc).__name__}: {exc}"[:500]}], []
             results += case_rows
+            if h["run_id"]:
+                metrics.append(metric_row(tenant, h, traj))
             checks.append({"tenant": tenant, "trajectory_id": h["trajectory_id"], "evaluated_at": now,
                            "status": h["status"], "checks": found,
                            "failed": sum(1 for c in found if c["status"] == "fail")})
         ingest.upsert(engine, store.eval_results, results, "result_id")
+        ingest.upsert(engine, store.run_metrics, metrics, "metric_id")
         with engine.begin() as conn:
             for row in checks:
                 conn.execute(store.run_checks.delete().where(and_(store.run_checks.c.tenant == row["tenant"],

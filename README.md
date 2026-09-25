@@ -744,6 +744,55 @@ marks quiet runs abandoned and evaluates anything left over.
 | `GET /v1/agents/runs/{run}?source=…` | pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline |
 | `GET /v1/agents/trajectories/{id}?source=…` | one run step by step: divergence, end state, contract breaks, cost, and its latest evaluation |
 
+## Beyond the final answer: how the agent behaved
+
+"Agent score: 0.87" doesn't say what changed. Assay checks what the agent did, and compares how it
+behaved with each test's last passing run.
+
+```python
+from assay_sdk.testing import expect
+
+def test_refund(assay_case):
+    expect(assay_case).must_call("get_order").must_not_call("delete_order").max_steps(8) \
+        .must_get_approval_before("refund").max_cost(0.05).max_latency(8) \
+        .max_tools_exposed(10).max_context_tokens(8000).must_resolve()
+    my_agent("Refund O-17", run=assay_case)
+```
+
+Expectations can be declared before the agent runs. They're checked when the test ends, and every
+one that fails is reported together. Each is also recorded as a check (`expect.must_call(get_order)`),
+so it's compared with its baseline like any other. Outside pytest, call `.verify()` or use
+`with expect(run):`.
+
+For that, the SDK records three things beyond tool calls and the answer:
+
+| Call | Records |
+|---|---|
+| `run.llm(..., tokens_in=, tools=[...])` | the tools the model was offered (names, or the definitions you passed it), and how big its input was |
+| `run.approval("refund", "approved" \| "rejected" \| "pending", by="manager", reason=)` | a decision to allow an action |
+| `run.outcome("resolved" \| "unresolved" \| "escalated")` | whether the run did what was asked |
+
+`pytest --assay` and `assay test` then compare each case's behavior with its baseline, and a
+case fails when it got worse:
+
+```
+⚠ 3 cases behaved worse than their baseline
+  tests/test_behavior.py::test_hard_case
+    Cost: $0.0040 → $0.0120 (3.0×)
+    Context: 1,200 tokens → 9,000 tokens (7.5×)
+    Tools exposed: 8 tools → 30 tools (3.8×)
+    Outcome: resolved → unresolved
+  tests/test_behavior.py::test_policy_edge
+    Approval for refund: approved → rejected
+```
+
+A number counts as worse when it grew 1.5× and by at least a minimum ($0.001, 1 s, 2 steps, 500
+tokens, 2 tools), so small moves aren't news. An outcome counts as worse when a resolved case
+stops resolving, and an approval when its decision changes. `[behavior]` in `assay.toml` sets
+the ratios (0 turns one off), and `fail = false` only reports it. With repeats, a case's number
+is the median of its attempts. The `requires_approval` contract puts an approval rule in
+`assay.toml` instead of in every test.
+
 ## One verdict per check: not everything that isn't a pass is a failure
 
 Evaluation infrastructure fails too: a judge times out, returns something unparseable, or its
@@ -878,6 +927,7 @@ them apart, so Assay checks every document's path against rules you agree to:
 | `only_after` | `human_review` runs only after `validation` | a branch taken without its trigger |
 | `max_runs` | `field_extraction` runs at most 3 times | allows retries but not loops |
 | `allowed_steps` | nothing outside this list runs | unknown new steps |
+| `requires_approval` | a step runs only once it's approved (`run.approval(step, "approved")`; a later rejection takes it back) | a refund nobody approved |
 
 Scope a contract with `when` (the document must match every listed attribute) or `unless`
 (a matching document is exempt), over `segment`, `document_type` and `processing_mode`.

@@ -32,7 +32,8 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import delete, select
 
-from assay import agents, audit, contracts, failures, flaky, ingest, learn, lifecycle, schema, store, verdicts
+from assay import (agents, audit, behavior, contracts, failures, flaky, ingest, learn, lifecycle, schema, store,
+                   verdicts)
 from assay.sources.events import EventsSource
 
 try:
@@ -65,9 +66,8 @@ kind = "never"
 step = "delete_order"
 
 [[contracts]]
-kind = "only_after"
+kind = "requires_approval"   # refund only after run.approval("refund", "approved")
 step = "refund"
-other = "get_order"
 
 # Personal data (email, card, IBAN, SSN, phone) in a tool's arguments fails the PII check,
 # unless the tool is allowed that kind, e.g. allow = {{ send_receipt = ["email"] }}.
@@ -78,6 +78,17 @@ allow = {{}}
 # A test fails when its run fails these checks, not only on its own asserts.
 [pytest]
 checks = true
+
+# Behavior compared with each test's last passing run: a case fails when it costs, takes, grows
+# its context or offers tools this many times over its baseline (0 turns one off), when it stops
+# resolving, or when an approval decision changes. fail = false only reports it.
+[behavior]
+fail = true
+cost_usd = 1.5
+seconds = 1.5
+context_tokens = 1.5
+tools_exposed = 1.5
+steps = 1.5
 '''
 
 EXAMPLE_TEMPLATE = '''\
@@ -90,7 +101,7 @@ rule in assay.toml, or misses what the test expects, as well as on its own asser
     pytest tests/ai            # red or green, like any test
     pytest --assay tests/ai    # also compared with each test's last passing run
 """
-from assay_sdk.testing import assert_called, assert_max_steps, assert_not_called
+from assay_sdk.testing import assert_called, assert_max_steps, assert_not_called, expect
 
 ORDERS = {"O-17": {"price": 27.61, "status": "delivered"}, "O-18": {"price": 12.00, "status": "shipped"}}
 
@@ -104,22 +115,29 @@ def refund(order_id, amount):
 
 
 def support_agent(run, message, order_id):
-    """Your agent goes here. Record what it does on `run`: run.call() for a tool, run.llm() for a
-    model call, run.answer() for the reply."""
+    """Your agent goes here. Record what it does on `run`: run.llm() for a model call (with the
+    tools it was offered), run.call() for a tool, run.approval() for a decision to allow an action,
+    run.answer() for the reply and run.outcome() for whether it resolved the request."""
+    run.llm(model="your-model", tokens_in=850, tokens_out=60, cost_usd=0.0021, tools=["get_order", "refund"])
     order = run.call("get_order", get_order, order_id=order_id)
     if order["status"] != "delivered":
         reply = f"Order {order_id} hasn't arrived yet, so it can't be refunded."
     else:
+        run.approval("refund", "approved", by="policy:under-50")
         run.call("refund", refund, order_id=order_id, amount=order["price"])
         reply = f"Refunded ${order['price']:.2f}."
     run.answer(reply)
+    run.outcome("resolved")
     return reply
 
 
 def test_refunds_a_delivered_order(assay_case):
+    # Everything the run should do, beyond its answer: checked together when the test ends.
+    expect(assay_case).must_call("get_order").must_get_approval_before("refund").max_cost(0.01) \\
+        .max_tools_exposed(10).must_resolve()
     reply = support_agent(assay_case, "Refund order O-17 please", "O-17")
     assert_called(assay_case, "refund", order_id="O-17")
-    assert_max_steps(assay_case, 4)
+    assert_max_steps(assay_case, 6)
     assert "27.61" in reply
 
 
@@ -164,10 +182,21 @@ def load_config(root: Path) -> dict:
     return {"command": test.get("command"), "repeat": int(test.get("repeat", 1)),
             "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
             "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()}},
-            "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))}}
+            "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
+            "behavior": _behavior_config(cfg.get("behavior") or {})}
 
 
-DEFAULT_CONFIG = {"contracts": [], "pii": {"check": True, "allow": {}}, "pytest": {"checks": True}}
+def _behavior_config(b: dict) -> dict:
+    unknown = set(b) - set(behavior.NUMBERS) - {"fail"}
+    if unknown:
+        raise SetupError(f"{CONFIG}, [behavior]: unknown {', '.join(sorted(unknown))}. Use fail, and ratios for "
+                         f"{', '.join(behavior.NUMBERS)} (0 turns one off).")
+    return {"fail": bool(b.get("fail", True)), "ratios": {k: float(v) for k, v in b.items() if k != "fail"}}
+
+
+DEFAULT_CONFIG = {"command": None, "repeat": 1, "tolerance": 0.01, "contracts": [],  # no assay.toml
+                  "pii": {"check": True, "allow": {}}, "pytest": {"checks": True},
+                  "behavior": {"fail": True, "ratios": {}}}
 
 
 def find_config(start: Path) -> dict:
@@ -185,7 +214,9 @@ def as_trajectory(steps: List[dict], answer: Optional[str]) -> dict:
         kind = "reason" if s["kind"] == "llm" else s["kind"]
         state = s["kind"] == "state"
         out.append({"seq": s["seq"], "kind": kind, "name": s.get("name"), "parent_seq": s.get("parent_seq"),
-                    "args": {"op": s.get("op") or "update"} if state else s.get("args"),
+                    "args": {"op": s.get("op") or "update"} if state else
+                    {"decision": s.get("decision"), "by": s.get("by")} if kind == "approval" else s.get("args"),
+                    "tokens_in": s.get("tokens_in"), "tools": s.get("tools"),
                     "result": s.get("value") if state else s.get("result"), "error": s.get("error"),
                     "text": s.get("text"), "model": s.get("model"),
                     "tokens": (s.get("tokens_in") or 0) + (s.get("tokens_out") or 0) or None,
@@ -316,12 +347,20 @@ def promote(engine, run_id: str) -> List[str]:
     cases = sorted({r.case_id for r in rows})
     copies = [{**dict(r._mapping), "run_id": BASELINE, "result_id": ingest._derive(BASELINE, r.result_id)}
               for r in rows]
+    m = store.run_metrics
+    with engine.connect() as conn:
+        mrows = conn.execute(select(m).where((m.c.tenant == TENANT) & (m.c.run_id == run_id))).all()
+    mcopies = [{**dict(r._mapping), "run_id": BASELINE, "metric_id": ingest._derive(BASELINE, r.metric_id)}
+               for r in mrows]
     with engine.begin() as conn:
         for i in range(0, len(cases), 500):
-            conn.execute(t.delete().where((t.c.tenant == TENANT) & (t.c.run_id == BASELINE)
-                                          & t.c.case_id.in_(cases[i:i + 500])))
+            for tbl in (t, m):
+                conn.execute(tbl.delete().where((tbl.c.tenant == TENANT) & (tbl.c.run_id == BASELINE)
+                                                & tbl.c.case_id.in_(cases[i:i + 500])))
         if copies:
             conn.execute(t.insert(), copies)
+        if mcopies:
+            conn.execute(m.insert(), mcopies)
     return cases
 
 
@@ -346,8 +385,19 @@ def check_pii(engine, source, run_id: str, allow: Dict[str, set]) -> None:
     ingest.upsert(engine, store.eval_results, rows, "result_id")
 
 
+def case_behavior(engine, run_id: str) -> Dict[str, dict]:
+    """Per case: its behavior over its attempts (assay/behavior.py)."""
+    m = store.run_metrics
+    with engine.connect() as conn:
+        rows = conn.execute(select(m.c.case_id, m.c.metrics).where((m.c.tenant == TENANT) & (m.c.run_id == run_id))).all()
+    by = defaultdict(list)
+    for r in rows:
+        by[r.case_id].append(r.metrics)
+    return {c: behavior.combine(ms) for c, ms in by.items()}
+
+
 def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
-             pii: Optional[dict] = None) -> Optional[dict]:
+             pii: Optional[dict] = None, behavior_cfg: Optional[dict] = None) -> Optional[dict]:
     """Check the run and compare it with the baseline. None if the run recorded nothing to check."""
     source = EventsSource(engine, TENANT)
     heads = agents.run_trajectories(engine, TENANT, run_id)
@@ -375,7 +425,21 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
     base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, TENANT, base_rows)]
     return {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
             "attempts": attempts(rows), "base_attempts": attempts(base_rows),
-            "not_judged": not_judged}
+            "not_judged": not_judged, "behavior": _behavior_changes(engine, run_id, baseline, ran, behavior_cfg)}
+
+
+def _behavior_changes(engine, run_id: str, baseline: Optional[str], ran: set, cfg: Optional[dict]) -> List[dict]:
+    """Cases whose behavior got worse than their baseline's: [{"case_id", "changes"}]."""
+    if not baseline:
+        return []
+    ratios = (cfg or {}).get("ratios") or {}
+    now, before = case_behavior(engine, run_id), case_behavior(engine, baseline)
+    out = []
+    for case in sorted(ran & set(now) & set(before)):
+        changes = behavior.compare(now[case], before[case], ratios)
+        if changes:
+            out.append({"case_id": case, "changes": changes})
+    return out
 
 
 def _rows(engine, run_id: str) -> list:
@@ -451,7 +515,8 @@ def verdict(result: dict, has_baseline: bool) -> Tuple[bool, dict]:
     a pass rate that dropped beyond chance across flaky checks still does."""
     c = classify(result, has_baseline)
     dropped = has_baseline and result["stability"]["outcome"] == "rollback"
-    return not c["problems"] and not dropped, c
+    worse = result.get("behavior") if result.get("behavior_fails", True) else []
+    return not c["problems"] and not dropped and not worse, c
 
 
 # ---------- the report ----------
@@ -523,6 +588,8 @@ def case_states(result: dict, c: dict) -> Dict[str, str]:
     """Per case: failed (a problem: fails the run), known (failing, but flaky or failing in the
     baseline too), or passed."""
     problems = {p["case_id"] for p in c["problems"]}
+    if result.get("behavior_fails", True):
+        problems |= {b["case_id"] for b in result.get("behavior") or []}
     out = {}
     for (case, _), a in result["attempts"].items():
         state = "failed" if case in problems else "known" if not all(a) else "passed"
@@ -582,6 +649,8 @@ def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
             if k[0] == case:
                 grouped.setdefault(_reason(v), []).append(_label(k[1]))
         why = [f"{', '.join(labels)}: {r}" for r, labels in grouped.items()]
+        why += [f"Behavior: {ch['text']}" for b in result.get("behavior") or [] if b["case_id"] == case
+                for ch in b["changes"]]
         if st == "failed":
             ET.SubElement(tc, "failure", message=(why or ["failed"])[0][:500]).text = "\n".join(why)
         elif case in unjudged:  # JUnit's "couldn't run", not a failure
@@ -620,6 +689,15 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
             out += [f"   {line}" for line in _explain(ps, fails, repeat)]
         if len(_groups(problems)) > 20:
             out.append(f"\n… and {len(_groups(problems)) - 20} more")
+        out.append("")
+    worse = result.get("behavior") or []
+    if worse:
+        fails_ = result.get("behavior_fails", True)
+        out.append(_paint(f"{'⚠' if fails_ else '~'} {_n(len(worse), 'case')} behaved worse than their baseline"
+                          + ("" if fails_ else " (not failing: [behavior] fail = false)"), "yellow"))
+        for b in worse[:20]:
+            out.append(f"  {b['case_id']}")
+            out += [_paint(f"    {ch['text']}", "dim") for ch in b["changes"]]
         out.append("")
     nj = result["not_judged"]
     if nj:
@@ -738,7 +816,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     _, bad = load_file(engine, str(events), TENANT)
     if bad:
         return 2, "\n  ".join([f"{len(bad)} bad line(s) in {events}:", *bad[:20]])
-    result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"])
+    result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"], cfg["behavior"])
     if result is None:
         return 2, ("Nothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "
                    "should do with assay.expect(), or send results with assay.check().")
@@ -746,10 +824,11 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     known = {c: r for c, r in (state.get("baseline_cases") or {}).items() if c in ran}
     if baseline == BASELINE and not known:
         baseline = None  # none of these cases has a baseline yet
-        result = evaluate(engine, run_id, None, cfg["tolerance"], cfg["pii"])
+        result = evaluate(engine, run_id, None, cfg["tolerance"], cfg["pii"], cfg["behavior"])
     against = None if baseline is None else f"compared with the baseline, {baseline}" if explicit else \
         (f"compared with each case's last passing run ({len(known)} of {len(ran)} cases have one, from "
          f"{_n(len(set(known.values())), 'run')})")
+    result["behavior_fails"] = cfg["behavior"]["fail"]
     text, passed = report(run_id, baseline, result, repeat, codes, against)
     if junit:
         write_junit(junit, run_id, result, verdict(result, bool(baseline))[1])

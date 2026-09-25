@@ -1152,12 +1152,13 @@ function renderTrajectory(t){
   const fb=t.first_bad,world=t.world||{};
   const cls=st=>{const r=bySeq[st.seq];if(st.kind==="reason")return"reason";if(st.error)return"err";if(breaks[st.seq])return"bad";
     if(!r)return"";return r.status==="matched"?"matched":["wrong_tool","bad_arguments","extra"].includes(r.status)?"bad":r.status.startsWith("error")?"err":"extra"};
-  const label={reason:"think",tool:"tool",state:"state",answer:"answer"};
+  const label={reason:"think",tool:"tool",state:"state",answer:"answer",approval:"approval"};
   const stepHtml=st=>{const r=bySeq[st.seq];
     const body=st.kind==="tool"?`<div class="call">${esc(callTxt(st.name,st.args))}</div>${st.error?`<div class="res" style="color:var(--bad)">error: ${esc(st.error)}</div>`:st.result!=null?`<div class="res" title="${esc(jtxt(st.result))}">→ ${esc(jtxt(st.result).slice(0,220))}</div>`:""}`
       :st.kind==="state"?`<div class="call">${esc((st.args||{}).op||"update")} ${esc(st.name)}</div>${st.result!=null?`<div class="res">${esc(jtxt(st.result).slice(0,200))}</div>`:""}`
       :st.kind==="answer"?`<div>${esc(st.text||"")}</div>`
-      :`<div class="res">${esc(st.model||"")}${st.tokens?` · ${st.tokens.toLocaleString()} tokens`:""}${st.cost_usd?` · ${money(st.cost_usd)}`:""}${st.text?` · ${esc(st.text.slice(0,120))}`:""}</div>`;
+      :st.kind==="approval"?`<div class="call">${esc(st.name)}: <span class="chip ${(st.args||{}).decision==="approved"?"good":(st.args||{}).decision==="rejected"?"bad":"neutral"}">${esc((st.args||{}).decision||"")}</span>${(st.args||{}).by?` <span class="ref">by ${esc(st.args.by)}</span>`:""}</div>${st.text?`<div class="res">${esc(st.text)}</div>`:""}`
+      :`<div class="res">${esc(st.model||"")}${st.tokens?` · ${st.tokens.toLocaleString()} tokens`:""}${st.tokens_in?` (${st.tokens_in.toLocaleString()} in)`:""}${(st.tools||[]).length?` · offered ${st.tools.length} tools`:""}${st.cost_usd?` · ${money(st.cost_usd)}`:""}${st.text?` · ${esc(st.text.slice(0,120))}`:""}</div>`;
     const notes=[];
     if(r&&r.status==="matched")notes.push(`<span class="okx y">✓</span> expected call ${r.expected_index+1}`);
     if(r&&r.status==="allowed_extra")notes.push(`<span class="ref">allowed extra</span>`);
@@ -1171,7 +1172,7 @@ function renderTrajectory(t){
   const ref=t.reference,e=t.efficiency;
   return `<div class="panel stack">
     <div class="panel-head"><div><span class="ref">Agent trajectory</span><h2 class="mono" style="font-size:18px">${esc(t.trajectory_id)}</h2>
-      <p class="sub">${[t.task,t.case_id&&`case ${t.case_id}`,t.attempt!=null&&`attempt ${t.attempt}`,t.run_id&&`run ${t.run_id}`].filter(Boolean).map(esc).join(" · ")} ${Object.entries(t.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" ")}</p></div>
+      <p class="sub">${[t.task,t.outcome&&`outcome: ${t.outcome}`,t.case_id&&`case ${t.case_id}`,t.attempt!=null&&`attempt ${t.attempt}`,t.run_id&&`run ${t.run_id}`].filter(Boolean).map(esc).join(" · ")} ${Object.entries(t.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" ")}</p></div>
       ${(()=>{const bad=[...t.failed.map(f=>CHECK_LABEL[f]),...(t.evaluation?.checks||[]).filter(c=>c.status==="fail"&&!CHECK_LABEL[c.check]).map(c=>LIFE_CHECK[c.check]||c.check)];
         return t.status==="running"?`<span class="chip neutral">running</span>`:`<span class="chip ${bad.length?"bad":"good"}">${bad.length?`failed: ${esc([...new Set(bad)].join(", "))}`:"passed"}</span>`})()}</div>
     ${t.status==="running"?`<p class="flag"><span class="chip neutral">running</span>Still going: it's checked when it ends.</p>`:""}

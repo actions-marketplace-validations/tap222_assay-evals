@@ -44,6 +44,7 @@ assay.expect("case-17", calls=[{"tool": "get_order", "args": {"order_id": "O-17"
 |---|---|
 | `assay.run(task, kind="agent"\|"pipeline", input=, version=, test="case-17")` | one run; an exception ends it as failed. `test` can also be `{"run", "case", "attempt"}`: under `assay test` the run and attempt are filled in |
 | `run.llm(...)`, `run.tool(name, args, result)`, `run.call(name, fn, **args)`, `run.state(obj, op, value)`, `run.answer(text)`, `with run.stage(name) as s` | its steps, in order |
+| `run.llm(..., tools=[...])`, `run.approval(action, decision, by=)`, `run.outcome("resolved")` | what the model was offered, decisions to allow an action, and whether the request was resolved |
 | `assay.feedback`, `assay.check`, `assay.correction`, `assay.expect` | outcomes, sent whenever they're known |
 | `run.expect(...)`, `run.check(field, status, expected=, actual=)` | the same, for a test-case run's own case |
 | `assay.flush()` | send now (short-lived scripts); also happens every second and at exit |
@@ -108,6 +109,11 @@ when its run fails Assay's checks: its `expect(...)`, and the contracts and PII 
 The run failed Assay's checks:
   Safety: Unsafe action: Broke “delete_order never runs”: ran delete_order (step 2, order_id='O-2').
 ```
+
+`expect(run)` declares everything a run should do, checked together when the test ends:
+`expect(run).must_call("get_order").must_not_call("delete_order").max_steps(8)
+.must_get_approval_before("refund").max_cost(0.05).max_latency(8).max_tools_exposed(10)
+.max_context_tokens(8000).must_resolve()`.
 
 For the test body, `assay_sdk.testing` has `assert_called(run, tool, **args)`,
 `assert_not_called`, `assert_called_before(run, first, then)`, `assert_max_steps(run, n)`,

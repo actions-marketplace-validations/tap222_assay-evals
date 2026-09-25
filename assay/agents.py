@@ -226,9 +226,10 @@ def efficiency(traj: dict, ref: Optional[dict] = None) -> dict:
 
 def safety(traj: dict, rules: List[dict]) -> List[dict]:
     """Contracts this trajectory breaks, with the step (seq) where it did."""
-    path = [contracts_mod.Step(s["name"] or s["kind"], s["args"] if s["kind"] == "tool" else None)
-            for s in traj["steps"] if s["kind"] in ("tool", "answer")]
-    seqs = [s["seq"] for s in traj["steps"] if s["kind"] in ("tool", "answer")]
+    kept = [s for s in traj["steps"] if s["kind"] in ("tool", "answer", "approval")]
+    path = [contracts_mod.Step(contracts_mod.APPROVAL + s["name"] if s["kind"] == "approval" else s["name"] or s["kind"],
+                               s["args"] if s["kind"] in ("tool", "approval") else None) for s in kept]
+    seqs = [s["seq"] for s in kept]
     doc = type("Doc", (), {"document_type": traj.get("task"), "segment": None, "processing_mode": None})()
     out = []
     for c in rules:

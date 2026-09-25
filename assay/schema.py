@@ -71,7 +71,7 @@ class Step(_E):
     type: Literal["step"]
     run_id: str = Field(..., max_length=128)
     seq: int = Field(..., ge=0)
-    kind: Literal["llm", "tool", "state", "answer", "stage"]
+    kind: Literal["llm", "tool", "state", "answer", "stage", "approval"]
     name: Optional[str] = Field(None, max_length=128)
     parent_seq: Optional[int] = Field(None, ge=0)
     ended_at: Optional[datetime] = None
@@ -84,6 +84,7 @@ class Step(_E):
     cost_usd: Optional[float] = Field(None, ge=0)
     prompt: Optional[str] = Field(None, max_length=192, description="id@version")
     text: Optional[str] = Field(None, max_length=32768)
+    tools: Optional[List[str]] = Field(None, max_length=500, description="llm: the tools the model was offered")
     # tool
     args: Optional[Dict[str, Any]] = None
     result: Optional[Any] = None
@@ -93,19 +94,24 @@ class Step(_E):
     # stage
     outputs: Optional[Dict[str, Any]] = None
     did_work: Optional[bool] = None
+    # approval: name is the action, e.g. refund; text is the reason
+    decision: Optional[Literal["approved", "rejected", "pending"]] = None
+    by: Optional[str] = Field(None, max_length=128, description="approval: who decided (a person, a policy)")
 
     @model_validator(mode="after")
     def _kind_fields(self):
-        allowed = {"llm": {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text"},
+        allowed = {"llm": {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "tools"},
                    "tool": {"args", "result"}, "state": {"op", "value"}, "answer": {"text"},
-                   "stage": {"outputs", "did_work", "prompt"}}[self.kind]
+                   "stage": {"outputs", "did_work", "prompt"}, "approval": {"decision", "by", "text"}}[self.kind]
         specific = {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "args", "result", "op",
-                    "value", "outputs", "did_work"}
+                    "value", "outputs", "did_work", "tools", "decision", "by"}
         wrong = [f for f in specific - allowed if getattr(self, f) is not None]
         if wrong:
             raise ValueError(f"a {self.kind} step doesn't take {', '.join(sorted(wrong))}")
-        if self.kind in ("tool", "stage", "state") and not self.name:
+        if self.kind in ("tool", "stage", "state", "approval") and not self.name:
             raise ValueError(f"a {self.kind} step needs a name")
+        if self.kind == "approval" and not self.decision:
+            raise ValueError("an approval step needs a decision: approved, rejected or pending")
         return self
 
 
@@ -115,6 +121,8 @@ class RunEnd(_E):
     status: Literal["completed", "failed", "abandoned"] = "completed"
     answer: Optional[str] = Field(None, max_length=32768)
     error: Optional[str] = Field(None, max_length=2048)
+    outcome: Optional[Literal["resolved", "unresolved", "escalated"]] = Field(
+        None, description="Whether the run did what was asked: resolved, unresolved, or handed to a person")
 
 
 class Feedback(_E):
@@ -261,7 +269,9 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                     rows["steps"].append({
                         "tenant": tenant, "trajectory_id": e.run_id, "seq": e.seq,
                         "kind": "reason" if e.kind == "llm" else e.kind, "name": e.name,
-                        "args": {"op": e.op or "update"} if e.kind == "state" else e.args,
+                        "args": {"op": e.op or "update"} if e.kind == "state" else
+                        {"decision": e.decision, "by": e.by} if e.kind == "approval" else e.args,
+                        "tokens_in": e.tokens_in, "tools": e.tools,
                         "result": e.value if e.kind == "state" else e.result,
                         "error": e.error if e.status == "error" else None, "text": e.text, "model": e.model,
                         "tokens": tokens or None, "cost_usd": e.cost_usd, "started_at": e.ts,
@@ -269,7 +279,7 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
             elif isinstance(e, RunEnd):
                 run = known.setdefault(e.run_id, {"tenant": tenant, "run_id": e.run_id, "kind": "agent",
                                                   "started_at": e.ts})
-                run.update(ended_at=e.ts, status=e.status, answer=e.answer, error=e.error)
+                run.update(ended_at=e.ts, status=e.status, answer=e.answer, error=e.error, outcome=e.outcome)
                 rows["runs"].append({k: v for k, v in run.items()})
                 rows["docs"].append({"tenant": tenant, "document_id": e.run_id,
                                      "received_at": run.get("started_at") or e.ts,
@@ -331,7 +341,7 @@ def _head(run: dict) -> dict:
     return {"tenant": run["tenant"], "trajectory_id": run["run_id"], "run_id": run.get("test_run"),
             "case_id": run.get("test_case"), "attempt": run.get("attempt"), "task": run.get("task"),
             "started_at": run.get("started_at"), "status": run.get("status") or "running",
-            "lineage": run.get("version")}
+            "lineage": run.get("version"), "outcome": run.get("outcome")}
 
 
 def _merge(rows: List[dict], key: str) -> List[dict]:

@@ -231,6 +231,20 @@ agent_trajectories = Table(
     Column("status", String(32)),  # running | completed | failed | abandoned | …
     Column("lineage", JSON),
     Column("updated_at", DateTime, index=True),  # server time of the latest event; see assay/lifecycle.py
+    Column("outcome", String(16)),  # resolved | unresolved | escalated
+)
+
+# How each test-case run behaved (assay/behavior.py): cost, latency, steps, context, tools offered,
+# outcome, approvals. Compared with the case's baseline, like its checks.
+run_metrics = Table(
+    "run_metrics", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("metric_id", String(128), primary_key=True),
+    Column("run_id", String(128), nullable=False, index=True),  # the test run
+    Column("case_id", String(128), nullable=False),
+    Column("attempt", Integer),
+    Column("trajectory_id", String(128)),
+    Column("metrics", JSON, nullable=False),
 )
 
 # The latest evaluation of each agent run, made when the run ended (assay/lifecycle.py).
@@ -261,6 +275,8 @@ agent_steps = Table(
     Column("started_at", DateTime),
     Column("finished_at", DateTime),
     Column("parent_seq", Integer),  # a step nested inside another
+    Column("tokens_in", Integer),  # a model call's input: how big the context has grown
+    Column("tools", JSON),  # the tools a model call was offered
 )
 
 # Runs as the v1 event schema describes them (assay/schema.py): what run.start and run.end
@@ -283,6 +299,7 @@ runs = Table(
     Column("attempt", Integer),
     Column("parent_run_id", String(128)),
     Column("tags", JSON),
+    Column("outcome", String(16)),  # resolved | unresolved | escalated
 )
 
 # What a test case expects of a trajectory: the tool calls, the answer, and the end state.
