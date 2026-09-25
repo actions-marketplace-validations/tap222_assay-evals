@@ -8,8 +8,10 @@ results. Standard library only, Python 3.9+.
 pip install assay-evals
 ```
 
-You need an Assay server to send to. See the
-[setup guide](https://github.com/tap222/docai-eval#setup-guide).
+With an Assay server, events go there (see the
+[setup guide](https://github.com/tap222/docai-eval#setup-guide)). Without one, they're
+recorded to a local file, so you can start with no account and no server (see
+"No server" below).
 
 ```python
 import assay_sdk as assay
@@ -51,8 +53,30 @@ These options go to `init()`:
 - `strict=True`: raise send errors while developing. Otherwise the SDK never raises into
   your code.
 - `enabled=False`: the SDK does nothing, e.g. in unit tests.
+- `path`: where to record when there's no server (see below).
 
 Events follow the
 [Assay event schema v1](https://github.com/tap222/docai-eval/blob/main/docs/event-schema.md). They stream to
 `POST /v1/ingest` in the background, so a run that crashes still shows every step up to
 the crash.
+
+## No server: record locally
+
+Call `assay.init()` with no URL, and with `ASSAY_URL` unset. Events are then appended to
+`.assay/events.jsonl`, one per line, in the same form the server takes. Set `path=` or
+`ASSAY_PATH` to use another file. Several processes can record to the same file, e.g.
+`pytest -n 4`.
+
+When the SDK creates the `.assay` folder, it adds a `.gitignore` there, so recorded inputs
+don't end up in git.
+
+To look at a recording, load it into a local Assay server
+([`assay-server`](https://pypi.org/project/assay-server/)) and open the dashboard:
+
+```bash
+pip install assay-server
+assay load            # reads .assay/events.jsonl into the tenant "local"
+assay serve           # http://127.0.0.1:8400, source events:local
+```
+
+Loading the same file twice changes nothing, because every event has an id.

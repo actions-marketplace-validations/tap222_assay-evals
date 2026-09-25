@@ -3,6 +3,7 @@
     import assay_sdk as assay
 
     assay.init("https://assay.example.com", key="ak_...")   # or ASSAY_URL / ASSAY_KEY
+    assay.init()                                             # no server: record to .assay/events.jsonl
 
     with assay.run("refund_request", input=message, version={"prompt": "support@v5"}) as run:
         run.llm(model="claude-sonnet-5", tokens_in=620, tokens_out=180, cost_usd=0.0024)
@@ -15,7 +16,8 @@
 
 Events follow the Assay event schema v1 (docs/event-schema.md) and stream to
 POST /v1/ingest in the background: a run that crashes still shows every step up
-to that point. Every event has an id, so retries never duplicate anything. The
+to that point. With no server configured they go to a local file instead, one
+event per line, for `assay load` (or a later upload) to pick up. Every event has an id, so retries never duplicate anything. The
 SDK never raises into your code (pass strict=True to init while developing).
 """
 from __future__ import annotations
@@ -145,6 +147,10 @@ class _Client:
     def close(self) -> None:
         self._stop = True
         self._wake.set()
+        # Let a send in progress finish first: at exit the daemon thread is killed, and a batch it
+        # has taken off the queue would be lost.
+        if self._thread is not threading.current_thread():
+            self._thread.join(timeout=10)
         self.flush()
 
     def _http(self, batch: List[dict]) -> None:
@@ -172,16 +178,42 @@ class _Client:
             time.sleep(0.5 * 2 ** attempt)
 
 
+def _file_transport(path: str) -> Callable[[List[dict]], None]:
+    """Append each batch to a JSON Lines file, one event per line, in the body /v1/ingest takes.
+    Each batch is one O_APPEND write, so processes recording to the same file (pytest -n) don't
+    split each other's lines."""
+    path = os.path.abspath(path)  # fixed now, so a later chdir can't scatter events
+    lock = threading.Lock()
+
+    def write(batch: List[dict]) -> None:
+        data = "".join(json.dumps(e, separators=(",", ":")) + "\n" for e in batch).encode()
+        with lock:
+            folder = os.path.dirname(path)
+            if not os.path.isdir(folder):
+                os.makedirs(folder, exist_ok=True)
+                with open(os.path.join(folder, ".gitignore"), "w") as f:  # recorded inputs stay out of git
+                    f.write("*.jsonl\n")
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            try:
+                while data:
+                    data = data[os.write(fd, data):]
+            finally:
+                os.close(fd)
+    return write
+
+
 _client: Optional[_Client] = None
 
 
 def init(url: Optional[str] = None, key: Optional[str] = None, *, tenant: Optional[str] = None,
          redact: Optional[Callable[[Any], Any]] = None, sample: float = 1.0, flush_interval: float = 1.0,
          batch_size: int = 500, max_queue: int = 100_000, strict: bool = False,
-         transport: Optional[Callable[[List[dict]], None]] = None, enabled: bool = True) -> None:
+         transport: Optional[Callable[[List[dict]], None]] = None, enabled: bool = True,
+         path: Optional[str] = None) -> None:
     """Configure the SDK once, at startup.
 
     url / key      default to the ASSAY_URL / ASSAY_KEY environment variables
+    path           with no url, where events are recorded instead: ASSAY_PATH, else .assay/events.jsonl
     redact         applied to inputs, arguments, results, text and outputs before they leave the process
     sample         share of runs to record (0.1 = one in ten); outcomes are always sent
     strict         raise send errors instead of logging them (for development)
@@ -191,8 +223,10 @@ def init(url: Optional[str] = None, key: Optional[str] = None, *, tenant: Option
     if _client is not None:
         _client.close()
     url = url or os.environ.get("ASSAY_URL")
-    if not url and transport is None and enabled:
-        raise ValueError("Give init() a url, or set ASSAY_URL.")
+    if not url and transport is None:
+        path = path or os.environ.get("ASSAY_PATH") or os.path.join(".assay", "events.jsonl")
+        transport = _file_transport(path)
+        log.info("Assay: no server set (ASSAY_URL); recording to %s", path)
     _client = _Client(url or "http://localhost", key or os.environ.get("ASSAY_KEY"), tenant, redact, sample,
                       flush_interval, batch_size, max_queue, strict, transport, enabled)
 

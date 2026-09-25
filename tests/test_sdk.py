@@ -1,4 +1,6 @@
 """The v1 event schema (assay/schema.py) and the Python SDK (sdk/python) against a real server."""
+import json
+import os
 import sys
 import threading
 import time
@@ -191,3 +193,62 @@ def test_sdk_streams_in_the_background(client):
         time.sleep(0.02)
     assert len(got) == 3
     assay.shutdown()
+
+
+# ---------- no server: record locally, then `assay load` ----------
+
+def test_sdk_records_locally_without_a_server_and_load_brings_it_in(tmp_path, monkeypatch, capsys):
+    from assay.__main__ import main
+    monkeypatch.delenv("ASSAY_URL", raising=False)
+    monkeypatch.delenv("ASSAY_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assay.init(flush_interval=60, strict=True)
+    with assay.run("refund", input="refund O-17", test={"run": "local-1", "case": "c1"}) as run:
+        run.tool("get_order", {"order_id": "O-17"}, {"price": 27.61})
+        run.answer("Refunded $27.61.")
+    assay.check("local-1", "c1", "pass", run_id=run.id, field="answer")
+    assay.shutdown()
+
+    log = tmp_path / ".assay" / "events.jsonl"
+    lines = log.read_text().splitlines()
+    assert [json.loads(x)["type"] for x in lines] == ["run.start", "step", "step", "run.end", "check"]
+    assert (tmp_path / ".assay" / ".gitignore").read_text() == "*.jsonl\n"  # recorded inputs stay out of git
+
+    monkeypatch.setenv("ASSAY_STORE_URL", f"sqlite:///{tmp_path / 'store.db'}")
+    assert main(["load"]) == 0 and "Loaded 5 events into tenant 'local'" in capsys.readouterr().out
+    assert main(["load", str(log)]) == 0  # again: nothing doubles
+    c = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path / 'store.db'}")))
+    t = c.get(f"/v1/agents/trajectories/{run.id}", params={"source": "events:local"}).json()
+    assert t["status"] == "completed" and len(t["steps"]) == 2 and t["answer"] == "Refunded $27.61."
+
+
+def test_sdk_local_path_and_processes_appending_to_one_file(tmp_path, monkeypatch):
+    import subprocess
+    sdk_dir = str(Path(__file__).resolve().parents[1] / "sdk" / "python")
+    script = ("import assay_sdk as assay\n"
+              "assay.init(flush_interval=60, batch_size=7)\n"
+              "for _ in range(40):\n"
+              "    with assay.run('t') as run:\n"
+              "        run.answer('x' * 3000)\n")  # long lines, many batches, all at once
+    env = {**os.environ, "PYTHONPATH": sdk_dir, "ASSAY_PATH": str(tmp_path / "runs.jsonl")}
+    env.pop("ASSAY_URL", None)
+    procs = [subprocess.Popen([sys.executable, "-c", script], env=env) for _ in range(4)]
+    assert all(p.wait(timeout=60) == 0 for p in procs)
+    lines = (tmp_path / "runs.jsonl").read_text().splitlines()
+    assert len(lines) == 4 * 40 * 3 and all(json.loads(x)["v"] == 1 for x in lines)  # no line split or lost
+    assert not (tmp_path / ".gitignore").exists()  # only a folder the SDK created gets one
+
+
+def test_load_checks_every_line_and_loads_nothing_from_a_bad_file(tmp_path, monkeypatch, capsys):
+    from assay.__main__ import main
+    good = json.dumps(ev(id="a", type="run.start", run_id="r"))
+    bad_step = json.dumps(ev(id="b", type="step", run_id="r", seq=0, kind="tool"))  # a tool step needs a name
+    f = tmp_path / "events.jsonl"
+    f.write_text("\n".join([good, "{not json", bad_step]) + "\n")
+    monkeypatch.setenv("ASSAY_STORE_URL", f"sqlite:///{tmp_path / 'store.db'}")
+    assert main(["load", str(f)]) == 1
+    err = capsys.readouterr().err
+    assert "2 bad line(s)" in err and "line 2: not JSON" in err and "line 3:" in err and "needs a name" in err
+    c = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path / 'store.db'}")))
+    assert c.get("/v1/agents/trajectories/r", params={"source": "events:local"}).status_code == 404
+    assert main(["load", str(tmp_path / "missing.jsonl")]) == 2

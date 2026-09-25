@@ -51,6 +51,9 @@ def main(argv=None) -> int:
     c.add_argument("--source", default="sql", help="sql or events:<tenant>")
     c.add_argument("--days", type=float, default=7)
     sub.add_parser("demo", help="Load a synthetic demo tenant and backfill 7 weeks of daily runs")
+    ld = sub.add_parser("load", help="Load events the SDK recorded locally (no server set) into the store")
+    ld.add_argument("file", nargs="?", default=".assay/events.jsonl")
+    ld.add_argument("--tenant", default="local", help="Tenant to load them into (default: local)")
     sub.add_parser("schema", help="Print the v1 event schema as JSON Schema")
 
     args = p.parse_args(argv)
@@ -166,6 +169,38 @@ def main(argv=None) -> int:
                   "or set them to \"NULL\" if your schema doesn't record them.", file=sys.stderr)
             return 1
         print("\nAll mapped fields work.")
+        return 0
+
+    if args.cmd == "load":
+        from pydantic import ValidationError
+        from assay import schema
+        try:
+            with open(args.file, encoding="utf-8") as f:
+                lines = [(n, line) for n, line in enumerate(f, 1) if line.strip()]
+        except OSError as exc:
+            print(f"Can't read {args.file}: {exc.strerror}", file=sys.stderr)
+            return 2
+        events, bad = [], []
+        for n, line in lines:  # check every line first, so a bad file loads nothing
+            try:
+                events.append(schema.EVENTS.validate_python([json.loads(line)])[0])
+            except json.JSONDecodeError as exc:
+                bad.append(f"line {n}: not JSON ({exc.msg})")
+            except ValidationError as exc:
+                err = exc.errors()[0]
+                field = ".".join(str(x) for x in err["loc"][2:])
+                bad.append(f"line {n}: {field + ': ' if field else ''}{err['msg']}")
+        if bad:
+            print(f"{len(bad)} bad line(s) in {args.file}; nothing loaded:", *bad[:20], sep="\n  ", file=sys.stderr)
+            return 1
+        by_type: dict = {}
+        for i in range(0, len(events), 5000):
+            for k, v in schema.ingest(engine, events[i:i + 5000], args.tenant).items():
+                by_type[k] = by_type.get(k, 0) + v
+        print(f"Loaded {len(events)} events into tenant '{args.tenant}': "
+              + (", ".join(f"{v} {k}" for k, v in by_type.items()) or "none"))
+        print(f"Loading the same file again changes nothing. See them with: python -m assay serve "
+              f"(source events:{args.tenant})")
         return 0
 
     if args.cmd == "demo":
