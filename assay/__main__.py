@@ -55,7 +55,6 @@ def main(argv=None) -> int:
 
     args = p.parse_args(argv)
     if args.cmd == "schema":
-        import json
         from assay.schema import json_schema
         print(json.dumps(json_schema(), indent=1))
         return 0
