@@ -1076,7 +1076,7 @@ const jtxt=v=>v==null?"":typeof v==="string"?v:JSON.stringify(v);
 const callTxt=(n,a)=>`${n}(${Object.entries(a||{}).map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(", ")})`;
 function delta(now,before,{pp=true,lowerBetter=false}={}){if(now==null||before==null)return"";const d=now-before;if(Math.abs(d)<1e-9)return`<span class="ref">no change</span>`;
   const worse=lowerBetter?d>0:d<0;return `<span class="${worse?"worse":"better"}">${d>0?"▲":"▼"} ${pp?(Math.abs(d)*100).toFixed(1)+" pts":before?Math.round(Math.abs(d/before)*100)+"%":Math.abs(d).toFixed(2)}</span>`}
-const LIFE_CHECK={completed:"Finished",safety:"Safety",loops:"Loops",tool_errors:"Tool errors",answer:"Answer",
+const LIFE_CHECK={evaluation:"Couldn't evaluate",completed:"Finished",safety:"Safety",loops:"Loops",tool_errors:"Tool errors",answer:"Answer",
   end_state:"End state",tool_calls:"Tool calls",efficiency:"Efficiency"};
 const lifeStatus=st=>`<span class="chip ${st==="completed"||st==null?"good":st==="running"?"neutral":st==="abandoned"?"warn":"bad"}">${esc(st||"completed")}</span>`;
 // Every agent run, production or test: where it is in its lifecycle, and the latest that failed a check.
@@ -1084,7 +1084,12 @@ function lifecyclePanel(l){
   if(!l)return"";
   const tiles=[["Running",l.running,"not judged until they end"],["Awaiting evaluation",l.awaiting_evaluation,"ended, checked within a minute"],
     ["Evaluated",l.evaluated,"checked when they ended"],["Failing",l.failing,"of those evaluated"],["Abandoned",l.abandoned,`no events for ${l.abandon_minutes} min`]];
+  const warn=[];
+  if(l.oldest_awaiting_minutes!=null&&l.oldest_awaiting_minutes>l.backlog_minutes)warn.push(`${l.awaiting_evaluation.toLocaleString()} ended run${l.awaiting_evaluation===1?" is":"s are"} waiting to be evaluated, the oldest for ${l.oldest_awaiting_minutes} minutes. Is the evaluation sweep running? (An alert opens for this.)`);
+  if(l.sweep&&!l.sweep.ok)warn.push(`The last evaluation sweep failed: ${l.sweep.error}`);
+  if(l.evaluation_errors)warn.push(`${l.evaluation_errors.toLocaleString()} runs couldn't be evaluated; open one for the error. They're checked again when they get new data.`);
   return `<div class="panel stack"><div class="panel-head"><div><h2>Live agent runs</h2><p class="sub">Every run is checked when it ends, however long it took: it finished, kept the critical path contracts, didn't loop, and recovered from its tool errors. A run that goes quiet for ${l.abandon_minutes} minutes is marked abandoned, then checked.</p></div></div>
+    ${warn.map(w=>`<p class="flag"><span class="chip warn">evaluation</span>${esc(w)}</p>`).join("")}
     <div class="tiles">${tiles.map(([k,v,why])=>`<div class="tile"><b>${(v||0).toLocaleString()}</b><span>${k}<br><span class="ref">${why}</span></span></div>`).join("")}</div>
     ${l.recent_failures.length?`<div class="scroll"><table><tr><th>Run</th><th>Task</th><th>Status</th><th>Failed</th><th>Evaluated</th></tr>
       ${l.recent_failures.slice(0,15).map(r=>`<tr class="click" data-traj="${esc(r.trajectory_id)}"><td class="mono">${esc(r.trajectory_id)}</td><td class="ref">${esc(r.task||"")}</td><td>${lifeStatus(r.status)}</td>
@@ -1327,6 +1332,11 @@ async function renderFailures(){
     catch(e){b.textContent=e.message}});
 }
 const CALL={advance:["good","Advance"],rerun:["warn","Rerun"],hold:["warn","Hold"],rollback:["bad","Roll back"]};
+// One verdict per check (assay/verdicts.py): only FAIL is about the AI.
+const EVAL_VERDICT=[["PASS","Passed","good"],["FAIL","Failed","bad"],["FLAKY","Flaky","warn"],["INCONCLUSIVE","Inconclusive","warn"],
+  ["EVALUATOR_ERROR","Evaluator error","neutral"],["INFRA_ERROR","Infrastructure error","neutral"],["MISSING","Missing","neutral"]];
+const verdictRow=v=>v?`<div class="tiles">${EVAL_VERDICT.map(([k,l,c])=>`<div class="tile"><b>${(v[k]||0).toLocaleString()}</b><span><span class="chip ${c}">${l}</span></span></div>`).join("")}</div>
+  <p class="note">Only <b>failed</b> says something about the AI. Evaluator errors, infrastructure errors and missing results mean the check didn't happen; inconclusive means it hasn't settled. <code>GET /v1/evals/runs/{run}/verdicts</code> lists every check.</p>`:"";
 function rateCell(p,n,lo,hi){return n?`${p}/${n}${lo!=null?` <span class="ref">${pct(lo,0)}–${pct(hi,0)}</span>`:""}`:"—"}
 function releaseCall(st,sc){
   const [cls,label]=CALL[st.outcome],c=st.change;
@@ -1337,8 +1347,9 @@ function releaseCall(st,sc){
     <div class="call"><span class="chip ${cls}">${label}</span>${c?`<span>Pass rate ${c.point<=0?"down":"up"} <b>${pct(Math.abs(c.point))}</b> <span class="ref">95% interval ${c.point<=0?`${pct(Math.max(0,-c.high))} to ${pct(-c.low)} lower`:`${pct(c.low)} to ${pct(c.high)}`} · attempt noise ±${pct(st.noise||0)} · ${c.checks.toLocaleString()} checks counted</span></span>`:""}
       <button type="button" id="gate-record">Record as gate decision</button></div>
     <ul style="margin:0;padding-left:18px">${st.reasons.map(r=>`<li>${esc(r)}</li>`).join("")}</ul>
+    ${verdictRow(st.verdicts)}
     <div class="legend"><span class="ref">Counted:</span>${Object.entries(st.states).filter(([,n])=>n).map(([k,n])=>`<span><b>${n.toLocaleString()}</b>&nbsp;${esc(k.replace("_"," "))}</span>`).join("")}
-      ${Object.entries(st.roles||{}).filter(([,n])=>n).length?`<span class="ref">Not counted:</span>${Object.entries(st.roles).filter(([,n])=>n).map(([k,n])=>`<span><b>${n.toLocaleString()}</b>&nbsp;${esc({accepted:"decided",intended:"intended change",evaluator:"evaluator",infrastructure:"infrastructure"}[k])}</span>`).join("")}`:""}</div>
+      ${Object.entries(st.roles||{}).filter(([,n])=>n).length?`<span class="ref">Not counted:</span>${Object.entries(st.roles).filter(([,n])=>n).map(([k,n])=>`<span><b>${n.toLocaleString()}</b>&nbsp;${esc({accepted:"decided",intended:"intended change",evaluator:"evaluator",evaluator_input:"wrong evaluator data",infrastructure:"infrastructure"}[k]||k)}</span>`).join("")}`:""}</div>
     ${st.got_worse.length?`<details><summary>Got worse beyond chance · ${st.got_worse.length}</summary><div class="scroll"><table><tr><th>Case</th><th>Field</th><th>Evaluator</th><th>Attempts</th><th class="num">Before</th><th class="num">Now</th><th class="num">q</th></tr>
       ${st.got_worse.slice(0,60).map(r=>row(r)+`<td class="num">${r.q_worse!=null?r.q_worse.toFixed(3):"—"}</td></tr>`).join("")}</table></div></details>`:""}
     ${st.reruns.length?`<details ${st.outcome==="rerun"?"open":""}><summary>Rerun before judging · ${st.reruns.length} checks, ${st.reruns.reduce((a,r)=>a+(r.reruns||0),0).toLocaleString()} attempts <button class="link" type="button" id="rerun-copy">copy as JSON</button></summary><div class="scroll"><table><tr><th>Case</th><th>Field</th><th>Evaluator</th><th>Attempts</th><th class="num">Before</th><th class="num">Now</th><th>Why</th><th class="num">More</th></tr>

@@ -34,6 +34,7 @@ from assay.sources.events import EventsSource
 log = logging.getLogger(__name__)
 
 ABANDON_MINUTES = 30.0
+BACKLOG_MINUTES = 10.0  # an ended run waiting longer than this to be evaluated means evaluation is stuck
 BATCH = 500  # runs evaluated per pass
 CHECKS = ("completed", "safety", "loops", "tool_errors")
 
@@ -100,6 +101,24 @@ def run_checks(traj: dict, rules: List[dict], abandon_minutes: float = ABANDON_M
     return out
 
 
+def _checks_for_run(tenant: str, h: dict, traj: dict, rules: List[dict], refs: dict, abandon_minutes: float,
+                    abandoned_why: Optional[str]) -> tuple:
+    """(the run's checks, result rows for its test run if it's a test case)."""
+    found = run_checks(traj, rules, abandon_minutes, abandoned_why)
+    if not h["run_id"]:
+        return found, []
+    # A test case: its case's checks too, as results of its test run.
+    done_ = found[0]  # "completed", so a run that never finished shows in the test run
+    case = [{"field": "completed", "status": done_["status"], "expected": "the run finishes",
+             "actual": h["status"] or "completed", "reason": done_["reason"]}]
+    case += agents.checks_for(traj, refs.get(h["case_id"]), rules)
+    # The case's safety and efficiency checks cover these two; don't report them twice.
+    found = [c for c in found if c["check"] not in ("safety", "loops")]
+    found += [{"check": c["field"], "status": c["status"], "reason": c["reason"]} for c in case
+              if c["field"] != "completed"]
+    return found, agents.result_rows(tenant, h["run_id"], h, case)
+
+
 def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON_MINUTES,
              abandoned_why: Optional[str] = None) -> int:
     """Evaluate these ended runs and store the results. Returns how many were evaluated."""
@@ -124,17 +143,13 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
             traj = trajs.get(h["trajectory_id"])
             if traj is None:
                 continue
-            found = run_checks(traj, rules, abandon_minutes, abandoned_why)
-            if h["run_id"]:  # a test case: its case's checks too, as results of its test run
-                done_ = found[0]  # "completed", so a run that never finished shows in the test run
-                case = [{"field": "completed", "status": done_["status"], "expected": "the run finishes",
-                         "actual": h["status"] or "completed", "reason": done_["reason"]}]
-                case += agents.checks_for(traj, refs.get(h["case_id"]), rules)
-                results += agents.result_rows(tenant, h["run_id"], h, case)
-                # The case's safety and efficiency checks cover these two; don't report them twice.
-                found = [c for c in found if c["check"] not in ("safety", "loops")]
-                found += [{"check": c["field"], "status": c["status"], "reason": c["reason"]} for c in case
-                          if c["field"] != "completed"]
+            try:
+                found, case_rows = _checks_for_run(tenant, h, traj, rules, refs, abandon_minutes, abandoned_why)
+            except Exception as exc:  # one run that can't be checked mustn't hold up the rest, or itself
+                log.exception("Couldn't evaluate %s", h["trajectory_id"])
+                found, case_rows = [{"check": "evaluation", "status": "error",
+                                     "reason": f"{type(exc).__name__}: {exc}"[:500]}], []
+            results += case_rows
             checks.append({"tenant": tenant, "trajectory_id": h["trajectory_id"], "evaluated_at": now,
                            "status": h["status"], "checks": found,
                            "failed": sum(1 for c in found if c["status"] == "fail")})
@@ -211,17 +226,57 @@ def sweep(engine: Engine, abandon_minutes: float = ABANDON_MINUTES) -> dict:
             return out
 
 
+def backlog(engine: Engine, minutes: float = BACKLOG_MINUTES, now: Optional[datetime] = None) -> Dict[str, dict]:
+    """Per tenant: ended runs waiting for evaluation longer than `minutes`, and the oldest wait."""
+    now = now or datetime.utcnow()
+    t, rc = _heads(), store.run_checks
+    joined = t.outerjoin(rc, and_(rc.c.tenant == t.c.tenant, rc.c.trajectory_id == t.c.trajectory_id))
+    with engine.connect() as conn:
+        rows = conn.execute(select(t.c.tenant, func.count(), func.min(_last_event(t))).select_from(joined).where(and_(
+            or_(t.c.status.is_(None), t.c.status != "running"),
+            or_(rc.c.evaluated_at.is_(None), rc.c.evaluated_at < _last_event(t)),
+            _last_event(t) < now - timedelta(minutes=minutes))).group_by(t.c.tenant)).all()
+    return {r[0]: {"waiting": r[1], "oldest_minutes": round((now - r[2]).total_seconds() / 60, 1)} for r in rows}
+
+
+def check_backlog(engine: Engine, minutes: float = BACKLOG_MINUTES, now: Optional[datetime] = None) -> dict:
+    """Open an alert for each tenant whose ended runs aren't getting evaluated; resolve it once
+    they are. Called after every sweep attempt, including one that failed: that's when it matters."""
+    now = now or datetime.utcnow()
+    stuck = backlog(engine, minutes, now)
+    a = store.alerts
+    with engine.begin() as conn:
+        open_ = {r.source: r.id for r in conn.execute(select(a.c.id, a.c.source).where(and_(
+            a.c.kind == "evaluation", a.c.state == "open")))}
+        for tenant, b in stuck.items():
+            source = f"events:{tenant}"
+            msg = (f"{b['waiting']:,} agent run{'s' * (b['waiting'] != 1)} ended but {'aren' if b['waiting'] != 1 else 'isn'}'t "
+                   f"evaluated, the oldest {b['oldest_minutes']:g} minutes ago: is the evaluation sweep running?")
+            fields = dict(last_seen_at=now, value=float(b["waiting"]), n=b["waiting"], message=msg)
+            if source in open_:
+                conn.execute(a.update().where(a.c.id == open_[source]).values(**fields))
+            else:
+                conn.execute(a.insert().values(source=source, measure_id="lifecycle", kind="evaluation", state="open",
+                                               opened_at=now, streak=1, **fields))
+        for source, aid in open_.items():
+            if source.split(":", 1)[1] not in stuck:
+                conn.execute(a.update().where(a.c.id == aid).values(state="resolved", resolved_at=now))
+    return stuck
+
+
 def overview(engine: Engine, tenant: str, limit: int = 50) -> dict:
     """Where the runs are in their lifecycle, and the latest that failed a check."""
     t, rc = _heads(), store.run_checks
     joined = t.outerjoin(rc, and_(rc.c.tenant == t.c.tenant, rc.c.trajectory_id == t.c.trajectory_id))
     with engine.connect() as conn:
-        rows = conn.execute(select(t.c.status, rc.c.evaluated_at, rc.c.failed, _last_event(t).label("last"))
-                            .select_from(joined).where(t.c.tenant == tenant)).all()
+        rows = conn.execute(select(t.c.status, rc.c.evaluated_at, rc.c.failed, rc.c.checks,
+                                   _last_event(t).label("last")).select_from(joined).where(t.c.tenant == tenant)).all()
         failing = conn.execute(select(t.c.trajectory_id, t.c.task, t.c.status, rc.c.evaluated_at, rc.c.checks)
                                .select_from(joined).where(and_(t.c.tenant == tenant, rc.c.failed > 0))
                                .order_by(rc.c.evaluated_at.desc()).limit(limit)).all()
-    counts = {"running": 0, "awaiting_evaluation": 0, "evaluated": 0, "failing": 0, "abandoned": 0}
+    counts = {"running": 0, "awaiting_evaluation": 0, "evaluated": 0, "failing": 0, "abandoned": 0,
+              "evaluation_errors": 0}
+    oldest = None
     for r in rows:
         if r.status == "running":
             counts["running"] += 1
@@ -229,10 +284,13 @@ def overview(engine: Engine, tenant: str, limit: int = 50) -> dict:
         counts["abandoned"] += r.status == "abandoned"
         if r.evaluated_at is None or r.evaluated_at < r.last:
             counts["awaiting_evaluation"] += 1
+            oldest = min(oldest or r.last, r.last)
         else:
             counts["evaluated"] += 1
             counts["failing"] += (r.failed or 0) > 0
-    return {**counts, "recent_failures": [
+            counts["evaluation_errors"] += any(c.get("status") == "error" for c in r.checks or [])
+    wait = round((datetime.utcnow() - oldest).total_seconds() / 60, 1) if oldest else None
+    return {**counts, "oldest_awaiting_minutes": wait, "recent_failures": [
         {"trajectory_id": r.trajectory_id, "task": r.task, "status": r.status,
          "evaluated_at": r.evaluated_at.isoformat(),
          "failed": [c for c in r.checks if c["status"] == "fail"]} for r in failing]}

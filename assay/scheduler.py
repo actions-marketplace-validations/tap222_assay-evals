@@ -48,6 +48,10 @@ class Scheduler:
         except Exception as exc:
             log.exception("Lifecycle sweep failed")
             self.last_sweep = {"at": datetime.utcnow().isoformat(), "ok": False, "error": str(exc)}
+        try:  # even when the sweep failed: a stuck evaluation is what this is for
+            self.last_sweep["backlog"] = lifecycle.check_backlog(self.engine, self.settings.backlog_minutes)
+        except Exception:
+            log.exception("Checking the evaluation backlog failed")
         return self.last_sweep
 
     def _sweep_loop(self) -> None:

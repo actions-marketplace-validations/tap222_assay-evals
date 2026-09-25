@@ -557,7 +557,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
              summary="Agent runs by lifecycle: running, awaiting evaluation, evaluated, abandoned; latest failures")
     def agent_lifecycle(source: str, p: Principal = Depends(require("read"))):
         check_source(p, source)
-        return lifecycle.overview(engine, _tenant(source)) | {"abandon_minutes": settings.abandon_minutes}
+        return lifecycle.overview(engine, _tenant(source)) | {
+            "abandon_minutes": settings.abandon_minutes, "backlog_minutes": settings.backlog_minutes,
+            "sweep": scheduler.last_sweep and {k: v for k, v in scheduler.last_sweep.items() if k != "backlog"}}
 
     # ---------- the v1 event schema ----------
 
@@ -785,6 +787,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if out is None:
             raise HTTPException(404, f"No results for evaluation run '{run_id}' in {source}.")
         return out["stability"]
+
+    @app.get("/v1/evals/runs/{run_id}/verdicts", tags=["results"],
+             summary="Every check's verdict: PASS, FAIL, FLAKY, INCONCLUSIVE, EVALUATOR_ERROR, INFRA_ERROR, MISSING")
+    def eval_verdicts(run_id: str, source: str, verdict: Optional[str] = None, baseline: Optional[str] = None,
+                      p: Principal = Depends(require("read"))):
+        out = failures.evaluation(engine, resolve(p, source), _tenant(source), run_id, baseline)
+        if out is None:
+            raise HTTPException(404, f"No results for evaluation run '{run_id}' in {source}.")
+        v = out["verdicts"]
+        return {"run_id": run_id, "counts": v["counts"],
+                "checks": [c for c in v["checks"] if verdict is None or c["verdict"] == verdict.upper()]}
 
     @app.get("/v1/evals/runs/{run_id}/audit", tags=["results"],
              summary="Were the evaluators given the right data? Their recorded inputs, checked against the trace")

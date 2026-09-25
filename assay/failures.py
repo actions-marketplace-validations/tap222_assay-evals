@@ -801,8 +801,9 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
                              + f", guarding “{name}” (first seen {first}).")
     # What each failing check's cause means for the release (see flaky.summarize).
     key_of = {f["id"]: flaky.check_key(_Row(f)) for f in traced}
-    roles = {}
+    roles, causes = {}, {}
     for g in out["groups"]:
+        causes.update({key_of[i]: g["name"] for i in g["member_ids"]})
         d = (g.get("decision") or {}).get("decision")
         role = "accepted" if d in ("accepted_change", "not_a_problem") else \
             {"intended_change": "intended", "evaluator": "evaluator", "infrastructure": "infrastructure"}.get(g["kind"])
@@ -812,11 +813,21 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
     for r in rows:
         if r.result_id in audited:
             roles[flaky.check_key(r)] = "evaluator_input"
-    return out | {"audit": audit.summary(rows, audited)} | {"scope": {"kind": "eval", "run_id": run_id, "baseline": baseline, "changes": {
+    from assay import verdicts
+    verdict = verdicts.compute(rows, states, audited, roles, causes)
+    stability = _with_guards(flaky.summarize(states, tolerance, roles), back_total)
+    lost = verdict["counts"]["MISSING"]
+    if lost:  # results that never arrived: the run isn't done being judged
+        evs = sorted({c["evaluator"] for c in verdict["checks"] if c["verdict"] == "MISSING"})
+        stability["reasons"].append(f"{lost:,} results never arrived from {', '.join(evs)}: rerun "
+                                    f"{'it' if len(evs) == 1 else 'them'} on the cases they skipped.")
+        if stability["outcome"] == "advance":
+            stability["outcome"] = "rerun"
+    return out | {"audit": audit.summary(rows, audited), "verdicts": verdict} | {"scope": {"kind": "eval", "run_id": run_id, "baseline": baseline, "changes": {
         k: {"from": a, "to": b} for k, (a, b) in changes.items()}, "results": len(rows), "checks": len(cand),
         "passed": len(passes), "attempts_per_check": round(len(rows) / len(cand), 1)},
-        "population": len(cand), "stability": _with_guards(flaky.summarize(states, tolerance, roles), back_total)
-        | {"run_id": run_id, "baseline": baseline, "lineage": this["lineage"], "production_bugs_back": back_total}}
+        "population": len(cand), "stability": stability
+        | {"verdicts": verdict["counts"], "run_id": run_id, "baseline": baseline, "lineage": this["lineage"], "production_bugs_back": back_total}}
 
 
 def _with_guards(st: dict, back: int) -> dict:

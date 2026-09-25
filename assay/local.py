@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import delete, select
 
-from assay import agents, audit, contracts, failures, ingest, learn, lifecycle, schema, store
+from assay import agents, audit, contracts, failures, flaky, ingest, learn, lifecycle, schema, store, verdicts
 from assay.sources.events import EventsSource
 
 try:
@@ -358,14 +358,14 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
     ran = {r.case_id for r in rows}
     base_rows = [r for r in base_rows if r.case_id in ran]  # a subset is compared on its own cases
     found = audit.audit_rows(engine, TENANT, rows)
-    rows = [r for r in rows if r.result_id not in found]
+    not_judged = [c for c in a["verdicts"]["checks"] if c["verdict"] in verdicts.NOT_JUDGED]
+    skip = {(c["case_id"], c["field"] or "", c["evaluator"] or "") for c in not_judged}
+    # Listed apart, and out of every count: judged on the wrong data, or not judged at all.
+    rows = [r for r in rows if r.result_id not in found and flaky.check_key(r) not in skip]
     base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, TENANT, base_rows)]
-    by_id = {r.result_id: r for r in _rows(engine, run_id)}
     return {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
             "attempts": attempts(rows), "base_attempts": attempts(base_rows),
-            "suspect": [{"case_id": by_id[rid].case_id, "field": by_id[rid].field or "result",
-                         "evaluator": by_id[rid].evaluator, "status": by_id[rid].status, "findings": fs}
-                        for rid, fs in found.items()]}
+            "not_judged": not_judged}
 
 
 def _rows(engine, run_id: str) -> list:
@@ -375,10 +375,12 @@ def _rows(engine, run_id: str) -> list:
 
 
 def attempts(rows: list) -> Dict[Tuple[str, str], List[bool]]:
-    """Per (case, field): whether each attempt passed."""
+    """Per (case, field): whether each judged attempt passed. An attempt that couldn't run (an
+    evaluator or infrastructure error) isn't a failure: it's listed with what wasn't judged."""
     out = defaultdict(list)
     for r in rows:
-        out[(r.case_id, r.field or "result")].append(r.status == "pass")
+        if r.status != "error":
+            out[(r.case_id, r.field or "result")].append(r.status == "pass")
     return dict(out)
 
 
@@ -401,7 +403,7 @@ def failing(rows: list) -> Dict[Tuple[str, str], dict]:
     out = {}
     for r in rows:
         key = (r.case_id, r.field or "result")
-        if r.status != "pass" and key not in out:
+        if r.status == "fail" and key not in out:
             out[key] = {"reason": r.reason, "expected": r.expected, "actual": r.actual}
     return out
 
@@ -550,9 +552,16 @@ def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
     cases pass with a note."""
     import xml.etree.ElementTree as ET
     states, fails = case_states(result, c), result["failing"]
+    for x in result["not_judged"]:  # a case with nothing judged at all still gets a line
+        states.setdefault(x["case_id"], "passed")
+    unjudged: Dict[str, List[str]] = defaultdict(list)
+    for x in result["not_judged"]:
+        unjudged[x["case_id"]].append(f"{verdicts.VERDICTS[x['verdict']]}: {_label(x['field'] or 'result')}"
+                                      f"{' (' + x['evaluator'] + ')' if x['evaluator'] else ''}: {x['reason']}")
     flaky = {p["case_id"] for p in c["flaky"]}
     suite = ET.Element("testsuite", name=f"assay {run_id}", tests=str(len(states)),
                        failures=str(sum(1 for v in states.values() if v == "failed")),
+                       errors=str(sum(1 for k, v in states.items() if v != "failed" and k in unjudged)),
                        skipped=str(sum(1 for v in states.values() if v == "known")))
     for case, st in sorted(states.items()):
         f = _file(case)
@@ -565,6 +574,8 @@ def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
         why = [f"{', '.join(labels)}: {r}" for r, labels in grouped.items()]
         if st == "failed":
             ET.SubElement(tc, "failure", message=(why or ["failed"])[0][:500]).text = "\n".join(why)
+        elif case in unjudged:  # JUnit's "couldn't run", not a failure
+            ET.SubElement(tc, "error", message=unjudged[case][0][:500]).text = "\n".join(unjudged[case])
         elif st == "known":
             ET.SubElement(tc, "skipped", message=("flaky: passes some attempts, as before" if case in flaky else
                                                   "failing in the baseline too") + (f": {why[0]}"[:500] if why else ""))
@@ -600,15 +611,19 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
         if len(_groups(problems)) > 20:
             out.append(f"\n… and {len(_groups(problems)) - 20} more")
         out.append("")
-    if result["suspect"]:
-        n = len(result["suspect"])
-        out.append(_paint(f"? {_n(n, 'result')} judged on data that doesn't match the trace (not counted)", "yellow"))
-        for s_ in result["suspect"][:10]:
-            out.append(f"  {s_['case_id']}  {_label(s_['field'])}" +
-                       (f"  {s_['evaluator']}" if s_["evaluator"] else "") + f"  ({s_['status']})")
-            out += [_paint(f"    {f}", "dim") for f in s_["findings"][:2]]
-        if n > 10:
-            out.append(f"  … and {n - 10} more")
+    nj = result["not_judged"]
+    if nj:
+        out.append(_paint(f"? {_n(len(nj), 'result')} couldn't be judged (not counted)", "yellow"))
+        for v in ("EVALUATOR_ERROR", "INFRA_ERROR", "MISSING"):
+            items = [x for x in nj if x["verdict"] == v]
+            if not items:
+                continue
+            out.append(f"  {verdicts.VERDICTS[v].capitalize()}: {len(items)}")
+            for x in items[:5]:
+                out.append(f"    {x['case_id']}  {_label(x['field'] or 'result')}" +
+                           (f"  {x['evaluator']}" if x["evaluator"] else "") + _paint(f"  {x['reason']}", "dim"))
+            if len(items) > 5:
+                out.append(f"    … and {len(items) - 5} more")
         out.append("")
     if c["flaky"]:
         out.append(_paint(f"~ {_n(len(c['flaky']), 'flaky check')}: passing some attempts, as before; "
@@ -630,8 +645,12 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
                           "later runs then fail only on what gets worse.", "dim"))
     if any(codes):
         out.append(_paint(f"Your command exited with {', '.join(str(x) for x in codes if x)}.", "yellow"))
-    out.append(_paint("Passed." if passed else "Failed.", "green" if passed else "red") +
-               (" Its cases' results are now their baseline." if passed else ""))
+    if passed and nj:
+        out.append(_paint(f"Inconclusive: nothing got worse, but {_n(len(nj), 'result')} couldn't be judged. "
+                          "Fix or rerun the evaluation; the baseline stays as it was.", "yellow"))
+    else:
+        out.append(_paint("Passed." if passed else "Failed.", "green" if passed else "red") +
+                   (" Its cases' results are now their baseline." if passed else ""))
     return "\n".join(out), passed
 
 
@@ -709,10 +728,11 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     if junit:
         write_junit(junit, run_id, result, verdict(result, bool(baseline))[1])
     state["last"] = run_id
-    if passed:
+    inconclusive = passed and bool(result["not_judged"])
+    if passed and not inconclusive:
         state["baseline_cases"] = {**(state.get("baseline_cases") or {}), **{c: run_id for c in promote(engine, run_id)}}
     _save_state(home, state)
-    code = 0 if passed else 1
+    code = 1 if not passed else 3 if inconclusive else 0
     if send is not None:
         print()
         sent = upload(root, run_id, **send)

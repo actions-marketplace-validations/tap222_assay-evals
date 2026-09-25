@@ -236,11 +236,11 @@ for case, q, reply in (("c1", "Refund O-17 please", "Refunded $27.61."), ("c2", 
               inputs={"query": q, "generation": graded})
 ''')
     config(project, f"{sys.executable} agent.py")
-    assert main(["test"]) == 0  # c2's fail says nothing about the AI
+    assert main(["test"]) == 3  # c2's fail says nothing about the AI: inconclusive, not failed
     out = capsys.readouterr().out
-    assert "? 1 result judged on data that doesn't match the trace (not counted)" in out
-    assert "c2  helpful  helpful@1  (fail)" in out and "the app answered “It ships tomorrow.”" in out
-    assert "✓ helpful     1/1" in out
+    assert "? 1 result couldn't be judged (not counted)" in out and "Evaluator error: 1" in out
+    assert "c2  helpful  helpful@1" in out and "judged on data that doesn't match the trace" in out
+    assert "✓ helpful     1/1" in out and "Inconclusive: nothing got worse" in out
 
 
 SUBSET = '''
