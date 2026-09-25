@@ -213,6 +213,7 @@ ROLES = {
     "accepted": "decided: accepted as intended, or not a problem",
     "intended": "look like an intended change nobody has accepted yet",
     "evaluator": "fail because of the evaluator, not the output: fix the checks",
+    "evaluator_input": "were judged on data that doesn't match the trace: fix what the evaluator is given",
     "infrastructure": "failed on infrastructure: rerun them once it's fixed",
 }
 
@@ -289,7 +290,7 @@ def summarize(states: Dict[tuple, dict], tolerance: float = 0.01, roles: Optiona
         reasons.append(f"{role_counts['intended']:,} checks {ROLES['intended']}.")
     if reruns and outcome != "rerun":
         reasons.append(f"{len(reruns):,} checks need reruns ({more:,} attempts) before they can be judged.")
-    for r in ("evaluator", "accepted"):
+    for r in ("evaluator", "evaluator_input", "accepted"):
         if role_counts[r]:
             reasons.append(f"Not counted: {role_counts[r]:,} checks {ROLES[r]}.")
     all_flaky = sum(1 for x in states.values() if x["state"] == "flaky")

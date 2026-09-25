@@ -710,6 +710,39 @@ marks quiet runs abandoned and evaluates anything left over.
 | `GET /v1/agents/runs/{run}?source=…` | pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline |
 | `GET /v1/agents/trajectories/{id}?source=…` | one run step by step: divergence, end state, contract breaks, cost, and its latest evaluation |
 
+## Was the judge given the right data?
+
+An LLM judge given the wrong thing still returns a valid-looking score. Real examples:
+`{{generation}}` filled with the trace's input, so the judge grades the user's own question;
+`{{query}}` and `{{generation}}` holding the same text; a template variable nobody filled in;
+the rubric sent as the user's message, so the judge confuses it with the request.
+
+Send what the evaluator saw with its result, by role, and Assay checks it against the trace:
+
+```python
+assay.check("nightly", "case-17", "pass", run_id=run.id, field="helpful", evaluator="helpful@1", score=5,
+            inputs={"query": question, "generation": graded, "instructions": rubric, "messages": judge_messages})
+```
+
+| Finding | When |
+|---|---|
+| output is the run's input, not its answer | the graded "output" is what the user asked |
+| output isn't what the app produced | it matches none of the run's answer, model outputs or stage outputs |
+| query isn't the run's input | the judge was told about a different request |
+| query and output are the same text | both variables were filled from the same place |
+| a template variable nobody filled in | `{{query}}` or `${input.text}` reached the judge |
+| instructions sent as the user's message | the rubric is in a `user` message and in no `system` one |
+
+Roles accept the names judges use: `generation`, `response` or `completion` for the output,
+`question` or `input` for the query, `reference` or `ground_truth` for the expected answer,
+`rubric` or `criteria` for the instructions.
+
+A result with a finding says nothing about the AI, whether it passed or failed. Release
+calls leave it out ("judged on data that doesn't match the trace"). Failure causes group it
+as an evaluator problem ("helpful@1 was given the wrong data"), and `assay test` lists it on
+its own. `GET /v1/evals/runs/{run}/audit?source=…` shows, per evaluator, how many of its
+results were audited and how many were suspect, with examples.
+
 ## Failure causes: many failures, a few causes
 
 5,000 failed checks are rarely 5,000 problems. **Failures** groups them into causes and

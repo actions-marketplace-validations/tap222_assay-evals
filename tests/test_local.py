@@ -219,3 +219,22 @@ os._exit(1)  # killed mid-run: run.end never comes
     out = capsys.readouterr().out
     assert "✗ Finished    1/2" in out and "killed  Finished" in out
     assert "Never finished after step 0: the command exited first." in out
+
+
+def test_results_judged_on_the_wrong_data_are_listed_not_counted(project, capsys):
+    (project / "agent.py").write_text('''
+import assay_sdk as assay
+assay.init()
+for case, q, reply in (("c1", "Refund O-17 please", "Refunded $27.61."), ("c2", "Where is O-18?", "It ships tomorrow.")):
+    with assay.run("support", input=q, test=case) as run:
+        run.answer(reply)
+    graded = q if case == "c2" else reply   # c2: the judge got the question as the "generation"
+    run.check("helpful", "fail" if case == "c2" else "pass", evaluator="helpful@1",
+              inputs={"query": q, "generation": graded})
+''')
+    config(project, f"{sys.executable} agent.py")
+    assert main(["test"]) == 0  # c2's fail says nothing about the AI
+    out = capsys.readouterr().out
+    assert "? 1 result judged on data that doesn't match the trace (not counted)" in out
+    assert "c2  helpful  helpful@1  (fail)" in out and "the app answered “It ships tomorrow.”" in out
+    assert "✓ helpful     1/1" in out

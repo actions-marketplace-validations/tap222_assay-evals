@@ -212,6 +212,7 @@ eval_results = Table(
     Column("ts", DateTime, nullable=False, index=True),
     Column("attempt", Integer),  # repeated judgements of the same output
     Column("lineage", JSON),  # {"prompt": "extract_fields@v13", "model": ..., "build": ...}
+    Column("inputs", JSON),  # what the evaluator saw: {"query", "output", "context", ...}; see assay/audit.py
 )
 
 # --- Agents: one trajectory per run of an agent on a task, its steps, and what a case expects ---

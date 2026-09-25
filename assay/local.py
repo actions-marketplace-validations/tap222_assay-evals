@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import delete, select
 
-from assay import agents, contracts, failures, ingest, learn, lifecycle, schema, store
+from assay import agents, audit, contracts, failures, ingest, learn, lifecycle, schema, store
 from assay.sources.events import EventsSource
 
 try:
@@ -283,44 +283,52 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
     a = failures.evaluation(engine, source, TENANT, run_id, baseline or "", tolerance)
     if a is None:
         return None
-    return {"stability": a["stability"], "fields": field_rates(engine, run_id, baseline),
-            "failing": failing(engine, run_id), "attempts": attempts(engine, run_id),
-            "base_attempts": attempts(engine, baseline) if baseline else {}}
+    # Results whose evaluator was given the wrong data (assay/audit.py) say nothing about the AI:
+    # they're listed on their own and left out of every count below.
+    rows, base_rows = _rows(engine, run_id), _rows(engine, baseline) if baseline else []
+    found = audit.audit_rows(engine, TENANT, rows)
+    rows = [r for r in rows if r.result_id not in found]
+    base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, TENANT, base_rows)]
+    by_id = {r.result_id: r for r in _rows(engine, run_id)}
+    return {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
+            "attempts": attempts(rows), "base_attempts": attempts(base_rows),
+            "suspect": [{"case_id": by_id[rid].case_id, "field": by_id[rid].field or "result",
+                         "evaluator": by_id[rid].evaluator, "status": by_id[rid].status, "findings": fs}
+                        for rid, fs in found.items()]}
 
 
 def _rows(engine, run_id: str) -> list:
     t = store.eval_results
     with engine.connect() as conn:
-        return conn.execute(select(t.c.case_id, t.c.field, t.c.evaluator, t.c.status, t.c.reason, t.c.expected,
-                                   t.c.actual).where((t.c.tenant == TENANT) & (t.c.run_id == run_id))).all()
+        return conn.execute(select(t).where((t.c.tenant == TENANT) & (t.c.run_id == run_id))).all()
 
 
-def attempts(engine, run_id: str) -> Dict[Tuple[str, str], List[bool]]:
+def attempts(rows: list) -> Dict[Tuple[str, str], List[bool]]:
     """Per (case, field): whether each attempt passed."""
     out = defaultdict(list)
-    for r in _rows(engine, run_id):
+    for r in rows:
         out[(r.case_id, r.field or "result")].append(r.status == "pass")
     return dict(out)
 
 
-def field_rates(engine, run_id: str, baseline: Optional[str]) -> List[dict]:
+def field_rates(rows: list, base_rows: list) -> List[dict]:
     """Per check (answer, tool_calls, ... or your own field): cases passing on every attempt."""
-    def rates(rid):
+    def rates(rs):
         by = defaultdict(dict)
-        for (case, field), a in attempts(engine, rid).items():
+        for (case, field), a in attempts(rs).items():
             by[field][case] = all(a)
         return {f: (sum(cases.values()), len(cases)) for f, cases in by.items()}
-    cur, base = rates(run_id), rates(baseline) if baseline else {}
+    cur, base = rates(rows), rates(base_rows)
     order = [k for k in CHECK_NAMES if k in cur] + sorted(k for k in cur if k not in CHECK_NAMES)
     return [{"field": f, "label": CHECK_NAMES.get(f, f), "passed": cur[f][0], "total": cur[f][1],
              "base_passed": base[f][0] if f in base else None, "base_total": base[f][1] if f in base else None}
             for f in order]
 
 
-def failing(engine, run_id: str) -> Dict[Tuple[str, str], dict]:
+def failing(rows: list) -> Dict[Tuple[str, str], dict]:
     """The first failing attempt of each (case, field), with why."""
     out = {}
-    for r in _rows(engine, run_id):
+    for r in rows:
         key = (r.case_id, r.field or "result")
         if r.status != "pass" and key not in out:
             out[key] = {"reason": r.reason, "expected": r.expected, "actual": r.actual}
@@ -454,6 +462,16 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
             out += [f"   {line}" for line in _explain(ps, fails, repeat)]
         if len(_groups(problems)) > 20:
             out.append(f"\n… and {len(_groups(problems)) - 20} more")
+        out.append("")
+    if result["suspect"]:
+        n = len(result["suspect"])
+        out.append(_paint(f"? {_n(n, 'result')} judged on data that doesn't match the trace (not counted)", "yellow"))
+        for s_ in result["suspect"][:10]:
+            out.append(f"  {s_['case_id']}  {_label(s_['field'])}" +
+                       (f"  {s_['evaluator']}" if s_["evaluator"] else "") + f"  ({s_['status']})")
+            out += [_paint(f"    {f}", "dim") for f in s_["findings"][:2]]
+        if n > 10:
+            out.append(f"  … and {n - 10} more")
         out.append("")
     if c["flaky"]:
         out.append(_paint(f"~ {_n(len(c['flaky']), 'flaky check')}: passing some attempts, as before; "

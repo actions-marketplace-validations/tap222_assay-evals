@@ -35,6 +35,8 @@ with assay.run("invoice", kind="pipeline", input_ref="s3://inbox/inv-9.pdf") as 
 assay.feedback(run.id, "thumbs_down")
 assay.correction(run.id, "total", expected="1240.00", observed="1204.00")
 assay.check("nightly-0924", "case-17", "fail", run_id=run.id, field="total", expected="1240.00", actual="1204.00")
+assay.check("nightly-0924", "case-17", "pass", run_id=run.id, field="helpful", evaluator="helpful@1",
+            inputs={"query": question, "generation": graded})   # what the judge saw, checked against the trace
 assay.expect("case-17", calls=[{"tool": "get_order", "args": {"order_id": "O-17"}}], answer="27.61")
 ```
 

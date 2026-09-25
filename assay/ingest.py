@@ -112,6 +112,9 @@ class EvalResultEvent(Event):
     reason: Optional[str] = Field(None, max_length=2048, description="The evaluator's explanation, or the error")
     ts: Optional[datetime] = None
     attempt: Optional[int] = Field(None, ge=0, description="For repeated judgements of the same output")
+    inputs: Optional[Dict[str, Any]] = Field(
+        None, description='What the evaluator saw, by role: {"query", "output", "context", "expected", '
+                          '"instructions", "messages"}. Checked against the trace (assay/audit.py).')
     lineage: Optional[Dict[str, str]] = Field(
         None, description='What produced the output: {"prompt": "extract_fields@v13", "model": "...", "build": "..."}')
 

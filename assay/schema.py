@@ -36,7 +36,7 @@ class _E(BaseModel):
             v = getattr(self, name)
             if isinstance(v, datetime) and v.tzinfo is not None:
                 object.__setattr__(self, name, v.astimezone(timezone.utc).replace(tzinfo=None))
-            if name in ("args", "result", "outputs", "value", "input") and v is not None \
+            if name in ("args", "result", "outputs", "value", "input", "inputs") and v is not None \
                     and len(json.dumps(v, default=str)) > MAX_JSON:
                 raise ValueError(f"{name} is larger than {MAX_JSON // 1024} KB; trim it or send a reference")
         return self
@@ -136,6 +136,9 @@ class Check(_E):
     score: Optional[float] = None
     reason: Optional[str] = Field(None, max_length=2048)
     version: Optional[Dict[str, str]] = None
+    inputs: Optional[Dict[str, Any]] = Field(
+        None, description='What the evaluator saw, by role: {"query", "output", "context", "expected", '
+                          '"instructions", "messages"}. Assay checks it against the trace (assay/audit.py).')
 
 
 class Correction(_E):
@@ -285,7 +288,7 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                                        "case_id": e.test.case, "attempt": e.test.attempt, "document_id": e.run_id,
                                        "field": e.field, "expected": e.expected, "actual": e.actual,
                                        "status": e.status, "evaluator": e.evaluator, "score": e.score,
-                                       "reason": e.reason, "ts": e.ts,
+                                       "reason": e.reason, "ts": e.ts, "inputs": e.inputs,
                                        "lineage": e.version or (known.get(e.run_id) or {}).get("version")})
             elif isinstance(e, Correction):
                 rows["errors"].append({"tenant": tenant, "error_id": e.id, "document_id": e.run_id, "field": e.field,

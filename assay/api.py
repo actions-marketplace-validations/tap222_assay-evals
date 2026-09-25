@@ -19,7 +19,7 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import (agents, alerts, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, lifecycle, prompts, rootcause, runner, store, trace, workflow)
+from assay import (agents, alerts, audit, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, lifecycle, prompts, rootcause, runner, store, trace, workflow)
 from assay.auth import Principal
 from assay.config import Settings
 from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EvalResultEvent, EventBatch, ExtractionEvent,
@@ -782,6 +782,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if out is None:
             raise HTTPException(404, f"No results for evaluation run '{run_id}' in {source}.")
         return out["stability"]
+
+    @app.get("/v1/evals/runs/{run_id}/audit", tags=["results"],
+             summary="Were the evaluators given the right data? Their recorded inputs, checked against the trace")
+    def eval_audit(run_id: str, source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        out = audit.evaluation_run(engine, _tenant(source), run_id)
+        if out is None:
+            raise HTTPException(404, f"No results for evaluation run '{run_id}' in {source}.")
+        return out
 
     @app.post("/v1/evals/runs/{run_id}/gate", tags=["operate"],
               summary="Advance, rerun, hold or roll back on an evaluation run, allowing for flakiness; recorded")

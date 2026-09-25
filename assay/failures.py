@@ -213,6 +213,9 @@ def classify(f: dict) -> Tuple[str, str, List[str]]:
         if INFRA_REASON.search(reason):
             return "infrastructure", "harness", [f"The check couldn't run: {reason[:160]}"]
         return "evaluator", "evaluator_error", [f"The evaluator itself failed: {reason[:160] or 'no reason given'}"]
+    if f.get("audit"):  # assay/audit.py: what it graded isn't what the run did
+        return "evaluator", "wrong_inputs", [f"{f.get('evaluator') or 'The evaluator'} was given data that doesn't "
+                                             f"match the trace: {f['audit'][0]}."]
     if f.get("agent") and not f.get("disagreement"):
         if verdict == "tool_error" and INFRA_REASON.search(f.get("tool_error") or ""):
             return "infrastructure", "tool_unavailable", [f.get("explanation", "")]
@@ -394,6 +397,7 @@ GROUP_NAMES = {
     ("evaluator", "expected_not_in_source"): "the expected {fields} isn't in the document, but the output is",
     ("evaluator", "reads_other_value"): "the check sees a different {fields} from the one the pipeline produced",
     ("evaluator", "evaluator_error"): "the evaluator errored",
+    ("evaluator", "wrong_inputs"): "{evaluator} was given the wrong data",
     ("intended_change", "format_only"): "{fields} changed format with {change}",
     ("unsure", "input"): "{fields} not in the text: source quality or OCR",
     ("unsure", "check_failed"): "{evaluator}: {pattern}",
@@ -707,6 +711,8 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
     rows = _results(engine, tenant, run_id)
     if not rows:
         return None
+    from assay import audit
+    audited = audit.audit_rows(engine, tenant, rows)  # results whose evaluator was given the wrong data
     runs = eval_runs(engine, tenant)
     this = next(r for r in runs if r["run_id"] == run_id)
     baseline = _baseline(runs, run_id, baseline)
@@ -751,7 +757,8 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
              "outputs": sorted({str(a.actual) for a in attempts})[:4],
              "shape": diff_shape(r.expected, r.actual), "features": features_of(r),
              # The same output passed on another attempt: the evaluator is inconsistent.
-             "disagreement": any(a.status == "pass" and a.actual == r.actual for a in attempts)}
+             "disagreement": any(a.status == "pass" and a.actual == r.actual for a in attempts),
+             "audit": audited.get(r.result_id)}
         failures.append(f)
         if r.document_id and r.field and r.status == "fail":
             by_doc[r.document_id].append(f)
@@ -801,7 +808,11 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
             {"intended_change": "intended", "evaluator": "evaluator", "infrastructure": "infrastructure"}.get(g["kind"])
         if role:
             roles.update({key_of[i]: role for i in g["member_ids"]})
-    return out | {"scope": {"kind": "eval", "run_id": run_id, "baseline": baseline, "changes": {
+    # Judged on data that doesn't match the trace: not evidence about the AI, pass or fail.
+    for r in rows:
+        if r.result_id in audited:
+            roles[flaky.check_key(r)] = "evaluator_input"
+    return out | {"audit": audit.summary(rows, audited)} | {"scope": {"kind": "eval", "run_id": run_id, "baseline": baseline, "changes": {
         k: {"from": a, "to": b} for k, (a, b) in changes.items()}, "results": len(rows), "checks": len(cand),
         "passed": len(passes), "attempts_per_check": round(len(rows) / len(cand), 1)},
         "population": len(cand), "stability": _with_guards(flaky.summarize(states, tolerance, roles), back_total)

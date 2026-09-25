@@ -390,15 +390,18 @@ def feedback(run_id: str, kind: str, note: Optional[str] = None) -> None:
 def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[int] = None, run_id: Optional[str] = None,
           field: Optional[str] = None, expected: Any = None, actual: Any = None, evaluator: Optional[str] = None,
           score: Optional[float] = None, reason: Optional[str] = None,
-          version: Optional[Dict[str, str]] = None) -> None:
+          version: Optional[Dict[str, str]] = None, inputs: Optional[Dict[str, Any]] = None) -> None:
     """One result from a test run: status pass, fail, or error (the check couldn't run). Send passes too.
-    test_run None: the run `assay test` is doing (else "local")."""
+    test_run None: the run `assay test` is doing (else "local").
+    inputs: what the evaluator saw, e.g. {"query": ..., "output": ..., "context": ...}, so Assay can
+    check a judge got the right data (the output really is the run's answer, and so on)."""
     s = lambda v: None if v is None else v if isinstance(v, str) else json.dumps(_json_safe(v))
     t = _test({"case": case, **({"run": test_run} if test_run else {}),
                **({"attempt": attempt} if attempt is not None else {})})
     _c().emit({"type": "check", "test": t,
                "status": status, "run_id": run_id, "field": field, "expected": s(expected), "actual": s(actual),
-               "evaluator": evaluator, "score": score, "reason": reason, "version": version})
+               "evaluator": evaluator, "score": score, "reason": reason, "version": version,
+               "inputs": _c().clean(inputs)})
 
 
 def correction(run_id: str, field: str, expected: Any = None, observed: Any = None, kind: str = "wrong",
