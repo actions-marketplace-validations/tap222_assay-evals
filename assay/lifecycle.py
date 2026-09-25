@@ -131,7 +131,10 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
                          "actual": h["status"] or "completed", "reason": done_["reason"]}]
                 case += agents.checks_for(traj, refs.get(h["case_id"]), rules)
                 results += agents.result_rows(tenant, h["run_id"], h, case)
-                found += [{"check": c["field"], "status": c["status"], "reason": c["reason"]} for c in case]
+                # The case's safety and efficiency checks cover these two; don't report them twice.
+                found = [c for c in found if c["check"] not in ("safety", "loops")]
+                found += [{"check": c["field"], "status": c["status"], "reason": c["reason"]} for c in case
+                          if c["field"] != "completed"]
             checks.append({"tenant": tenant, "trajectory_id": h["trajectory_id"], "evaluated_at": now,
                            "status": h["status"], "checks": found,
                            "failed": sum(1 for c in found if c["status"] == "fail")})

@@ -123,3 +123,47 @@ def test_cron_sweeps_without_scheduled_sources(app):
     out = app.get("/v1/cron", headers={"Authorization": "Bearer shh"}).json()
     assert out["lifecycle"]["last"]["abandoned"] == 1 and out["lifecycle"]["last"]["evaluated"] == 1
     assert evaluation(app, "quiet")["status"] == "abandoned"
+
+
+# ---------- OpenTelemetry: a run's spans arrive over several batches ----------
+
+def span(span_id, parent=None, start=0, end=1, name="s", error=False, **attrs):
+    val = lambda v: {"intValue": v} if isinstance(v, int) else {"stringValue": v}
+    return {"traceId": "tr1", "spanId": span_id, **({"parentSpanId": parent} if parent else {}), "name": name,
+            "startTimeUnixNano": str(1_790_000_000_000_000_000 + start * 10 ** 9),
+            "endTimeUnixNano": str(1_790_000_000_000_000_000 + end * 10 ** 9),
+            "status": {"code": 2, "message": "boom"} if error else {},
+            "attributes": [{"key": k.replace("__", "."), "value": val(v)} for k, v in attrs.items()]}
+
+
+def otlp(app, *spans):
+    r = app.post("/v1/otlp/v1/traces", headers={**H, "Content-Type": "application/json"},
+                 json={"resourceSpans": [{"scopeSpans": [{"spans": list(spans)}]}]})
+    assert r.status_code == 200, r.text
+
+
+def test_otlp_run_stays_open_until_its_root_span_then_is_evaluated_whole(app):
+    tool = lambda sid, start, q: span(sid, "root", start, start + 1, name="execute_tool",
+                                      gen_ai__operation__name="execute_tool", gen_ai__tool__name="search",
+                                      gen_ai__tool__call__arguments=f'{{"q": "{q}"}}')
+    otlp(app, tool("t1", 1, "a"), tool("t2", 3, "b"))  # batch 1: two tool spans, no root yet
+    t = app.get("/v1/agents/trajectories/tr1", params=SRC).json()
+    assert t["status"] == "running" and len(t["steps"]) == 2 and t["evaluation"] is None
+    otlp(app, tool("t3", 5, "c"), tool("t2", 3, "b"))  # batch 2: one more, and a retry of t2
+    assert len(app.get("/v1/agents/trajectories/tr1", params=SRC).json()["steps"]) == 3  # kept, not replaced
+    otlp(app, span("root", None, 0, 9, name="agent", assay__task="support", assay__answer="found it"))  # root alone
+    t = app.get("/v1/agents/trajectories/tr1", params=SRC).json()
+    assert t["status"] == "completed" and t["task"] == "support" and t["answer"] == "found it"
+    assert [s["args"]["q"] for s in t["steps"] if s["kind"] == "tool"] == ["a", "b", "c"]
+    assert t["evaluation"]["status"] == "completed" and t["evaluation"]["failed"] == 0
+    otlp(app, tool("t4", 6, "d"))  # a straggler after the root: still ended, and evaluated again
+    t = app.get("/v1/agents/trajectories/tr1", params=SRC).json()
+    assert t["status"] == "completed" and len(t["steps"]) == 4 and t["answer"] == "found it"
+
+
+def test_otlp_root_span_that_errored_fails_the_run(app):
+    otlp(app, span("root", None, 0, 4, error=True, assay__task="support"),
+         span("t1", "root", 1, 2, gen_ai__tool__name="charge", error=True))
+    e = evaluation(app, "tr1")
+    assert e["status"] == "failed" and {c["check"] for c in e["checks"] if c["status"] == "fail"} == {
+        "completed", "tool_errors"}

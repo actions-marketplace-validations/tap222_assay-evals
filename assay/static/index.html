@@ -1076,9 +1076,29 @@ const jtxt=v=>v==null?"":typeof v==="string"?v:JSON.stringify(v);
 const callTxt=(n,a)=>`${n}(${Object.entries(a||{}).map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(", ")})`;
 function delta(now,before,{pp=true,lowerBetter=false}={}){if(now==null||before==null)return"";const d=now-before;if(Math.abs(d)<1e-9)return`<span class="ref">no change</span>`;
   const worse=lowerBetter?d>0:d<0;return `<span class="${worse?"worse":"better"}">${d>0?"▲":"▼"} ${pp?(Math.abs(d)*100).toFixed(1)+" pts":before?Math.round(Math.abs(d/before)*100)+"%":Math.abs(d).toFixed(2)}</span>`}
+const LIFE_CHECK={completed:"Finished",safety:"Safety",loops:"Loops",tool_errors:"Tool errors",answer:"Answer",
+  end_state:"End state",tool_calls:"Tool calls",efficiency:"Efficiency"};
+const lifeStatus=st=>`<span class="chip ${st==="completed"||st==null?"good":st==="running"?"neutral":st==="abandoned"?"warn":"bad"}">${esc(st||"completed")}</span>`;
+// Every agent run, production or test: where it is in its lifecycle, and the latest that failed a check.
+function lifecyclePanel(l){
+  if(!l)return"";
+  const tiles=[["Running",l.running,"not judged until they end"],["Awaiting evaluation",l.awaiting_evaluation,"ended, checked within a minute"],
+    ["Evaluated",l.evaluated,"checked when they ended"],["Failing",l.failing,"of those evaluated"],["Abandoned",l.abandoned,`no events for ${l.abandon_minutes} min`]];
+  return `<div class="panel stack"><div class="panel-head"><div><h2>Live agent runs</h2><p class="sub">Every run is checked when it ends, however long it took: it finished, kept the critical path contracts, didn't loop, and recovered from its tool errors. A run that goes quiet for ${l.abandon_minutes} minutes is marked abandoned, then checked.</p></div></div>
+    <div class="tiles">${tiles.map(([k,v,why])=>`<div class="tile"><b>${(v||0).toLocaleString()}</b><span>${k}<br><span class="ref">${why}</span></span></div>`).join("")}</div>
+    ${l.recent_failures.length?`<div class="scroll"><table><tr><th>Run</th><th>Task</th><th>Status</th><th>Failed</th><th>Evaluated</th></tr>
+      ${l.recent_failures.slice(0,15).map(r=>`<tr class="click" data-traj="${esc(r.trajectory_id)}"><td class="mono">${esc(r.trajectory_id)}</td><td class="ref">${esc(r.task||"")}</td><td>${lifeStatus(r.status)}</td>
+        <td>${Object.entries(r.failed.reduce((g,c)=>((g[c.reason||""]??=[]).push(LIFE_CHECK[c.check]||c.check),g),{}))
+          .map(([why,checks])=>`<div><b>${esc([...new Set(checks)].join(", "))}</b> <span class="ref">${esc(why)}</span></div>`).join("")}</td><td class="ref">${esc(r.evaluated_at.slice(0,16).replace("T"," "))}</td></tr>`).join("")}</table></div>`
+      :`<p class="note">${l.evaluated?"No evaluated run failed a check.":"No run has ended yet."}</p>`}</div>`;
+}
 async function renderAgents(){
   const box=$("#tab-agents");
-  const runs=await api(`/v1/agents/runs?${q({source:src()})}`).catch(()=>[]);
+  const [runs,life]=await Promise.all([api(`/v1/agents/runs?${q({source:src()})}`).catch(()=>[]),
+    api(`/v1/agents/lifecycle?${q({source:src()})}`).catch(()=>null)]);
+  const live=lifecyclePanel(life),wire=()=>box.querySelectorAll("[data-traj]").forEach(r=>r.onclick=()=>{location.hash="trace/"+encodeURIComponent(r.dataset.traj)});
+  const anyLive=life&&(life.running+life.awaiting_evaluation+life.evaluated)>0;
+  if(!runs.length&&anyLive){box.innerHTML=live+`<p class="note">No test runs yet: record cases with <code>assay.run(..., test="case")</code> to compare runs against what each case expects.</p>`;wire();return}
   if(!runs.length){box.innerHTML=`<div class="empty">No agent runs in this source. Send trajectories to <code>POST /v1/events/trajectories</code> (with a <code>run_id</code> and <code>case_id</code> for test runs), and what each case expects to <code>POST /v1/agents/references</code>.${src()==="events:demo"?` The demo agent is in <b>events:demo-agent</b>: pick it at the top.`:""}</div>`;return}
   let run=store.get("assay-agent-run");if(!runs.some(r=>r.run_id===run))run=runs[0].run_id;
   const meta=runs.find(r=>r.run_id===run);
@@ -1091,7 +1111,7 @@ async function renderAgents(){
   const fmtE=(k,v,d)=>v==null?"—":["recovery_rate","precision","recall"].includes(k)?pct(v,0):k==="cost_usd"?money(v):k==="tokens"?Math.round(v).toLocaleString():v.toFixed(d);
   const onlyBad=store.get("assay-agent-bad")!=="0";
   const list=c.trajectories_list.filter(t=>!onlyBad||Object.values(t.checks).includes("fail"));
-  box.innerHTML=`<div class="panel stack">
+  box.innerHTML=(anyLive?live:"")+`<div class="panel stack">
     <div class="panel-head"><div><h2>Agent run</h2><p class="sub">Each trajectory is checked against its case's reference and the source's path contracts: the answer, the end state, the tool calls, safety and efficiency. ${s.baseline?`Compared with <b class="mono">${esc(s.baseline)}</b>.`:"No earlier run to compare with."} ${Object.entries(s.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" ")}</p></div>
       <div class="picker"><select id="agent-run" aria-label="Run">${runs.map(r=>`<option value="${esc(r.run_id)}" ${r.run_id===run?"selected":""}>${esc(r.run_id)} · ${r.cases} cases, ${r.trajectories} runs${r.evaluated?"":" · not evaluated"}</option>`).join("")}</select>
         <button type="button" id="agent-eval" class="${s.evaluated?"":"primary"}">${s.evaluated?"Re-evaluate":"Evaluate against references"}</button></div></div>
@@ -1147,7 +1167,11 @@ function renderTrajectory(t){
   return `<div class="panel stack">
     <div class="panel-head"><div><span class="ref">Agent trajectory</span><h2 class="mono" style="font-size:18px">${esc(t.trajectory_id)}</h2>
       <p class="sub">${[t.task,t.case_id&&`case ${t.case_id}`,t.attempt!=null&&`attempt ${t.attempt}`,t.run_id&&`run ${t.run_id}`].filter(Boolean).map(esc).join(" · ")} ${Object.entries(t.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" ")}</p></div>
-      <span class="chip ${t.failed.length?"bad":"good"}">${t.failed.length?`failed: ${t.failed.map(f=>CHECK_LABEL[f]).join(", ")}`:"passed"}</span></div>
+      ${(()=>{const bad=[...t.failed.map(f=>CHECK_LABEL[f]),...(t.evaluation?.checks||[]).filter(c=>c.status==="fail"&&!CHECK_LABEL[c.check]).map(c=>LIFE_CHECK[c.check]||c.check)];
+        return t.status==="running"?`<span class="chip neutral">running</span>`:`<span class="chip ${bad.length?"bad":"good"}">${bad.length?`failed: ${esc([...new Set(bad)].join(", "))}`:"passed"}</span>`})()}</div>
+    ${t.status==="running"?`<p class="flag"><span class="chip neutral">running</span>Still going: it's checked when it ends.</p>`:""}
+    ${t.evaluation?`<div><h3 style="margin-bottom:6px">Checked when it ended ${lifeStatus(t.evaluation.status)} <span class="ref">${esc(t.evaluation.evaluated_at.slice(0,16).replace("T"," "))}</span></h3>
+      ${t.evaluation.checks.map(c=>`<div><span class="okx ${c.status==="pass"?"y":"n"}">${c.status==="pass"?"✓":"✗"}</span> ${esc(LIFE_CHECK[c.check]||c.check)}${c.reason?` <span class="ref">${esc(c.reason)}</span>`:""}</div>`).join("")}</div>`:""}
     ${fb?`<p class="flag"><span class="chip bad">first bad step</span><span><b>${esc(MECH[fb.mechanism][0])}</b>${fb.seq!=null?` at step ${fb.seq+1}`:""}: ${esc(fb.detail)}</span></p>`:""}
     <div class="traj"><div class="steps">${t.steps.map(stepHtml).join("")}</div>
       <div class="stack" style="align-content:start">

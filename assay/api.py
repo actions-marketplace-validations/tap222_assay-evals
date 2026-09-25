@@ -506,7 +506,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def ingest_trajectories(events: List[TrajectoryEvent], x_tenant: Optional[str] = Header(None),
                             p: Principal = Depends(require("ingest"))):
         too_big(sum(len(e.steps) + 1 for e in events))
-        return {"ingested": ingest.write_trajectories(engine, events, tenant_for(p, x_tenant))}
+        tenant = tenant_for(p, x_tenant)
+        n = ingest.write_trajectories(engine, events, tenant)
+        lifecycle.after_ingest(engine, tenant, [e.trajectory_id for e in events], settings.abandon_minutes)
+        return {"ingested": n}
 
     @app.post("/v1/agents/references", tags=["ingest"],
               summary="What test cases expect: tool calls, answer and end state (upserts by case_id)")
@@ -1087,11 +1090,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return JSONResponse({"detail": "Send OTLP/HTTP with JSON encoding (collector: encoding: json)."},
                                 status_code=415)
         try:
-            batch = ingest.from_otlp(await request.json())
+            payload = await request.json()
+            batch, ends = ingest.from_otlp(payload), ingest.otlp_root_ends(payload)
         except Exception as exc:
             raise HTTPException(400, f"Couldn't read the OTLP payload: {exc}")
         too_big(sum(len(getattr(batch, k)) for k in ingest.TABLES))
-        counts = ingest.write_batch(engine, batch, tenant_for(p, x_tenant))
+        tenant = tenant_for(p, x_tenant)
+        # A run's spans come over several batches: add to it, and end it when its root span arrives.
+        counts = ingest.write_batch(engine, batch, tenant, merge_trajectories=True)
+        ended = ingest.end_trajectories(engine, tenant, ends)
+        lifecycle.after_ingest(engine, tenant, {t.trajectory_id for t in batch.trajectories} | set(ended),
+                               settings.abandon_minutes)
         return {"partialSuccess": {}, "ingested": counts}
 
     app.state.engine = engine

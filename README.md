@@ -694,6 +694,10 @@ delay. Each run goes through a lifecycle:
   have ended too.
 - **evaluated again:** if more events arrive after that, e.g. a late step.
 
+With OpenTelemetry, a run ends when its root span arrives. Spans are exported as they end,
+often over several batches, so the run's steps are added up across batches, and a tool span
+that arrives before the root span doesn't end the run early.
+
 Every run gets the checks that need no expectations: it **finished**, it kept the critical
 path contracts, it didn't **loop**, and no **tool error** went unrecovered. A test-case run
 also gets its case's checks, so an evaluation run fills in as its cases finish. A background

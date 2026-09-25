@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -352,23 +352,54 @@ def write(engine: Engine, kind: str, events: List[Event], tenant: str) -> int:
     return n
 
 
-def write_trajectories(engine: Engine, events: List["TrajectoryEvent"], tenant: str) -> int:
-    """Store trajectories with their steps (replacing any earlier copy), and each as a document."""
+def _step_key(s: dict) -> tuple:
+    return (s["kind"], s.get("name"), s.get("started_at"), s.get("text"))
+
+
+def write_trajectories(engine: Engine, events: List["TrajectoryEvent"], tenant: str, merge: bool = False) -> int:
+    """Store trajectories with their steps, and each as a document. By default a trajectory replaces
+    any earlier copy. merge=True adds to it instead (OTLP: a run's spans arrive over several
+    batches): steps are combined and put in time order, repeats dropped, and a batch that doesn't
+    end the run doesn't reopen one that has ended."""
     if not events:
         return 0
     t, st = store.agent_trajectories, store.agent_steps
+    now = datetime.utcnow()
+    before, earlier = {}, defaultdict(list)
+    if merge:
+        ids = [e.trajectory_id for e in events]
+        with engine.connect() as conn:
+            before = {r.trajectory_id: dict(r._mapping) for r in conn.execute(
+                select(t).where((t.c.tenant == tenant) & t.c.trajectory_id.in_(ids)))}
+            for r in conn.execute(select(st).where((st.c.tenant == tenant) & st.c.trajectory_id.in_(ids))):
+                earlier[r.trajectory_id].append({k: v for k, v in r._mapping.items()
+                                                 if k not in ("tenant", "trajectory_id", "seq")})
     heads, steps, docs, inputs = [], [], [], []
     for e in events:
-        heads.append({"tenant": tenant, "trajectory_id": e.trajectory_id, "run_id": e.run_id, "case_id": e.case_id,
-                      "attempt": e.attempt, "task": e.task, "started_at": e.started_at, "finished_at": e.finished_at,
-                      "answer": e.answer, "status": e.status, "lineage": e.lineage})
-        for i, s in enumerate(e.steps):
-            steps.append({"tenant": tenant, "trajectory_id": e.trajectory_id, "seq": i, **s.model_dump()})
+        head = {"tenant": tenant, "trajectory_id": e.trajectory_id, "run_id": e.run_id, "case_id": e.case_id,
+                "attempt": e.attempt, "task": e.task, "started_at": e.started_at, "finished_at": e.finished_at,
+                "answer": e.answer, "status": e.status, "lineage": e.lineage, "updated_at": now}
+        new = [s.model_dump() for s in e.steps]
+        old = before.get(e.trajectory_id)
+        if old:
+            for k in ("run_id", "case_id", "attempt", "task", "lineage"):
+                head[k] = head[k] if head[k] is not None else old[k]
+            head["started_at"] = min(head["started_at"], old["started_at"])
+            if e.status == "running" and old["status"] != "running":  # a late span: still ended
+                head.update(status=old["status"], finished_at=old["finished_at"], answer=old["answer"])
+            seen = {_step_key(s) for s in new}
+            new = sorted([s for s in earlier[e.trajectory_id] if _step_key(s) not in seen] + new,
+                         key=lambda s: (s.get("started_at") is None, s.get("started_at") or datetime.min))
+        heads.append(head)
+        blank = {c.name: None for c in st.columns}  # stored steps and new ones carry different keys
+        for i, s in enumerate(new):
+            steps.append({**blank, **s, "tenant": tenant, "trajectory_id": e.trajectory_id, "seq": i})
         if e.input is not None:
             inputs.append(InputEvent(trace_id=e.trajectory_id, input=e.input))
-        docs.append(DocumentEvent(document_id=e.trajectory_id, received_at=e.started_at,
-                                  completed_at=e.finished_at if (e.status or "completed") == "completed" else None,
-                                  status=e.status or "completed", document_type=e.task, segment=e.segment))
+        docs.append(DocumentEvent(document_id=e.trajectory_id, received_at=head["started_at"],
+                                  completed_at=head["finished_at"] if (head["status"] or "completed") == "completed"
+                                  else None, status=head["status"] or "completed", document_type=head["task"],
+                                  segment=e.segment))
     ids = [e.trajectory_id for e in events]
     with engine.begin() as conn:
         for i in range(0, len(ids), 500):
@@ -387,10 +418,10 @@ def write_references(engine: Engine, refs: List["ReferenceEvent"], tenant: str) 
     return upsert(engine, store.agent_references, rows, "case_id")
 
 
-def write_batch(engine: Engine, batch: EventBatch, tenant: str) -> Dict[str, int]:
+def write_batch(engine: Engine, batch: EventBatch, tenant: str, merge_trajectories: bool = False) -> Dict[str, int]:
     # Documents first, so everything else has something to attach to.
     out = {kind: write(engine, kind, getattr(batch, kind), tenant) for kind in TABLES}
-    out["trajectories"] = write_trajectories(engine, batch.trajectories, tenant)
+    out["trajectories"] = write_trajectories(engine, batch.trajectories, tenant, merge=merge_trajectories)
     out["prompts"] = register_prompts(engine, batch.prompts, tenant)
     return out
 
@@ -469,6 +500,10 @@ Agents     a trace with any tool span (gen_ai.operation.name = execute_tool, or 
            assay.state.object are state changes (assay.state.op,
            assay.state.value as JSON). The root span may carry assay.answer,
            assay.task, and for test cases assay.run_id, assay.case_id, assay.attempt.
+           Spans are exported as they end, so a run's spans often come over several
+           batches: they're added to the run, not replacing it. The run is running until
+           its root span arrives (completed, or failed if the root span errored), then
+           it's evaluated (see GET /v1/agents/lifecycle).
 """
 
 
@@ -550,6 +585,42 @@ def from_otlp(payload: Dict[str, Any]) -> EventBatch:
     return batch
 
 
+def otlp_root_ends(payload: Dict[str, Any]) -> List[dict]:
+    """Every root span in the payload: the end of its trace's run. A run whose tool spans came in an
+    earlier batch ends when its root span arrives, even in a batch with nothing else."""
+    out = []
+    for rs in payload.get("resourceSpans") or []:
+        for ss in rs.get("scopeSpans") or rs.get("instrumentationLibrarySpans") or []:
+            for sp in ss.get("spans") or []:
+                if sp.get("parentSpanId"):
+                    continue
+                a = _attrs(sp.get("attributes"))
+                doc = a.get("assay.document_id") or a.get("document.id") or sp.get("traceId")
+                errored = (sp.get("status") or {}).get("code") in (2, "STATUS_CODE_ERROR")
+                out.append({"trajectory_id": str(doc), "finished_at": _ts(sp.get("endTimeUnixNano")),
+                            "status": "failed" if errored else "completed", "answer": _str(a.get("assay.answer")),
+                            "task": _str(a.get("assay.task") or a.get("assay.document_type"))})
+    return out
+
+
+def end_trajectories(engine: Engine, tenant: str, ends: List[dict]) -> List[str]:
+    """Close runs still open that these root spans end. Returns their ids."""
+    t = store.agent_trajectories
+    done = []
+    with engine.begin() as conn:
+        for e in ends:
+            vals = {"status": e["status"], "finished_at": e["finished_at"], "updated_at": datetime.utcnow()}
+            if e["answer"]:
+                vals["answer"] = e["answer"]
+            if e["task"]:
+                vals["task"] = func.coalesce(t.c.task, e["task"])
+            n = conn.execute(t.update().where((t.c.tenant == tenant) & (t.c.trajectory_id == e["trajectory_id"])
+                                              & (t.c.status == "running")).values(**vals)).rowcount
+            if n:
+                done.append(e["trajectory_id"])
+    return done
+
+
 def _json(v):
     if isinstance(v, str):
         try:
@@ -570,7 +641,9 @@ def _agent_trajectories(batch: EventBatch, collected, doc_of) -> None:
         if not any(is_tool(a) for _, a, _ in spans):
             continue
         agent_docs.add(doc)
-        root = next(((sp, a) for sp, a, _ in spans if not sp.get("parentSpanId")), (spans[0][0], spans[0][1]))
+        # Spans are exported as they end, so the root (the whole run) usually comes last, often in a
+        # later batch. Until it arrives, the run is still going (assay/lifecycle.py).
+        root = next(((sp, a) for sp, a, _ in spans if not sp.get("parentSpanId")), None)
         steps = []
         for sp, a, res in sorted(spans, key=lambda x: int(x[0].get("startTimeUnixNano") or 0)):
             errored = (sp.get("status") or {}).get("code") in (2, "STATUS_CODE_ERROR")
@@ -591,15 +664,21 @@ def _agent_trajectories(batch: EventBatch, collected, doc_of) -> None:
                 steps.append(StepEvent(kind="reason", model=a.get("gen_ai.response.model") or a.get("gen_ai.request.model"),
                                        tokens=tokens or None, cost_usd=a.get("assay.cost_usd"),
                                        started_at=start, finished_at=end))
-        rsp, ra = root
-        if ra.get("assay.answer"):
+        rsp, ra = root or (None, {})
+        if not root:  # the run's own attributes are on the root; take what a child carries meanwhile
+            for _, a, _ in spans:
+                ra = {**{k: v for k, v in a.items() if k.startswith("assay.")}, **ra}
+        if ra.get("assay.answer") and root:
             steps.append(StepEvent(kind="answer", text=str(ra["assay.answer"]), started_at=_ts(rsp.get("endTimeUnixNano"))))
-        errored = (rsp.get("status") or {}).get("code") in (2, "STATUS_CODE_ERROR")
+        errored = root is not None and (rsp.get("status") or {}).get("code") in (2, "STATUS_CODE_ERROR")
+        first = min((int(sp.get("startTimeUnixNano") or 0) for sp, _, _ in spans), default=0)
         batch.trajectories.append(TrajectoryEvent(
             trajectory_id=doc, run_id=_str(ra.get("assay.run_id")), case_id=_str(ra.get("assay.case_id")),
             attempt=ra.get("assay.attempt"), task=_str(ra.get("assay.task") or ra.get("assay.document_type")),
-            segment=_str(ra.get("assay.segment")), started_at=_ts(rsp.get("startTimeUnixNano")) or datetime.utcnow(),
-            finished_at=_ts(rsp.get("endTimeUnixNano")), answer=_str(ra.get("assay.answer")),
-            status="failed" if errored else "completed", steps=steps[:500]))
+            segment=_str(ra.get("assay.segment")),
+            started_at=_ts(rsp.get("startTimeUnixNano") if root else first) or datetime.utcnow(),
+            finished_at=_ts(rsp.get("endTimeUnixNano")) if root else None,
+            answer=_str(ra.get("assay.answer")) if root else None,
+            status=("failed" if errored else "completed") if root else "running", steps=steps[:500]))
     # Their model spans are reasoning steps now; don't count them again as calls.
     batch.calls = [c for c in batch.calls if c.document_id not in agent_docs]
