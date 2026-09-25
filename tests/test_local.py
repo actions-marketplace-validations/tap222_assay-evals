@@ -73,7 +73,7 @@ for i in range(20):
     assay.check(None, f"inv_{i:02d}", "pass" if date_ok else "fail", field="invoice_date",
                 expected="2026-09-01", actual="2026-09-01" if date_ok else "2026-01-09")
     assay.check(None, f"inv_{i:02d}", "pass" if vendor_ok else "fail", field="vendor", expected="Acme",
-                actual="Acme" if vendor_ok else "ACME")
+                actual="Acme" if vendor_ok else "Globex")
 '''
 
 

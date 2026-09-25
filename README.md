@@ -729,6 +729,37 @@ marks quiet runs abandoned and evaluates anything left over.
 | `GET /v1/agents/runs/{run}?source=…` | pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline |
 | `GET /v1/agents/trajectories/{id}?source=…` | one run step by step: divergence, end state, contract breaks, cost, and its latest evaluation |
 
+## One verdict per check: not everything that isn't a pass is a failure
+
+Evaluation infrastructure fails too: a judge times out, returns something unparseable, or its
+job never runs for some cases. Counting those as failures blames the AI for the evaluator.
+Every check in an evaluation run gets one verdict:
+
+| Verdict | Means |
+|---|---|
+| `PASS` | judged, and passed (or a failure someone accepted) |
+| `FAIL` | judged, and failed: the only verdict that says something about the AI |
+| `FLAKY` | passes some attempts and fails others, the way it did before |
+| `INCONCLUSIVE` | plausibly worse but too few attempts to tell, or an intended change nobody has accepted |
+| `EVALUATOR_ERROR` | couldn't be judged: the evaluator errored, fails values that differ only in format, contradicts itself, or was given the wrong data |
+| `INFRA_ERROR` | couldn't be judged: a timeout, rate limit, 5xx or connection error |
+| `MISSING` | no result: the evaluator reported on most of the run's cases, but not this one |
+
+Send a check the evaluator couldn't make as `status="error"` with the reason. The failure-cause
+analysis decides the rest, so the verdicts agree with the release call. Missing results keep a
+release from advancing ("rerun"). `GET /v1/evals/runs/{run}/verdicts?source=…&verdict=FAIL`
+lists them, and the Failures page shows the counts.
+
+`assay test` lists what couldn't be judged apart, never as a regression, and exits **3**
+(inconclusive) when nothing got worse but some results couldn't be judged: 0 passed, 1 failed,
+2 setup problem, 3 inconclusive. An inconclusive run doesn't move any baseline. In
+`--junit` output these cases are `<error>`, JUnit's "couldn't run", not `<failure>`.
+
+Agent runs are evaluated by Assay itself when they end (see Agents). A run whose evaluation
+throws is recorded with the error and doesn't hold up the others. Ended runs still waiting to
+be evaluated after 10 minutes (`ASSAY_BACKLOG_MINUTES`) open an alert, and the Agents page
+says so: evaluation that's stuck is noticed, not silent.
+
 ## Was the judge given the right data?
 
 An LLM judge given the wrong thing still returns a valid-looking score. Real examples:
