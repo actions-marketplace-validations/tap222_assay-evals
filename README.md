@@ -104,12 +104,25 @@ Assay test  t-20260925-075556-815
 Failed.
 ```
 
-- **Your tests:** in the code `assay test` runs, record each case with
-  `assay.run(..., test="<case>")` and say what it should do with `assay.expect(...)`: the
-  tool calls, the answer, and a step budget. For pipelines, send field results with
-  `assay.check(None, "<case>", "pass" | "fail", field=..., expected=..., actual=...)`.
+- **Your tests:** with pytest, take the `assay_case` fixture (it comes with `assay-evals`)
+  and set `command = "pytest -q tests/ai"`. Each test is then a case, and its own asserts
+  count too:
+
+  ```python
+  def test_refund(assay_case):
+      assay_case.expect(calls=[{"tool": "get_order", "args": {"order_id": "O-17"}}], max_steps=4)
+      reply = my_agent("Refund O-17", run=assay_case)   # records steps: run.call, run.answer, ...
+      assert "27.61" in reply
+  ```
+
+  Without pytest, record each case with `assay.run(..., test="<case>")` and
+  `run.expect(...)`. For pipelines, send field results with
+  `run.check("invoice_date", "pass" | "fail", expected=..., actual=...)`.
 - **Safety rules:** go in `assay.toml` as path contracts, e.g. `never delete_order`, or
   `refund only_after get_order`. Every agent run is checked against them.
+- **PII:** personal data (email, card, IBAN, SSN, phone) in a tool's arguments fails the PII
+  check. A tool that needs it is allowed it in `assay.toml`, under `[pii]`:
+  `allow = { send_receipt = ["email"] }`.
 - **Baseline:** the last run that passed. A failing run never becomes the baseline. If your
   suite has known failures, `assay accept` makes the latest run the baseline, and later
   runs then fail only on what got worse.
@@ -121,6 +134,11 @@ Failed.
 
 To see the recorded runs in the dashboard:
 `ASSAY_STORE_URL=sqlite:///.assay/assay.db assay serve`, then open source `events:local`.
+
+To share a run with your team, `assay test --upload` (or `assay upload` for the latest run)
+sends it to an Assay server, set with `ASSAY_URL` and `ASSAY_KEY`. The server then checks it
+too. That needs a key with the `manage` scope; with an `ingest` key, the dashboard can do the
+checking. Sending the same run twice changes nothing.
 
 ## Setup guide
 

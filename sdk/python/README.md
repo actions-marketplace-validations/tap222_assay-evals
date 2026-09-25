@@ -43,6 +43,7 @@ assay.expect("case-17", calls=[{"tool": "get_order", "args": {"order_id": "O-17"
 | `assay.run(task, kind="agent"\|"pipeline", input=, version=, test="case-17")` | one run; an exception ends it as failed. `test` can also be `{"run", "case", "attempt"}`: under `assay test` the run and attempt are filled in |
 | `run.llm(...)`, `run.tool(name, args, result)`, `run.call(name, fn, **args)`, `run.state(obj, op, value)`, `run.answer(text)`, `with run.stage(name) as s` | its steps, in order |
 | `assay.feedback`, `assay.check`, `assay.correction`, `assay.expect` | outcomes, sent whenever they're known |
+| `run.expect(...)`, `run.check(field, status, expected=, actual=)` | the same, for a test-case run's own case |
 | `assay.flush()` | send now (short-lived scripts); also happens every second and at exit |
 
 These options go to `init()`:
@@ -80,6 +81,22 @@ assay serve           # http://127.0.0.1:8400, source events:local
 ```
 
 Loading the same file twice changes nothing, because every event has an id.
+
+## With pytest
+
+Take the `assay_case` fixture. It's a pytest plugin that comes with this package, so there's
+nothing to configure:
+
+```python
+def test_refund(assay_case):
+    assay_case.expect(calls=[{"tool": "get_order", "args": {"order_id": "O-17"}}], answer="27.61")
+    reply = my_agent("Refund O-17", run=assay_case)   # record steps on it
+    assert "27.61" in reply
+```
+
+The fixture wraps the test in `assay.run(<test name>, test=<test id>)`. It also records the
+test's own outcome as a check on the field `pytest`, so failing asserts count too. Tests
+that don't take the fixture are left alone.
 
 To test with it, `assay test` (in `assay-server`) runs your code with the SDK recording,
 checks each run against its `assay.expect(...)`, and compares with the last run that passed.

@@ -60,20 +60,31 @@ def main(argv=None) -> int:
     t.add_argument("--repeat", type=int, metavar="N", help="Attempts per case (overrides assay.toml)")
     t.add_argument("--baseline", metavar="RUN", help="Compare with this run instead of the last that passed; "
                                                      "'none' for no baseline")
+    t.add_argument("--upload", action="store_true", help="Also send the run to a server (ASSAY_URL, ASSAY_KEY)")
     t.add_argument("command", nargs=argparse.REMAINDER, help="-- <command> (overrides assay.toml)")
+    u = sub.add_parser("upload", help="Send a test run (the latest, by default) to an Assay server")
+    u.add_argument("run", nargs="?", help="A run id instead of the latest")
+    for q in (t, u):
+        q.add_argument("--url", help="Server address (default: ASSAY_URL)")
+        q.add_argument("--key", help="API key with the ingest scope (default: ASSAY_KEY)")
+        q.add_argument("--tenant", dest="send_tenant", metavar="TENANT",
+                       help="Tenant to send to (a tenant key's own is used otherwise)")
     a = sub.add_parser("accept", help="Make the latest test run the baseline, known failures and all")
     a.add_argument("run", nargs="?", help="A run id instead of the latest")
     sub.add_parser("schema", help="Print the v1 event schema as JSON Schema")
 
     args = p.parse_args(argv)
-    if args.cmd in ("init", "test", "accept"):
+    if args.cmd in ("init", "test", "accept", "upload"):
         from pathlib import Path
         from assay import local
         root = Path.cwd()
+        if args.cmd == "upload":
+            return local.upload(root, args.run, args.url, args.key, args.send_tenant)
         if args.cmd == "accept":
             return local.accept(root, args.run)
         if args.cmd == "test":
-            return local.test(root, local.split_command(args.command), args.repeat, args.baseline)
+            send = {"url": args.url, "key": args.key, "tenant": args.send_tenant} if args.upload else None
+            return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send)
         made = local.init(root)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
         print("Next: `assay test`. Then point command in assay.toml at your own tests.")

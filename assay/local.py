@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import delete, select
 
-from assay import agents, contracts, failures, schema, store
+from assay import agents, contracts, failures, ingest, learn, schema, store
 from assay.sources.events import EventsSource
 
 try:
@@ -45,7 +45,8 @@ HOME = ".assay"
 TENANT = "local"
 EXAMPLE = "assay_example.py"
 CHECK_NAMES = {"answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state", "safety": "Safety",
-               "efficiency": "Efficiency"}
+               "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts"}
+PII_EVALUATOR = "assay.pii@1"
 
 CONFIG_TEMPLATE = '''\
 # Assay: `assay test` runs the command below with the SDK recording, checks every run,
@@ -53,7 +54,7 @@ CONFIG_TEMPLATE = '''\
 # Docs: https://github.com/tap222/docai-eval/tree/main/sdk/python#readme
 
 [test]
-command = "python {example}"   # your tests, e.g. "pytest -q tests/ai"
+command = "python {example}"   # your tests, e.g. "pytest -q tests/ai" with the assay_case fixture
 repeat = 1        # attempts per case; 3 or more lets Assay tell a flaky case from a broken one
 tolerance = 0.01  # a drop in the pass rate smaller than this doesn't fail the run
 
@@ -67,6 +68,12 @@ step = "delete_order"
 kind = "only_after"
 step = "refund"
 other = "get_order"
+
+# Personal data (email, card, IBAN, SSN, phone) in a tool's arguments fails the PII check,
+# unless the tool is allowed that kind, e.g. allow = {{ send_receipt = ["email"] }}.
+[pii]
+check = true
+allow = {{}}
 '''
 
 EXAMPLE_TEMPLATE = '''\
@@ -139,8 +146,15 @@ def load_config(root: Path) -> dict:
         problem = contracts.validate(c)
         if problem:
             raise SetupError(f"{CONFIG}, contract {i}: {problem}")
+    pii = cfg.get("pii") or {}
+    allow = pii.get("allow") or {}
+    kinds = set(learn.PII)
+    for tool, allowed in allow.items():
+        if not isinstance(allowed, list) or set(allowed) - kinds:
+            raise SetupError(f"{CONFIG}, [pii] allow.{tool}: a list of kinds from {', '.join(learn.PII)}.")
     return {"command": test.get("command"), "repeat": int(test.get("repeat", 1)),
-            "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules}
+            "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
+            "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()}}}
 
 
 class SetupError(Exception):
@@ -220,11 +234,47 @@ def sync_contracts(engine, rules: List[dict]) -> None:
         contracts.save(engine, source, c)
 
 
-def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float) -> Optional[dict]:
+def pii_findings(traj: dict, allow: Dict[str, set]) -> List[str]:
+    """Personal data in the arguments of the run's tool calls, except kinds the tool may receive."""
+    out = []
+    for s in traj["steps"]:
+        if s["kind"] != "tool" or not s.get("args"):
+            continue
+        for hit in learn.pii_scan(s["args"]):
+            if hit["kind"] not in allow.get(s["name"], ()):
+                out.append(f"{hit['kind']} ({hit['sample']}) sent to {s['name']} (step {s['seq']})")
+    return out
+
+
+def check_pii(engine, source, run_id: str, allow: Dict[str, set]) -> None:
+    """One PII result per agent run, stored like the trajectory checks."""
+    heads = agents.run_trajectories(engine, TENANT, run_id)
+    trajs = source.trajectories([h["trajectory_id"] for h in heads])
+    rows = []
+    for h in heads:
+        traj = trajs.get(h["trajectory_id"])
+        if traj is None:
+            continue
+        found = pii_findings(traj, allow)
+        case = h["case_id"] or h["trajectory_id"]
+        rows.append({"tenant": TENANT, "result_id": ingest._derive(run_id, case, "pii", PII_EVALUATOR, h["attempt"]),
+                     "run_id": run_id, "case_id": case, "document_id": h["trajectory_id"],
+                     "evaluator": PII_EVALUATOR, "attempt": h["attempt"], "ts": h["started_at"],
+                     "lineage": h["lineage"], "score": None, "field": "pii",
+                     "status": "fail" if found else "pass", "expected": "no personal data in tool arguments",
+                     "actual": "; ".join(found)[:300] or "none",
+                     "reason": f"Personal data in tool arguments: {'; '.join(found)}"[:2000] if found else None})
+    ingest.upsert(engine, store.eval_results, rows, "result_id")
+
+
+def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
+             pii: Optional[dict] = None) -> Optional[dict]:
     """Check the run and compare it with the baseline. None if the run recorded nothing to check."""
     source = EventsSource(engine, TENANT)
     if agents.run_trajectories(engine, TENANT, run_id):
         agents.evaluate_run(engine, source, TENANT, run_id)
+        if pii and pii["check"]:
+            check_pii(engine, source, run_id, pii["allow"])
     # "" means no baseline: failures.evaluation would otherwise pick the run before this one.
     a = failures.evaluation(engine, source, TENANT, run_id, baseline or "", tolerance)
     if a is None:
@@ -368,7 +418,7 @@ def _explain(ps: List[dict], fails: dict, repeat: int) -> List[str]:
     for p in rates[:3]:
         before = f"{p['base_rate']:.0%} of attempts before, " if p["base_rate"] is not None else ""
         lines.append(_paint(f"{p['case_id']} {_label(p['field'])}: passed {before}{p['rate']:.0%} now", "dim"))
-    if any(p.get("unsure") for p in ps):
+    if repeat > 1 and any(p.get("unsure") for p in ps):  # with one attempt, the hint below covers it
         lines.append(_paint("Could be chance: too few attempts to tell. `assay test --repeat 10` settles it.",
                             "yellow"))
     return lines
@@ -442,7 +492,8 @@ def sdk_problem() -> Optional[str]:
     return None
 
 
-def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Optional[str]) -> int:
+def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Optional[str],
+         send: Optional[dict] = None) -> int:
     """`assay test`. Prints the report; returns the exit code."""
     try:
         cfg = load_config(root)
@@ -480,7 +531,7 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     if bad:
         print(f"{len(bad)} bad line(s) in {events}:", *bad[:20], sep="\n  ", file=sys.stderr)
         return 2
-    result = evaluate(engine, run_id, baseline, cfg["tolerance"])
+    result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"])
     if result is None:
         print("\nNothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "
               "should do with assay.expect(), or send results with assay.check().", file=sys.stderr)
@@ -488,7 +539,12 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     text, passed = report(run_id, baseline, result, repeat, codes)
     print("\n" + text)
     _save_state(home, {**state, "last": run_id, **({"baseline": run_id} if passed else {})})
-    return 0 if passed else 1
+    code = 0 if passed else 1
+    if send is not None:
+        print()
+        sent = upload(root, run_id, **send)
+        code = code or sent  # a failed upload fails a run that passed; a failing run stays 1
+    return code
 
 
 def accept(root: Path, run_id: Optional[str]) -> int:
@@ -504,6 +560,71 @@ def accept(root: Path, run_id: Optional[str]) -> int:
         return 2
     _save_state(home, {**state, "baseline": run_id})
     print(f"{run_id} is now the baseline. `assay test` fails only on what gets worse than it.")
+    return 0
+
+
+# ---------- sending a run to a server ----------
+
+def _http(method: str, url: str, body: Optional[dict], headers: Dict[str, str]) -> Tuple[int, object]:
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Content-Type": "application/json", **headers}, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"null")
+        except ValueError:
+            return e.code, None
+
+
+def upload(root: Path, run_id: Optional[str], url: Optional[str], key: Optional[str], tenant: Optional[str],
+           http=_http) -> int:
+    """Send a test run's recording to an Assay server, then have it check the agent runs there.
+    Sending again is safe: every event has an id."""
+    home = root / HOME
+    run_id = run_id or _state(home).get("last")
+    url = (url or os.environ.get("ASSAY_URL") or "").rstrip("/")
+    key = key or os.environ.get("ASSAY_KEY")
+    if not url:
+        print("Where to? Set ASSAY_URL (and ASSAY_KEY), or pass --url.", file=sys.stderr)
+        return 2
+    if not run_id:
+        print("No test run yet. Run `assay test` first.", file=sys.stderr)
+        return 2
+    path = home / "runs" / f"{run_id}.jsonl"
+    if not path.exists():
+        print(f"No recording for run {run_id} in {home / 'runs'}.", file=sys.stderr)
+        return 2
+    events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    if tenant:
+        headers["X-Tenant"] = tenant
+    try:
+        for i in range(0, len(events), 1000):
+            code, body = http("POST", f"{url}/v1/ingest", {"events": events[i:i + 1000]}, headers)
+            if code != 200:
+                print(f"{url} refused the upload ({code}): {body}", file=sys.stderr)
+                return 2
+        code, me = http("GET", f"{url}/v1/whoami", None, headers)
+    except OSError as exc:
+        print(f"Couldn't reach {url}: {exc}", file=sys.stderr)
+        return 2
+    if not tenant:
+        tenant = me.get("tenant") if code == 200 and isinstance(me, dict) else None
+        tenant = "default" if tenant in (None, "*") else tenant
+    source = f"events:{tenant}"
+    print(f"Sent run {run_id} ({len(events)} events) to {url}, tenant '{tenant}'.")
+    if any(e.get("type") == "run.start" and e.get("test") for e in events):
+        code, _ = http("POST", f"{url}/v1/agents/runs/{run_id}/evaluate?source={source}", None, headers)
+        if code == 403:
+            print("It isn't checked there yet: that needs a key with the manage scope. The dashboard can "
+                  "check it too.")
+        elif code != 200:
+            print(f"The server couldn't check it ({code}).", file=sys.stderr)
+    print(f"See it in the dashboard at {url}: source {source}, run {run_id}.")
     return 0
 
 

@@ -26,6 +26,9 @@ Documentation = "https://github.com/tap222/docai-eval/tree/main/sdk/python#readm
 "Event schema" = "https://github.com/tap222/docai-eval/blob/main/docs/event-schema.md"
 Issues = "https://github.com/tap222/docai-eval/issues"
 
+[project.entry-points.pytest11]
+assay = "assay_sdk.pytest_plugin"
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"

@@ -128,3 +128,75 @@ def test_sdk_fills_in_the_run_and_attempt_under_assay_test(monkeypatch):
     monkeypatch.delenv("ASSAY_TEST_RUN")
     monkeypatch.delenv("ASSAY_TEST_ATTEMPT")
     assert assay_sdk._test("c1") == {"case": "c1", "run": "local"}
+
+
+PII_AGENT = '''
+import assay_sdk as assay
+assay.init()
+for case in ("c1", "c2"):
+    with assay.run("support", test=case) as run:
+        run.tool("lookup", {"email": "jo.smith@example.com"}, {"ok": True})
+        if case == "c2":
+            run.tool("log_event", {"note": "card 4111 1111 1111 1111"}, None)
+        run.answer("done")
+'''
+
+
+def test_pii_in_tool_arguments_fails_unless_the_tool_is_allowed_it(project, capsys):
+    (project / "agent.py").write_text(PII_AGENT)
+    config(project, f"{sys.executable} agent.py", contracts='[pii]\nallow = { lookup = ["email"] }\n')
+    assert main(["test"]) == 1
+    out = capsys.readouterr().out
+    assert "✗ PII         1/2" in out and "c2  PII" in out
+    assert "card (411…11) sent to log_event (step 1)" in out and "email" not in out.split("⚠")[1]
+    config(project, f"{sys.executable} agent.py", contracts="[pii]\ncheck = false\n")
+    assert main(["test"]) == 0 and "PII" not in capsys.readouterr().out
+    config(project, "x", contracts='[pii]\nallow = { lookup = ["shoe_size"] }\n')
+    assert main(["test"]) == 2 and "[pii] allow.lookup" in capsys.readouterr().err
+
+
+PYTEST_SUITE = '''
+import pytest
+
+@pytest.mark.parametrize("order_id", ["O-17", "O-18"])
+def test_refund(assay_case, order_id):
+    assay_case.expect(calls=[{"tool": "get_order", "args": {"order_id": order_id}}], max_steps=3)
+    price = assay_case.call("get_order", lambda order_id: {"O-17": 27.61, "O-18": 12.0}[order_id],
+                            order_id=order_id)
+    assay_case.answer(f"Refunded ${price:.2f}.")
+    assert price == 27.61
+
+def test_without_the_fixture():
+    assert True
+'''
+
+
+def test_pytest_plugin_makes_each_test_a_case_and_counts_its_asserts(project, capsys):
+    (project / "test_agent.py").write_text(PYTEST_SUITE)
+    config(project, f"{sys.executable} -m pytest -q -p no:cacheprovider -p assay_sdk.pytest_plugin test_agent.py")
+    assert main(["test"]) == 1
+    out = capsys.readouterr().out
+    assert "2 cases" in out  # the test without the fixture isn't one
+    assert "✓ Tool usage    2/2" in out and "✗ Your asserts  1/2" in out
+    assert "test_agent.py::test_refund[O-18]  Your asserts" in out and "assert 12.0 == 27.61" in out
+
+
+def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_path_factory):
+    from fastapi.testclient import TestClient
+    from assay.api import create_app
+    from assay.config import Settings
+    main(["init"])
+    main(["test"])
+    capsys.readouterr()
+    server = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path_factory.mktemp('srv') / 's.db'}")))
+
+    def http(method, url, body, headers):
+        r = server.request(method, url.replace("http://assay.test", ""), json=body, headers=headers)
+        return r.status_code, r.json()
+    assert local.upload(project, None, "http://assay.test", None, None, http=http) == 0
+    assert "tenant 'default'" in capsys.readouterr().out
+    runs = server.get("/v1/agents/runs", params={"source": "events:default"}).json()
+    assert len(runs) == 1 and runs[0]["trajectories"] == 2 and runs[0]["evaluated"]
+    assert local.upload(project, None, "http://assay.test", None, None, http=http) == 0  # again: no doubles
+    assert server.get("/v1/agents/runs", params={"source": "events:default"}).json()[0]["trajectories"] == 2
+    assert local.upload(project, None, None, None, None, http=http) == 2  # nowhere to send it

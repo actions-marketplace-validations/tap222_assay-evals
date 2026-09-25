@@ -255,6 +255,21 @@ class Run:
         self.id, self._c, self._on = run_id, client, recorded
         self._seq, self._lock, self._parents = 0, threading.Lock(), []
         self.answer_text: Optional[str] = None
+        self.test: Optional[Dict[str, Any]] = None  # {"run", "case", "attempt"} for a test-case run
+
+    def _case(self) -> Dict[str, Any]:
+        if not self.test:
+            raise ValueError("This run isn't a test case: start it with assay.run(..., test=\"<case>\").")
+        return self.test
+
+    def expect(self, **kwargs) -> None:
+        """assay.expect() for this run's test case: calls=, answer=, state=, allow_extra=, max_steps=."""
+        expect(self._case()["case"], **kwargs)
+
+    def check(self, field: str, status: str, **kwargs) -> None:
+        """assay.check() for this run's test case, e.g. run.check("total", "fail", expected=..., actual=...)."""
+        t = self._case()
+        check(t["run"], t["case"], status, attempt=t.get("attempt"), run_id=self.id, field=field, **kwargs)
 
     def _step(self, kind: str, started: Optional[datetime] = None, **fields) -> int:
         with self._lock:
@@ -346,9 +361,10 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
     rid = run_id or uuid.uuid4().hex
     recorded = c.sample >= 1 or random.random() < c.sample
     r = Run(c, rid, recorded)
+    r.test = _test(test)
     if recorded:
         c.emit({"type": "run.start", "run_id": rid, "kind": kind, "task": task, "segment": segment,
-                "input": c.clean(input), "input_ref": input_ref, "version": version, "test": _test(test),
+                "input": c.clean(input), "input_ref": input_ref, "version": version, "test": r.test,
                 "parent_run_id": parent.id if parent else None, "tags": tags})
     status, error = "completed", None
     try:
