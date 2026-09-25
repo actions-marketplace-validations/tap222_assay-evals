@@ -61,17 +61,21 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Installs from TestPyPI, loads the demo and serves the dashboard
         run: |
           VERSION="${GITHUB_REF_NAME#server-v}"
+          # Only assay-server comes from TestPyPI: anyone can upload there, and a junk "FASTAPI 1.0"
+          # would win over the real one. Its dependencies come from PyPI.
           for i in 1 2 3 4 5 6; do
-            pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ \
-              "assay-server==$VERSION" && break
+            pip install --no-deps --index-url https://test.pypi.org/simple/ "assay-server==$VERSION" && break
             sleep 20
           done
+          python -c "from importlib.metadata import requires; print('\n'.join(r for r in requires('assay-server') if 'extra ==' not in r))" > deps.txt
+          pip install -r deps.txt
           cd "$RUNNER_TEMP"
           assay demo > /dev/null
           assay serve --port 8400 &
