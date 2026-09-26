@@ -1373,7 +1373,7 @@ function renderTrajectory(t){
       :st.kind==="state"?`<div class="call">${esc((st.args||{}).op||"update")} ${esc(st.name)}</div>${st.result!=null?`<div class="res">${esc(jtxt(st.result).slice(0,200))}</div>`:""}`
       :st.kind==="answer"?`<div>${esc(st.text||"")}</div>`
       :st.kind==="approval"?`<div class="call">${esc(st.name)}: <span class="chip ${(st.args||{}).decision==="approved"?"good":(st.args||{}).decision==="rejected"?"bad":"neutral"}">${esc((st.args||{}).decision||"")}</span>${(st.args||{}).by?` <span class="ref">by ${esc(st.args.by)}</span>`:""}</div>${st.text?`<div class="res">${esc(st.text)}</div>`:""}`
-      :`<div class="res">${esc(st.model||"")}${st.tokens?` · ${st.tokens.toLocaleString()} tokens`:""}${st.tokens_in?` (${st.tokens_in.toLocaleString()} in)`:""}${(st.tools||[]).length?` · offered ${st.tools.length} tools`:""}${st.cost_usd?` · ${money(st.cost_usd)}`:""}${st.text?` · ${esc(st.text.slice(0,120))}`:""}</div>`;
+      :`<div class="res">${esc(st.model||"")}${st.tokens?` · ${st.tokens.toLocaleString()} tokens`:""}${st.tokens_in?` (${st.tokens_in.toLocaleString()} in)`:""}${(st.tools||[]).length?` · offered ${st.tools.length} tools`:""}${(st.tool_calls||[]).length?` · asked for ${st.tool_calls.map(c=>esc(c.name||"?")).join(", ")}`:""}${st.finish_reason&&st.finish_reason!=="stop"&&st.finish_reason!=="tool_call"?` · <b>stopped: ${esc(st.finish_reason)}</b>`:""}${st.cost_usd?` · ${money(st.cost_usd)}`:""}${st.text?` · ${esc(st.text.slice(0,120))}`:""}</div>`;
     const notes=[];
     if(r&&r.status==="matched")notes.push(`<span class="okx y">✓</span> expected call ${r.expected_index+1}`);
     if(r&&r.status==="allowed_extra")notes.push(`<span class="ref">allowed extra</span>`);

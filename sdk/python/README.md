@@ -110,6 +110,39 @@ own. With no run at all, a tool just runs. `assay.instrument()` never changes wh
 returns, and recording never breaks your code. Everything works on async functions too.
 `assay connect code` proposes these lines for your code, as a diff.
 
+## Any model provider, one shape: `Judge` and `normalize()`
+
+```python
+from assay_sdk import Judge, normalize
+
+judge = Judge(provider="openai", model="gpt-5")        # anthropic, gemini, ollama, openai-compatible
+r = judge.ask("Rate this answer…", system=RUBRIC, schema=VERDICT, temperature=0)
+r.text, r.structured, r.tool_calls, r.usage, r.reasoning, r.finish_reason, r.error
+
+r = normalize(response)   # a response you already have, from any of them (or LiteLLM)
+```
+
+Whatever answered, the fields are the same:
+- `tool_calls`: `[{"name", "arguments", "id"}]`, with `arguments` always a dict. A JSON string
+  (OpenAI's) is parsed; anything else is kept as `{"_raw": value}`. Nothing is dropped.
+- `usage`: tokens `input`, `output`, `cached`, `reasoning`.
+- `finish_reason`: `stop`, `length`, `tool_call`, `refusal`, `content_filter` or `error`.
+- `structured`: the answer parsed as JSON, and checked against `schema`. When it doesn't fit,
+  it's `None` with `error_kind="invalid"`, never an empty stand-in.
+- `error` and `error_kind` (`timeout`, `rate_limited`, `unavailable`, `invalid`, `error`), when
+  there's no answer. `ask()` never raises for a provider's failure.
+
+Every other parameter goes to the provider unchanged: nothing is filtered or renamed.
+Credentials are the provider SDK's own (its key variables, or a CLI login it supports).
+Ollama and OpenAI-compatible servers (vLLM, LM Studio, a LiteLLM proxy) need no SDK:
+`base_url`, and `api_key` if the server wants one. `evaluate()` takes a Judge's answer as it
+is: `evaluate(judge, prompt, schema=VERDICT, judge_kwargs={"schema": VERDICT})`.
+`judge_kwargs` is how arguments reach your judge when their names are also `evaluate()`'s own
+(`schema`, `field`, `run`, ...); `evaluate()` warns when one looks misrouted.
+
+`assay.instrument()` records Anthropic, OpenAI, Gemini, Ollama and LiteLLM calls through the
+same reading, with the tool calls asked for and why each call stopped.
+
 ## Your own evaluators: results whose validity is explicit
 
 An LLM judge that answers with something that isn't a verdict, or a metric that divides by

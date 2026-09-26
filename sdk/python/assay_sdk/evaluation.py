@@ -14,19 +14,25 @@ at once (a bug isn't fixed by asking again). With `run=` (a test case's run), th
 recorded as a check: PASS and FAIL as pass and fail, the rest as an error with its kind, so it
 is never counted against the AI.
 
-The judge is called as judge(*args, **kwargs) and may return:
+The judge is called as judge(*args, **kwargs, **judge_kwargs). evaluate()'s own keywords
+(schema, threshold, run, field, ...) are its own: a judge that takes one of those names gets it
+only through judge_kwargs, and evaluate() warns when that looks like what was meant. It may return:
   - a bool: whether it passed;
   - a number: the score, compared with `threshold`;
   - a dict: {"score": ..., "passed" or "pass": ..., "reason": ...} (also as JSON text);
-  - an object with those as attributes (e.g. a pydantic model).
+  - an object with those as attributes (e.g. a pydantic model);
+  - an assay_sdk.Response (from Judge.ask or normalize()): its error keeps its kind (TIMEOUT,
+    RATE_LIMITED, INVALID, ...), and its structured answer or text is the verdict.
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import re
 import time
+import warnings
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -182,6 +188,14 @@ def _record(result: Result, run, field: Optional[str], evaluator: Optional[str],
 
 def _step(result: Result, out: Any, schema, threshold, score_range) -> bool:
     """Take one answer; True if it's final."""
+    from assay_sdk.llm import Response
+    if isinstance(out, Response):  # a provider's answer, already read: its error keeps its kind
+        if out.error:
+            status = {"timeout": TIMEOUT, "rate_limited": RATE_LIMITED, "invalid": INVALID}.get(out.error_kind, ERROR)
+            result.status, result.score, result.error, result.error_kind = status, None, out.error, out.error_kind or "error"
+            result.raw_judge_output, result.history = out.text, result.history + [(status, out.error)]
+            return (out.error_kind or "error") not in _TRANSIENT
+        out = out.structured if out.structured is not None else out.text
     status, score, reason, problem = verdict_of(out, schema, threshold, score_range)
     result.raw_judge_output, result.history = out, result.history + [(status, problem)]
     if status == INVALID:
@@ -200,11 +214,30 @@ def _failed(result: Result, exc: BaseException) -> bool:
     return kind not in _TRANSIENT
 
 
+OWN = ("schema", "threshold", "score_range", "retries", "backoff", "run", "field", "evaluator", "inputs")
+
+
+def _collisions(judge: Callable, given: Dict[str, Any]) -> None:
+    """Warn when a keyword evaluate() keeps for itself is also one the judge takes."""
+    try:
+        params = inspect.signature(judge).parameters
+    except (TypeError, ValueError):
+        return
+    clash = [k for k in OWN if k in params and given.get(k) is not None]
+    if clash:
+        warnings.warn(f"{', '.join(clash)} went to evaluate(), not to {getattr(judge, '__name__', 'the judge')}, "
+                      f"which also takes {'it' if len(clash) == 1 else 'them'}. To pass {'it' if len(clash) == 1 else 'them'} "
+                      f"to the judge, use judge_kwargs={{...}}.", stacklevel=3)
+
+
 def evaluate(judge: Callable, *args, schema: Optional[dict] = None, threshold: Optional[float] = 0.5,
              score_range: Tuple[float, float] = (0.0, 1.0), retries: int = 2, backoff: float = 1.0,
              run=None, field: Optional[str] = None, evaluator: Optional[str] = None,
-             inputs: Optional[Dict[str, Any]] = None, **kwargs) -> Result:
+             inputs: Optional[Dict[str, Any]] = None, judge_kwargs: Optional[Dict[str, Any]] = None,
+             **kwargs) -> Result:
     """Call `judge`, and say whether what came back is a verdict (see the module docstring)."""
+    _collisions(judge, {"schema": schema, "run": run, "field": field, "evaluator": evaluator, "inputs": inputs})
+    kwargs = {**kwargs, **(judge_kwargs or {})}
     result = Result(status=INVALID)
     for i in range(retries + 1):
         result.attempts = i + 1
@@ -223,8 +256,11 @@ def evaluate(judge: Callable, *args, schema: Optional[dict] = None, threshold: O
 async def aevaluate(judge: Callable, *args, schema: Optional[dict] = None, threshold: Optional[float] = 0.5,
                     score_range: Tuple[float, float] = (0.0, 1.0), retries: int = 2, backoff: float = 1.0,
                     run=None, field: Optional[str] = None, evaluator: Optional[str] = None,
-                    inputs: Optional[Dict[str, Any]] = None, **kwargs) -> Result:
+                    inputs: Optional[Dict[str, Any]] = None, judge_kwargs: Optional[Dict[str, Any]] = None,
+                    **kwargs) -> Result:
     """evaluate() for an async judge."""
+    _collisions(judge, {"schema": schema, "run": run, "field": field, "evaluator": evaluator, "inputs": inputs})
+    kwargs = {**kwargs, **(judge_kwargs or {})}
     result = Result(status=INVALID)
     for i in range(retries + 1):
         result.attempts = i + 1

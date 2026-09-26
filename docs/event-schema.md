@@ -91,8 +91,8 @@ Fields for each kind:
 | Kind | Fields |
 |---|---|
 | `llm` | `model`, `tokens_in`, `tokens_out`, `cost_usd`, `prompt` (`id@version`), `text` (the output, or a summary) |
-| `llm` (also) | `tools` (the tools the model was offered) |
-| `tool` | `args` (object), `result` (JSON), `server` (the MCP server, for an MCP tool) |
+| `llm` (also) | `tools` (the tools the model was offered), `tool_calls` (the calls it asked for: `[{"name", "arguments", "id"}]`), `finish_reason` (`stop` \| `length` \| `tool_call` \| `refusal` \| `content_filter` \| `error`), `tokens_cached`, `tokens_reasoning` |
+| `tool` | `args` (an object; a JSON string is parsed, and anything else is kept as `{"_raw": …}`), `result` (JSON), `server` (the MCP server, for an MCP tool) |
 | `resource` | `uri` (**required**), `result` (its contents), `server`: an MCP resource the agent read. Its contents count as retrieved context when a judge's inputs are checked |
 | `mcp_prompt` | `args` (the prompt's arguments), `result` (the messages it returned), `server`: an MCP prompt the agent fetched |
 | `approval` | `decision` (`approved` \| `rejected` \| `pending`), `by`, `text` (the reason) |

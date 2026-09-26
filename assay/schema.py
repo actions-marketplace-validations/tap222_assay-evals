@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from sqlalchemy import and_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -88,6 +88,12 @@ class Step(_E):
     prompt: Optional[str] = Field(None, max_length=192, description="id@version")
     text: Optional[str] = Field(None, max_length=32768)
     tools: Optional[List[str]] = Field(None, max_length=500, description="llm: the tools the model was offered")
+    finish_reason: Optional[str] = Field(None, max_length=24, description="llm: stop, length, tool_call, refusal, "
+                                                                          "content_filter or error")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(None, max_length=200, description="llm: the tool calls the "
+                                                                                          "model asked for")
+    tokens_cached: Optional[int] = Field(None, ge=0)
+    tokens_reasoning: Optional[int] = Field(None, ge=0)
     # tool; mcp_prompt: args are the prompt's arguments, result the messages it returned
     args: Optional[Dict[str, Any]] = None
     result: Optional[Any] = None
@@ -107,15 +113,31 @@ class Step(_E):
     decision: Optional[Literal["approved", "rejected", "pending"]] = None
     by: Optional[str] = Field(None, max_length=128, description="approval: who decided (a person, a policy)")
 
+    @field_validator("args", mode="before")
+    @classmethod
+    def _any_args(cls, v):
+        """Tool arguments in any shape: a JSON string parsed, anything else kept under "_raw"."""
+        from assay_sdk.llm import normalize_args
+        return None if v is None else normalize_args(v)
+
+    @field_validator("tool_calls", mode="before")
+    @classmethod
+    def _calls(cls, v):
+        from assay_sdk.llm import normalize_args
+        return None if v is None else [{**c, "arguments": normalize_args(c.get("arguments"))} if isinstance(c, dict)
+                                       else {"_raw": c} for c in v]
+
     @model_validator(mode="after")
     def _kind_fields(self):
-        allowed = {"llm": {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "tools"},
+        allowed = {"llm": {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "tools", "finish_reason",
+                           "tool_calls", "tokens_cached", "tokens_reasoning"},
                    "tool": {"args", "result", "server"}, "state": {"op", "value"}, "answer": {"text"},
                    "stage": {"outputs", "did_work", "prompt"}, "approval": {"decision", "by", "text"},
                    "resource": {"uri", "result", "server"}, "mcp_prompt": {"args", "result", "server"},
                    "plan": {"plan", "text"}}[self.kind]
         specific = {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "args", "result", "op",
-                    "value", "outputs", "did_work", "tools", "decision", "by", "server", "uri", "plan"}
+                    "value", "outputs", "did_work", "tools", "decision", "by", "server", "uri", "plan",
+                    "finish_reason", "tool_calls", "tokens_cached", "tokens_reasoning"}
         wrong = [f for f in specific - allowed if getattr(self, f) is not None]
         if wrong:
             raise ValueError(f"a {self.kind} step doesn't take {', '.join(sorted(wrong))}")
@@ -307,6 +329,8 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                         {"uri": e.uri} if e.kind == "resource" else
                         {"steps": e.plan} if e.kind == "plan" else e.args, "server": e.server,
                         "tokens_in": e.tokens_in, "tokens_out": e.tokens_out, "prompt": e.prompt, "tools": e.tools,
+                        "finish_reason": e.finish_reason, "tool_calls": e.tool_calls, "tokens_cached": e.tokens_cached,
+                        "tokens_reasoning": e.tokens_reasoning,
                         "result": e.value if e.kind == "state" else e.result,
                         "error": e.error if e.status == "error" else None, "text": e.text, "model": e.model,
                         "tokens": tokens or None, "cost_usd": e.cost_usd, "started_at": e.ts,

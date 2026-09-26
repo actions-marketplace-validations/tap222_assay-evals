@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -144,6 +144,13 @@ class StepEvent(Event):
     result: Optional[Any] = Field(None, description="tool: what it returned; state: the object after the change")
     error: Optional[str] = Field(None, max_length=1024, description="tool: the error it raised, if any")
     server: Optional[str] = Field(None, max_length=128, description="tool, resource, mcp_prompt: the MCP server")
+
+    @field_validator("args", mode="before")
+    @classmethod
+    def _any_args(cls, v):
+        """Tool arguments in any shape: a JSON string parsed, anything else kept under "_raw"."""
+        from assay_sdk.llm import normalize_args
+        return None if v is None else normalize_args(v)
     text: Optional[str] = Field(None, max_length=16384, description="reason / answer: the text")
     model: Optional[str] = Field(None, max_length=128)
     tokens: Optional[int] = Field(None, ge=0)
@@ -651,6 +658,11 @@ def _json(v):
     return v
 
 
+def _args(v):
+    from assay_sdk.llm import normalize_args
+    return normalize_args(_json(v))
+
+
 def _conversation(spans) -> Optional[str]:
     """The conversation a trace belongs to, from the OpenTelemetry attributes that name it."""
     return next((a[k] for _, a, _ in spans for k in ("gen_ai.conversation.id", "session.id") if a.get(k)), None)
@@ -676,8 +688,8 @@ def _agent_trajectories(batch: EventBatch, collected, doc_of) -> None:
             start, end = _ts(sp.get("startTimeUnixNano")), _ts(sp.get("endTimeUnixNano"))
             if is_tool(a):
                 steps.append(StepEvent(kind="tool", name=str(a.get("gen_ai.tool.name") or sp.get("name")),
-                                       args=_json(a.get("gen_ai.tool.call.arguments")) if isinstance(
-                                           _json(a.get("gen_ai.tool.call.arguments")), dict) else None,
+                                       args=None if a.get("gen_ai.tool.call.arguments") is None
+                                       else _args(a.get("gen_ai.tool.call.arguments")),  # never dropped
                                        result=_json(a.get("gen_ai.tool.call.result")),
                                        error=((sp.get("status") or {}).get("message") or "error") if errored else None,
                                        started_at=start, finished_at=end))

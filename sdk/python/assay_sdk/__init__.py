@@ -304,11 +304,14 @@ class Run:
     def llm(self, model: Optional[str] = None, tokens_in: Optional[int] = None, tokens_out: Optional[int] = None,
             cost_usd: Optional[float] = None, prompt: Optional[str] = None, text: Optional[str] = None,
             started: Optional[datetime] = None, ended: Optional[datetime] = None, error: Optional[str] = None,
-            tools: Optional[List[Any]] = None, name: Optional[str] = None) -> None:
+            tools: Optional[List[Any]] = None, name: Optional[str] = None, finish_reason: Optional[str] = None,
+            tool_calls: Optional[List[dict]] = None, tokens_cached: Optional[int] = None,
+            tokens_reasoning: Optional[int] = None) -> None:
         """A model call. prompt is "id@version"; text is the output (or a summary of it); tools are the
         tools the model was offered (names, or the tool definitions you passed the model). name: the
         step it belongs to, for a pipeline (the calls of a step are its cost and its models)."""
-        self._step("llm", started, name=name, model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
+        self._step("llm", started, name=name, finish_reason=finish_reason, tool_calls=self._c.clean(tool_calls),
+                   tokens_cached=tokens_cached, tokens_reasoning=tokens_reasoning, model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
                    prompt=prompt, text=self._c.clean(text), ended_at=_ts(ended),
                    status="error" if error else "ok", error=error, tools=_tool_names(tools))
 
@@ -325,7 +328,8 @@ class Run:
     def tool(self, name: str, args: Optional[Dict[str, Any]] = None, result: Any = None, error: Optional[str] = None,
              started: Optional[datetime] = None, ended: Optional[datetime] = None, server: Optional[str] = None) -> None:
         """A tool call you've already made. server: the MCP server it went to, if any."""
-        self._step("tool", started, name=name, args=self._c.clean(args or {}), result=self._c.clean(result),
+        from assay_sdk.llm import normalize_args  # a JSON string, a list, a value: never rejected
+        self._step("tool", started, name=name, args=self._c.clean(normalize_args(args)), result=self._c.clean(result),
                    ended_at=_ts(ended), status="error" if error else "ok", error=error, server=server)
 
     def resource(self, uri: str, contents: Any = None, server: Optional[str] = None, error: Optional[str] = None,
@@ -514,3 +518,5 @@ atexit.register(lambda: _client and _client.close())
 from assay_sdk.evaluation import Result, aevaluate, evaluate  # noqa: E402
 # Attach to code with a few lines: @assay.step, @assay.tool, assay.instrument() (assay_sdk/auto.py).
 from assay_sdk.auto import agent, instrument, pipeline, step, tool  # noqa: E402
+# Any model provider, one shape (assay_sdk/llm.py).
+from assay_sdk.llm import Judge, Response, normalize, normalize_args  # noqa: E402

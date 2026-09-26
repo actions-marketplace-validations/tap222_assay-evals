@@ -100,6 +100,7 @@ steps = 1.5
 # (`assay test --judge`, `pytest --assay --assay-judge`). Needs `pip install anthropic`.
 [judge]
 enabled = false
+provider = "anthropic"   # or openai, gemini, ollama, openai-compatible (then name the model)
 model = "claude-opus-5"
 redact = true     # personal data is replaced before the trace is sent to the model API
 '''
@@ -325,8 +326,14 @@ def policy_lines(policy: Optional[dict]) -> List[str]:
 
 def _judge_config(j: dict) -> dict:
     from assay import judge
+    from assay_sdk.llm import PROVIDERS
+    provider = str(j.get("provider") or "anthropic")
+    if provider not in PROVIDERS:
+        raise SetupError(f"{CONFIG}, [judge] provider: one of {', '.join(PROVIDERS)}.")
+    if provider != "anthropic" and not j.get("model"):
+        raise SetupError(f"{CONFIG}, [judge]: name the {provider} model to judge with (model = \"...\").")
     return {"enabled": bool(j.get("enabled", False)), "model": str(j.get("model") or judge.MODEL),
-            "redact": bool(j.get("redact", True))}
+            "redact": bool(j.get("redact", True)), "provider": provider}
 
 
 def _behavior_config(b: dict) -> dict:
@@ -339,7 +346,7 @@ def _behavior_config(b: dict) -> dict:
 
 DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
                   "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True},
-                  "behavior": {"fail": True, "ratios": {}}, "judge": {"enabled": False, "model": "claude-opus-5", "redact": True}}
+                  "behavior": {"fail": True, "ratios": {}}, "judge": {"enabled": False, "model": "claude-opus-5", "redact": True, "provider": "anthropic"}}
 
 
 def find_config(start: Path) -> dict:
@@ -1225,7 +1232,8 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     judged = None
     if (cfg.get("judge") or {}).get("enabled"):  # plan quality and consistency, by an LLM (assay/judge.py)
         from assay import judge
-        judged = judge.judge_run(engine, TENANT, run_id, cfg["judge"]["model"], redact=cfg["judge"]["redact"])
+        judged = judge.judge_run(engine, TENANT, run_id, cfg["judge"]["model"], redact=cfg["judge"]["redact"],
+                                 provider=cfg["judge"].get("provider", "anthropic"))
     result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"], cfg["behavior"], abandoned_why)
     if result is None:
         return 2, ("Nothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "

@@ -23,6 +23,9 @@ The trace leaves your infrastructure for the model API, so personal data in it (
 IBANs, SSNs, phone numbers) is redacted first, as it is in saved cases: redact=False sends it
 as recorded. What was sent is what's recorded as the judge's inputs.
 
+Any provider can judge (assay_sdk.Judge: anthropic, openai, gemini, ollama, openai-compatible), with
+[judge] provider and model; Anthropic's requests keep prompt caching and refusal fallbacks.
+
 It costs a model call per run, so it runs only when asked: `assay test --judge`, `pytest
 --assay --assay-judge`, or POST /v1/agents/runs/{run}/judge. Needs `pip install anthropic`
 and credentials (ANTHROPIC_API_KEY, or an `ant auth login` profile).
@@ -184,7 +187,7 @@ def _redacted(traj: dict, input_: Any, earlier: Optional[List[dict]]):
 
 
 def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, model: str = MODEL,
-          client=None, redact: bool = True) -> Dict[str, dict]:
+          client=None, redact: bool = True, provider: str = "anthropic") -> Dict[str, dict]:
     """{field: {"status": pass|fail|error, "score", "reason", "inputs"}} for one trajectory.
     Fields the judge found not applicable are left out."""
     if redact:  # personal data doesn't leave for the model API
@@ -195,7 +198,7 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
     request = dict(model=model, max_tokens=16000, cache_control={"type": "ephemeral"},
                    system=[{"type": "text", "text": RUBRIC}], messages=messages,
                    output_config={"format": {"type": "json_schema", "schema": SCHEMA}})
-    if model in FALLBACK_MODELS:  # a declined request is re-run on the model Anthropic picks for it
+    if provider == "anthropic" and model in FALLBACK_MODELS:  # a declined request is re-run on the model Anthropic picks
         request.update(extra_headers={"anthropic-beta": "server-side-fallback-2026-07-01"},
                        extra_body={"fallbacks": "default"})
     # What the judge saw, by role (assay/audit.py checks it against the trace).
@@ -215,27 +218,37 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
 
     def all_(status, reason, kind=None):
         return {f: result(status, reason, kind=kind) for f in fields}
-    try:
-        client = client or _client()
-    except ImportError:
-        return all_("error", "the judge needs the anthropic package: pip install anthropic", "error")
+    from assay_sdk.llm import Judge
+    extra = {k: v for k, v in request.items() if k not in ("model", "max_tokens", "system", "messages", "output_config")} \
+        if provider == "anthropic" else {}
+    if client is None and provider == "anthropic":
+        try:
+            client = _client()
+        except ImportError:
+            return all_("error", "the judge needs the anthropic package: pip install anthropic", "error")
+    asker = Judge(provider, model, client=client)
     problem = None
     while tries <= RETRIES:
         tries += 1
         try:
-            resp = client.messages.create(**request)
-        except Exception as exc:  # the SDK has already retried what's worth retrying
-            kind, reason = _classify(exc)
+            resp = asker.ask(trace, system=RUBRIC, schema=SCHEMA, check=False, **extra)
+        except ImportError as exc:
+            return all_("error", f"the judge needs the {provider} SDK: {exc}", "error")
+        if resp.exception is not None:  # it raised: the SDK has already retried what's worth retrying
+            if isinstance(resp.exception, ImportError):
+                return all_("error", f"the judge needs its provider's SDK ({provider}): pip install "
+                                     f"{ {'anthropic': 'anthropic', 'openai': 'openai', 'gemini': 'google-genai'}.get(provider, provider)}",
+                            "error")
+            kind, reason = _classify(resp.exception)
             return all_("error", reason, kind)
-        text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), None)
-        if resp.stop_reason == "refusal":
+        text = resp.text
+        if resp.finish_reason in ("refusal", "content_filter"):
             return all_("error", "the judge declined to judge this run (refusal)", "error")
-        if resp.stop_reason == "max_tokens":
+        if resp.finish_reason == "length":
             problem = "the judge's answer was cut off (max_tokens)"
             continue
-        try:
-            verdict = json.loads(text or "")
-        except ValueError:
+        verdict = resp.structured
+        if verdict is None:
             problem = "the judge's answer wasn't the JSON asked for"
             continue
         problem = _problem(verdict, fields)
@@ -257,7 +270,7 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
 
 
 def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
-              limit: Optional[int] = None, redact: bool = True) -> dict:
+              limit: Optional[int] = None, redact: bool = True, provider: str = "anthropic") -> dict:
     """Judge every ended trajectory of a test run, and store the results with the run's others.
     {"judged": trajectories, "results": rows written, "errors": rows that couldn't be judged}."""
     from assay import agents, ingest, learn, store
@@ -276,7 +289,7 @@ def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
             earlier = [learn.snapshot(engine, f"events:{tenant}", t["trajectory_id"], redact, False)
                        for t in agents.conversation_turns(engine, tenant, traj["conversation_id"])
                        if t["trajectory_id"] != h["trajectory_id"] and learn._earlier(t, traj)]
-        found = judge(traj, (inputs.get(h["trajectory_id"]) or {}).get("input"), earlier, model, client, redact)
+        found = judge(traj, (inputs.get(h["trajectory_id"]) or {}).get("input"), earlier, model, client, redact, provider)
         case = h["case_id"] or h["trajectory_id"]
         for field, r in found.items():
             rows.append({"tenant": tenant, "result_id": ingest._derive(run_id, case, field, EVALUATOR, h["attempt"]),

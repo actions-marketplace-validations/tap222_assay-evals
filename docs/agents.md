@@ -138,8 +138,9 @@ curl -X POST "$ASSAY_URL/v1/agents/runs/nightly-0924/judge?source=events:acme" -
 ```
 
 It costs a model call per run, so it runs only when asked. `[judge] enabled = true` in
-`assay.toml` turns it on for every run. The model is `claude-opus-5` by default (`[judge]
-model`, or `ASSAY_JUDGE_MODEL` on the server). A score of 3 or more passes.
+`assay.toml` turns it on for every run. The model is `claude-opus-5` by default. `[judge] provider` and `model` (or `ASSAY_JUDGE_PROVIDER`
+and `ASSAY_JUDGE_MODEL` on the server) judge with OpenAI, Gemini, Ollama or any OpenAI-compatible
+server instead. A score of 3 or more passes.
 
 The judge's results are ordinary evaluation results (evaluator `assay.judge@1`). So:
 - a case whose consistency drops from its baseline is a regression, and a judge that disagrees

@@ -662,7 +662,9 @@ def _step(r: dict) -> dict:
         if tokens_out is None and r.get("tokens") is not None:  # recorded before tokens_out was kept
             tokens_out = r["tokens"] - (r.get("tokens_in") or 0) or None
         out |= {"model": r.get("model"), "prompt": r.get("prompt"), "tokens_in": r.get("tokens_in"),
-                "tokens_out": tokens_out, "cost_usd": r.get("cost_usd"), "tools": r.get("tools")}
+                "tokens_out": tokens_out, "cost_usd": r.get("cost_usd"), "tools": r.get("tools"),
+                "finish_reason": r.get("finish_reason"), "tool_calls": r.get("tool_calls"),
+                "tokens_cached": r.get("tokens_cached"), "tokens_reasoning": r.get("tokens_reasoning")}
     elif kind in ("tool", "mcp_prompt"):
         out |= {"args": r.get("args"), "result": r.get("result"), "server": r.get("server")}
     elif kind == "plan":

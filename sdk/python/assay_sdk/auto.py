@@ -24,7 +24,8 @@ the step that produced them. A tool records its arguments, its result or error, 
 into the run in progress; with no run, the function just runs.
 
 instrument() records every model call made inside a run, as a model call of the step it's in:
-model, tokens in and out, the tools offered, the answer's text, and errors. It never changes
+model, tokens (in, out, cached, reasoning), the tools offered and the tool calls asked for, the
+answer's text, why it stopped, and errors, the same way for every provider. It never changes
 what the call returns, and never breaks it: anything the recording can't read is left out.
 Works on sync and async functions.
 """
@@ -214,32 +215,21 @@ agent = _runs("agent")
 
 # ---------- model calls ----------
 
-def _anthropic_reading(kwargs: dict, resp: Any) -> dict:
-    usage = getattr(resp, "usage", None)
-    text = "".join(getattr(b, "text", "") for b in (getattr(resp, "content", None) or [])
-                   if getattr(b, "type", None) == "text")
-    return {"model": getattr(resp, "model", None) or kwargs.get("model"),
-            "tokens_in": getattr(usage, "input_tokens", None), "tokens_out": getattr(usage, "output_tokens", None),
-            "text": text[:MAX_TEXT] or None, "tools": [t.get("name") for t in kwargs.get("tools") or []
-                                                       if isinstance(t, dict) and t.get("name")] or None}
-
-
-def _openai_chat_reading(kwargs: dict, resp: Any) -> dict:
-    usage = getattr(resp, "usage", None)
-    choices = getattr(resp, "choices", None) or []
-    msg = getattr(choices[0], "message", None) if choices else None
-    tools = [(t.get("function") or {}).get("name") for t in kwargs.get("tools") or [] if isinstance(t, dict)]
-    return {"model": getattr(resp, "model", None) or kwargs.get("model"),
-            "tokens_in": getattr(usage, "prompt_tokens", None), "tokens_out": getattr(usage, "completion_tokens", None),
-            "text": (getattr(msg, "content", None) or "")[:MAX_TEXT] or None, "tools": [t for t in tools if t] or None}
-
-
-def _openai_responses_reading(kwargs: dict, resp: Any) -> dict:
-    usage = getattr(resp, "usage", None)
-    return {"model": getattr(resp, "model", None) or kwargs.get("model"),
-            "tokens_in": getattr(usage, "input_tokens", None), "tokens_out": getattr(usage, "output_tokens", None),
-            "text": (getattr(resp, "output_text", None) or "")[:MAX_TEXT] or None,
-            "tools": [t.get("name") for t in kwargs.get("tools") or [] if isinstance(t, dict) and t.get("name")] or None}
+def _reading(provider: str):
+    """How to read one provider's response into a model-call step (assay_sdk/llm.py normalizes it)."""
+    def read(kwargs: dict, resp: Any) -> dict:
+        from assay_sdk.llm import normalize
+        r = normalize(resp, provider)
+        offered = []
+        for t in kwargs.get("tools") or []:
+            if isinstance(t, dict):
+                offered.append(t.get("name") or (t.get("function") or {}).get("name"))
+        return {"model": r.model or kwargs.get("model"), "tokens_in": r.usage.get("input"),
+                "tokens_out": r.usage.get("output"), "tokens_cached": r.usage.get("cached"),
+                "tokens_reasoning": r.usage.get("reasoning"), "text": (r.text or "")[:MAX_TEXT] or None,
+                "tools": [t for t in offered if t] or None, "finish_reason": r.finish_reason,
+                "tool_calls": [{**c, "arguments": c["arguments"]} for c in r.tool_calls] or None}
+    return read
 
 
 def _record_call(reading: Callable, kwargs: dict, started: datetime, resp: Any = None,
@@ -248,23 +238,20 @@ def _record_call(reading: Callable, kwargs: dict, started: datetime, resp: Any =
     if run is None or kwargs.get("stream"):  # a stream is read by the caller; there's nothing whole to record
         return
     try:
-        fields = reading(kwargs, resp) if exc is None else {"model": kwargs.get("model")}
+        fields = reading(kwargs, resp) if exc is None else {"model": kwargs.get("model"), "finish_reason": "error"}
         run.llm(**fields, started=started, ended=datetime.now(timezone.utc), name=_stage.get(),
                 error=f"{type(exc).__name__}: {exc}"[:2000] if exc else None)
     except Exception:  # recording must never break the call
         log.debug("Assay couldn't record a model call", exc_info=True)
 
 
-def _patch(cls, method: str, reading: Callable) -> bool:
-    original = getattr(cls, method, None)
-    if original is None or getattr(original, "_assay", False):
-        return False
+def _wrap(original: Callable, reading: Callable, bound: bool) -> Callable:
     if inspect.iscoroutinefunction(original):
         @functools.wraps(original)
-        async def patched(self, *args, **kwargs):
+        async def patched(*args, **kwargs):
             started = datetime.now(timezone.utc)
             try:
-                resp = await original(self, *args, **kwargs)
+                resp = await original(*args, **kwargs)
             except Exception as exc:
                 _record_call(reading, kwargs, started, exc=exc)
                 raise
@@ -272,41 +259,57 @@ def _patch(cls, method: str, reading: Callable) -> bool:
             return resp
     else:
         @functools.wraps(original)
-        def patched(self, *args, **kwargs):
+        def patched(*args, **kwargs):
             started = datetime.now(timezone.utc)
             try:
-                resp = original(self, *args, **kwargs)
+                resp = original(*args, **kwargs)
             except Exception as exc:
                 _record_call(reading, kwargs, started, exc=exc)
                 raise
             _record_call(reading, kwargs, started, resp)
             return resp
     patched._assay = True
-    setattr(cls, method, patched)
+    return patched
+
+
+def _patch(owner, name: str, reading: Callable) -> bool:
+    original = getattr(owner, name, None)
+    if original is None or getattr(original, "_assay", False):
+        return False
+    setattr(owner, name, _wrap(original, reading, bound=not isinstance(owner, type)))
     return True
 
 
-TARGETS = [  # (module, class, method, how to read the response)
-    ("anthropic.resources.messages", "Messages", "create", _anthropic_reading),
-    ("anthropic.resources.messages", "AsyncMessages", "create", _anthropic_reading),
-    ("openai.resources.chat.completions", "Completions", "create", _openai_chat_reading),
-    ("openai.resources.chat.completions", "AsyncCompletions", "create", _openai_chat_reading),
-    ("openai.resources.responses", "Responses", "create", _openai_responses_reading),
-    ("openai.resources.responses", "AsyncResponses", "create", _openai_responses_reading),
+TARGETS = [  # (module, class or None for a module function, method, provider)
+    ("anthropic.resources.messages", "Messages", "create", "anthropic"),
+    ("anthropic.resources.messages", "AsyncMessages", "create", "anthropic"),
+    ("openai.resources.chat.completions", "Completions", "create", "openai"),
+    ("openai.resources.chat.completions", "AsyncCompletions", "create", "openai"),
+    ("openai.resources.responses", "Responses", "create", "openai"),
+    ("openai.resources.responses", "AsyncResponses", "create", "openai"),
+    ("google.genai.models", "Models", "generate_content", "gemini"),
+    ("google.genai.models", "AsyncModels", "generate_content", "gemini"),
+    ("ollama", "Client", "chat", "ollama"),
+    ("ollama", "AsyncClient", "chat", "ollama"),
+    ("ollama", None, "chat", "ollama"),  # ollama.chat(...), bound to its default client
+    ("litellm", None, "completion", "openai"),
+    ("litellm", None, "acompletion", "openai"),
 ]
 
 
 def instrument() -> List[str]:
-    """Record the model calls the installed Anthropic and OpenAI SDKs make. Returns what was
+    """Record the model calls the installed SDKs make: Anthropic, OpenAI (chat and responses),
+    Gemini (google-genai), Ollama and LiteLLM. Each is recorded the same way (assay_sdk/llm.py):
+    text, usage, the tool calls the model asked for, and why it stopped. Returns what was
     instrumented (e.g. ["anthropic Messages.create"]); calling it twice changes nothing."""
     import importlib
     done = []
-    for module, cls_name, method, reading in TARGETS:
+    for module, cls_name, method, provider in TARGETS:
         try:
             mod = importlib.import_module(module)
         except ImportError:
             continue
-        cls = getattr(mod, cls_name, None)
-        if cls is not None and _patch(cls, method, reading):
-            done.append(f"{module.split('.')[0]} {cls_name}.{method}")
+        owner = mod if cls_name is None else getattr(mod, cls_name, None)
+        if owner is not None and _patch(owner, method, _reading(provider)):
+            done.append(f"{module.split('.')[0]} {cls_name + '.' if cls_name else ''}{method}")
     return done

@@ -285,6 +285,10 @@ agent_steps = Table(
     Column("tokens_out", Integer),  # a model call's output
     Column("prompt", String(192)),  # the prompt a model call used, id@version
     Column("server", String(128)),  # the MCP server a tool call, resource read or prompt went to
+    Column("finish_reason", String(24)),  # a model call's: stop | length | tool_call | refusal | content_filter | error
+    Column("tool_calls", JSON),  # the tool calls a model asked for: [{"name", "arguments", "id"}]
+    Column("tokens_cached", Integer),
+    Column("tokens_reasoning", Integer),
 )
 
 # Runs as the v1 event schema describes them (assay/schema.py): what run.start and run.end
