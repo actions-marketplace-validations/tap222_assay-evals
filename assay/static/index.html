@@ -243,6 +243,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
     <a href="#cost" data-tab="cost">Cost</a>
     <a href="#errors" data-tab="errors">Errors</a>
     <a href="#failures" data-tab="failures">Failures</a>
+    <a href="#diff" data-tab="diff">Behavior diff</a>
     <a href="#agents" data-tab="agents">Agents</a>
     <a href="#learn" data-tab="learn">Learn</a>
     <a href="#prompts" data-tab="prompts">Prompts</a>
@@ -262,6 +263,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
   <section id="tab-cost" class="stack" hidden></section>
   <section id="tab-errors" class="stack" hidden></section>
   <section id="tab-failures" class="stack" hidden></section>
+  <section id="tab-diff" class="stack" hidden></section>
   <section id="tab-agents" class="stack" hidden></section>
   <section id="tab-learn" class="stack" hidden></section>
   <section id="tab-prompts" class="stack" hidden></section>
@@ -1302,6 +1304,46 @@ const KIND={ai:["AI / pipeline error","var(--bad)","A step got the value wrong."
 const DECISION={accepted_change:"Accepted as intended",not_a_problem:"Not a problem",confirmed:"Confirmed, being fixed"};
 function featLabel(f){const [k,v]=f.feature.split("=");const key=k.replace(/^(prompt|model|failed|fallback|call_failed):/,(m,a)=>({prompt:"prompt at ",model:"model at ",failed:"failed: ",fallback:"fallback at ",call_failed:"call failed at "}[a]));
   return `<span class="feat" title="${pct(f.share,0)} of these failures, ${pct(f.base,1)} of passing cases">${esc(key)}${v!=null?" = "+esc(v):""} · ${f.lift==null?"only in failures":f.lift+"×"}</span>`}
+// What behavior changed between two evaluation runs (GET /v1/evals/runs/{run}/diff).
+async function renderDiff(){
+  const box=$("#tab-diff");
+  const runs=await api(`/v1/evals/runs?${q({source:src()})}`).catch(()=>[]);
+  const name=r=>{const l=r.lineage||{},v=l.version||l.release||l.app||l.build||l.commit||l.prompt||l.model;return v?`${v} · ${r.run_id}`:r.run_id};
+  if(runs.length<2){box.innerHTML=`<div class="panel"><div class="panel-head"><div><h2>Behavior diff</h2></div></div><div class="empty">A diff needs two evaluation runs in this source; ${runs.length?"there's one so far":"there are none yet"}. Record test runs with <code>assay.run(..., test=..., version={"version": "v1.9.0"})</code>.</div></div>`;return}
+  let cur=store.get("assay-diff-cur"),base=store.get("assay-diff-base");
+  if(!runs.some(r=>r.run_id===cur))cur=runs[0].run_id;
+  if(!runs.some(r=>r.run_id===base)||base===cur)base=(runs.find(r=>r.run_id!==cur)||{}).run_id;
+  const pick=(id,sel)=>`<select id="${id}">${runs.map(r=>`<option value="${esc(r.run_id)}" ${r.run_id===sel?"selected":""}>${esc(name(r))}</option>`).join("")}</select>`;
+  box.innerHTML=`<div class="panel stack"><div class="panel-head"><div><h2>Behavior diff</h2><p class="sub">What each scenario does now, next to what it did before: regressions with the flow before and after, what changed but still passes, what's flaky and what improved.</p></div>
+    <div class="row"><label>Baseline ${pick("diff-base",base)}</label> <label>Current ${pick("diff-cur",cur)}</label></div></div><p class="note">Comparing…</p></div>`;
+  $("#diff-base").onchange=e=>{store.set("assay-diff-base",e.target.value);renderDiff()};
+  $("#diff-cur").onchange=e=>{store.set("assay-diff-cur",e.target.value);renderDiff()};
+  let d;
+  try{d=await api(`/v1/evals/runs/${encodeURIComponent(cur)}/diff?${q({source:src(),baseline:base})}`)}
+  catch(e){box.querySelector(".note").outerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
+  const k=d.counts,SEV={HIGH:"bad",MEDIUM:"warn",LOW:"neutral"};
+  const counts=[[k.unchanged,"unchanged","good"],[k.improved,"improved","good"],[k.changed,"changed, still passing","warn"],[k.regressed,"regressed","bad"],
+    [k.new_failures,"new failing","bad"],[k.flaky,"flaky","warn"],[k.not_judged,"couldn't be judged","warn"],[k.known_failures,"failing before too","neutral"]]
+    .filter(([n,w])=>n||w==="unchanged"||w==="regressed").map(([n,w,c])=>`<span class="chip ${c}">${n.toLocaleString()} ${esc(w)}</span>`).join(" ");
+  const tr=id=>id?` <a class="link" href="#trace/${encodeURIComponent(id)}">trace</a>`:"";
+  const entry=(e,i)=>"field" in e?`<li><b class="mono">${esc(e.name)}</b> ${esc(e.change)} ${e.severity?`<span class="chip ${SEV[e.severity]}">${esc(e.severity)}</span>`:""}</li>`
+    :`<li><b class="mono">${esc(e.name)}</b> ${e.severity?`<span class="chip ${SEV[e.severity]}">${esc(e.severity)}</span>`:""}
+      ${e.flow_change?`<div class="mono ref">Expected: ${esc((e.expected||[]).join(" → ")||"(no calls)")}${tr(e.trace_before)}</div>
+        <div class="mono">Actual:&nbsp;&nbsp; ${esc((e.actual||[]).join(" → ")||"(no calls)")}${e.varies?` <span class="ref">(varies across attempts)</span>`:""}${tr(e.trace_now)}</div>
+        <div class="ref">${esc(e.flow_change.text)}</div>`:tr(e.trace_now)}
+      ${(e.reasons||[]).slice(0,3).map(r=>`<div>${esc(r)}</div>`).join("")}</li>`;
+  const section=(title,items)=>items.length?`<div><h3>${esc(title)}</h3><ol class="stack">${items.map(entry).join("")}</ol></div>`:"";
+  box.innerHTML=`<div class="panel stack"><div class="panel-head"><div><h2>Behavior diff</h2><p class="sub">Baseline <b>${esc(d.baseline.label)}</b> · current <b>${esc(d.current.label)}</b> · ${d.scenarios.toLocaleString()} scenarios</p></div>
+    <div class="row"><label>Baseline ${pick("diff-base",base)}</label> <label>Current ${pick("diff-cur",cur)}</label></div></div>
+    <div>${counts}</div>
+    ${section("Regressions",d.regressions)}${section("New failing",d.new_failures)}${section("Changed, still passing",d.changed)}
+    ${d.flaky.length?`<div><h3>Flaky</h3><ul>${d.flaky.map(x=>`<li><b class="mono">${esc(x.name)}</b> ${esc(x.detail)}, the way it did before</li>`).join("")}</ul></div>`:""}
+    ${d.not_judged.length?`<div><h3>Couldn't be judged</h3><ul>${d.not_judged.slice(0,20).map(x=>`<li><b class="mono">${esc(x.name)}</b> ${esc(x.field||"")}: ${esc(x.reason)}</li>`).join("")}</ul></div>`:""}
+    ${d.improved.length?`<div><h3>Improved</h3><p>${d.improved.map(x=>`<span class="mono">${esc(x)}</span>`).join(", ")}</p></div>`:""}
+    ${!d.regressions.length&&!d.new_failures.length&&!d.changed.length?`<p class="note">Nothing regressed, and every scenario took the path it took before.</p>`:""}</div>`;
+  $("#diff-base").onchange=e=>{store.set("assay-diff-base",e.target.value);renderDiff()};
+  $("#diff-cur").onchange=e=>{store.set("assay-diff-cur",e.target.value);renderDiff()};
+}
 async function renderFailures(){
   const box=$("#tab-failures");
   const runs=await api(`/v1/evals/runs?${q({source:src()})}`).catch(()=>[]);
@@ -1599,7 +1641,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","workflow","measures","cost","errors","failures","agents","learn","prompts","trace","alerts","gates","connect"];
+const TABS=["overview","workflow","measures","cost","errors","failures","diff","agents","learn","prompts","trace","alerts","gates","connect"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -1611,7 +1653,7 @@ async function render(){
   if(t==="workflow")S.wfStep=hp[1]?decodeURIComponent(hp[1]):null;
   document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
-  if(!S.overview&&!["gates","connect","failures","agents","learn","trace"].includes(t))return;
+  if(!S.overview&&!["gates","connect","failures","diff","agents","learn","trace"].includes(t))return;
   try{
     if(t==="overview"){renderOverview();overviewFlow()}
     if(t==="workflow")await renderWorkflow();
@@ -1619,6 +1661,7 @@ async function render(){
     if(t==="cost")await renderCost();
     if(t==="errors")await renderErrors();
     if(t==="failures")await renderFailures();
+    if(t==="diff")await renderDiff();
     if(t==="agents")await renderAgents();
     if(t==="learn")await renderLearn();
     if(t==="prompts")await renderPrompts();

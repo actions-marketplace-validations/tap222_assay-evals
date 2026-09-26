@@ -120,3 +120,55 @@ def test_how_a_flow_changed():
     ch = diff.flow_change(("search", "refund"), ("search", "escalate"))
     assert (ch["added"], ch["removed"], ch["reordered"]) == (["escalate"], ["refund"], False)
 
+
+# ---------- on the server ----------
+
+@pytest.fixture
+def server(tmp_path):
+    from fastapi.testclient import TestClient
+    from assay.api import create_app
+    from assay.config import Settings
+    client = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path / 'd.db'}")))
+    client.post("/v1/contracts", json={"source": "events:t", "kind": "requires_approval", "step": "refund",
+                                       "severity": "critical"})
+    return client
+
+
+def _version(client, run, version, new):
+    n = iter(range(10 ** 6))
+    ts = f"2026-09-25T1{int(new)}:00:00Z"  # the new version ran later
+    ev = lambda rid, **k: {"v": 1, "id": f"{run}-{next(n)}", "ts": ts, "run_id": rid, **k}
+    events = [{"v": 1, "id": f"{run}-x", "ts": "2026-09-25T10:00:00Z", "type": "expect", "case": "support_agent",
+               "calls": [{"tool": "search_order"}]}]
+    for case, steps in (
+            ("refund_flow", [("tool", "refund"), ("approval", "refund")] if new else
+             [("approval", "refund"), ("tool", "refund")]),
+            ("support_agent", [("tool", "search_order")] + ([("tool", "cancel_order")] if new else [])),
+            ("billing", [("tool", "lookup_customer")])):
+        rid = f"{run}.{case}"
+        events.append(ev(rid, type="run.start", test={"run": run, "case": case, "attempt": 0},
+                         version={"version": version}))
+        for i, (kind, name) in enumerate(steps):
+            events.append(ev(rid, type="step", seq=i, kind=kind, name=name,
+                             **({"decision": "approved"} if kind == "approval" else {"args": {}})))
+        events += [ev(rid, type="step", seq=len(steps), kind="answer", text="Done."), ev(rid, type="run.end")]
+    r = client.post("/v1/ingest", json=events, headers={"X-Tenant": "t"})
+    assert r.status_code == 200, r.text
+
+
+def test_the_diff_on_the_server(server):
+    _version(server, "nightly-1", "v1.8.2", new=False)
+    _version(server, "nightly-2", "v1.9.0", new=True)
+    d = server.get("/v1/evals/runs/v1.9.0/diff", params={"source": "events:t", "baseline": "v1.8.2"}).json()
+    assert d["baseline"]["label"] == "v1.8.2 (run nightly-1)" and d["current"]["label"] == "v1.9.0 (run nightly-2)"
+    assert (d["scenarios"], d["counts"]["regressed"], d["counts"]["unchanged"]) == (3, 2, 1)
+    refund, support = d["regressions"]
+    assert refund["name"] == "refund_flow" and refund["flow_change"]["approval_moved"] and refund["severity"] == "HIGH"
+    assert support["actual"] == ["search_order", "cancel_order"] and support["flow_change"]["added"] == ["cancel_order"]
+    # The run before is the default baseline; markdown for a PR, and a version nobody recorded is a 404.
+    assert server.get("/v1/evals/runs/nightly-2/diff", params={"source": "events:t"}).json()["baseline"]["run_id"] == \
+        "nightly-1"
+    md = server.get("/v1/evals/runs/nightly-2/diff", params={"source": "events:t", "format": "markdown"}).text
+    assert "1. `refund_flow` · **HIGH**" in md
+    assert server.get("/v1/evals/runs/v9/diff", params={"source": "events:t"}).status_code == 404
+    assert server.get("/v1/evals/runs/nightly-1/diff", params={"source": "events:t"}).status_code == 404  # the first

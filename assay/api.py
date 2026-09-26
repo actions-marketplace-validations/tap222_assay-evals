@@ -852,6 +852,32 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, f"No results for evaluation run '{run_id}' in {source}.")
         return out["stability"]
 
+    @app.get("/v1/evals/runs/{run_id}/diff", tags=["results"],
+             summary="What behavior changed since the baseline: regressions with the flow before and after, "
+                     "severity, what changed but still passes, flaky and improved cases")
+    def eval_diff(run_id: str, source: str, baseline: Optional[str] = None, tolerance: float = 0.01,
+                  format: str = "json", p: Principal = Depends(require("read"))):
+        from assay import diff
+        if format not in ("json", "markdown", "text"):
+            raise HTTPException(422, "format is json, markdown or text.")
+        src, tenant = resolve(p, source), _tenant(source)
+        runs = failures.eval_runs(engine, tenant)
+        current = diff.resolve(runs, run_id)
+        if current is None:
+            raise HTTPException(404, f"No evaluation run or version '{run_id}' in {source}.")
+        base = diff.resolve(runs, baseline) if baseline else failures._baseline(runs, current, None)
+        if base is None:
+            raise HTTPException(404, f"No run or version '{baseline}' in {source}." if baseline else
+                                     f"Nothing to compare '{run_id}' with: it's the first run in {source}.")
+        d = diff.compute(engine, tenant, current, base, {"tolerance": tolerance,
+                                                          "behavior": {"fail": True, "ratios": {}}}, src)
+        if "error" in d:
+            raise HTTPException(404, d["error"])
+        if format == "json":
+            return d
+        return Response({"markdown": diff.markdown, "text": diff.text}[format](d),
+                        media_type="text/markdown" if format == "markdown" else "text/plain")
+
     @app.get("/v1/evals/runs/{run_id}/verdicts", tags=["results"],
              summary="Every check's verdict: PASS, FAIL, FLAKY, INCONCLUSIVE, EVALUATOR_ERROR, INFRA_ERROR, MISSING")
     def eval_verdicts(run_id: str, source: str, verdict: Optional[str] = None, baseline: Optional[str] = None,

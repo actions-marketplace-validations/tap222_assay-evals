@@ -81,7 +81,9 @@ def flows(engine, tenant: str, run_id: str) -> Dict[str, dict]:
         seen = Counter(flow(trajs[d]) for d in ds if d in trajs)
         if seen:
             top, n = seen.most_common(1)[0]
-            out[case] = {"flow": top, "distinct": len(seen), "attempts": sum(seen.values()), "top_count": n}
+            trace = min(d for d in ds if d in trajs and flow(trajs[d]) == top)  # one run that took it
+            out[case] = {"flow": top, "distinct": len(seen), "attempts": sum(seen.values()), "top_count": n,
+                         "trace": trace}
     return out
 
 
@@ -176,6 +178,8 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
                 "actual": list(now[case]["flow"]) if case in now else None,
                 "flow_change": ch and {**ch, "text": _describe(ch)},
                 "varies": now[case]["distinct"] > 1 if case in now else False,
+                "trace_before": before[case]["trace"] if case in before else None,
+                "trace_now": now[case]["trace"] if case in now else None,
                 "reasons": reasons, "checks": fields,
                 "severity": _severity(fields, ch, behavior_only=not fields and case in worse)}
 

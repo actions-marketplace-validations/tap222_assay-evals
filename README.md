@@ -237,6 +237,11 @@ The exit code is 1 when anything regressed. `assay test` and `pytest --assay` sa
 case took another path, and the PR comment shows the flow before and after under each
 regression.
 
+On a server, the same diff is `GET /v1/evals/runs/{run}/diff?source=…&baseline=…`: the run and
+the baseline are run ids or versions, the baseline defaults to the run before, and
+`format=markdown` or `format=text` returns what the command prints. The dashboard's **Behavior
+diff** page shows it, with two run pickers and a link to each flow's trace.
+
 To see the recorded runs in the dashboard:
 `ASSAY_STORE_URL=sqlite:///.assay/assay.db assay serve`, then open source `events:local`.
 
