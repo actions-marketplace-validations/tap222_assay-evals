@@ -155,8 +155,9 @@ class SQLSource:
 
     def __init__(self, url: str, downstream_url: Optional[str] = None,
                  downstream_sql: Optional[str] = None, engine: Optional[Engine] = None,
-                 mapping: Optional[Dict] = None):
-        self.engine = engine or create_engine(url, pool_pre_ping=True)
+                 mapping: Optional[Dict] = None, password_command: Optional[str] = None):
+        from assay import credentials  # a login instead of a stored password
+        self.engine = engine or credentials.engine(url, password_command)
         self.downstream_url = downstream_url
         self.downstream_sql = downstream_sql
         self.mapping = mapping or load_mapping()

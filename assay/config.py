@@ -13,6 +13,7 @@ def _list(v: Optional[str]) -> List[str]:
 class Settings:
     store_url: str = "sqlite:///./assay.db"
     source_url: Optional[str] = None  # the pipeline database, read-only
+    source_password_command: Optional[str] = None  # a CLI that prints a short-lived password (assay/credentials.py)
     downstream_url: Optional[str] = None
     downstream_hash_sql: Optional[str] = None
     # Platform admin key from the environment: every tenant, every scope. Use it
@@ -54,6 +55,7 @@ class Settings:
         return cls(
             store_url=e("ASSAY_STORE_URL", cls.store_url),
             source_url=e("ASSAY_SOURCE_URL"),
+            source_password_command=e("ASSAY_SOURCE_PASSWORD_COMMAND"),
             downstream_url=e("ASSAY_DOWNSTREAM_URL"),
             downstream_hash_sql=e("ASSAY_DOWNSTREAM_HASH_SQL"),
             admin_key=e("ASSAY_ADMIN_KEY") or e("ASSAY_API_KEY"),

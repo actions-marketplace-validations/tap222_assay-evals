@@ -23,7 +23,8 @@ def resolve_source(name: str, engine: Engine, settings: Settings):
     if name == "sql":
         if not settings.source_url:
             raise ValueError("ASSAY_SOURCE_URL is not set, so the sql source is unavailable.")
-        return SQLSource(settings.source_url, settings.downstream_url, settings.downstream_hash_sql)
+        return SQLSource(settings.source_url, settings.downstream_url, settings.downstream_hash_sql,
+                         password_command=settings.source_password_command)
     if name.startswith("events:"):
         return EventsSource(engine, name.split(":", 1)[1])
     raise ValueError(f"Unknown source '{name}'. Use 'sql' or 'events:<tenant>'.")

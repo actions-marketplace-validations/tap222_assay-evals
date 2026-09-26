@@ -166,6 +166,42 @@ $ assay connect verify          # the pipeline Assay found, and the steps it has
 
 Then open the Workflow page: your pipeline, and where Assay's checks attach to it.
 
+### No database password? Use the login you have
+
+Most companies give you a login, not a database password: `aws sso login`, `az login`,
+`gcloud auth login`, or Okta in front of one of them. The database accepts a short-lived token
+that the cloud's CLI makes. Assay runs that CLI when it opens a connection, keeps the token in
+memory only, and runs it again before the token expires. Nothing is stored, and the token is
+never printed.
+
+```bash
+# the preset is suggested when the host and your CLIs make it clear
+assay connect db postgresql+psycopg://you@prod.abc.eu-west-1.rds.amazonaws.com:5432/pipeline
+assay connect db … --preset okta --profile data-ro        # or name it
+assay connect db … --password-command "your-cli print-db-token"   # any command that prints one
+```
+
+| Preset | For | The command it runs |
+|---|---|---|
+| `aws-rds` | AWS RDS or Aurora with IAM auth | `aws rds generate-db-auth-token` (region from the host; `--profile`) |
+| `okta` | Okta in front of AWS | the same, through `saml2aws exec` or `aws-okta exec`, or the AWS profile `gimme-aws-creds` or `aws sso login` gives you |
+| `azure` | Azure Database with Microsoft Entra auth (Okta federated into Entra too) | `az account get-access-token --resource-type oss-rdbms` |
+| `gcloud` | Cloud SQL with IAM auth | `gcloud sql generate-login-token` (or the Cloud SQL Auth Proxy with `--auto-iam-authn`, and no password at all) |
+| `snowflake-sso` | Snowflake behind Okta or any SSO | none: `authenticator=externalbrowser` opens the browser to sign you in |
+
+Token logins need TLS, so `sslmode=require` is added to a Postgres URL. The database user must
+be set up for the login (for RDS, `GRANT rds_iam TO you`), and the preset reminds you what it
+needs. For the server, set the same command once:
+
+```bash
+export ASSAY_SOURCE_URL=postgresql+psycopg://you@prod…:5432/pipeline?sslmode=require
+export ASSAY_SOURCE_PASSWORD_COMMAND='aws rds generate-db-auth-token --hostname prod… --port 5432 --username you'
+assay serve --source sql --every 60
+```
+
+If the login has expired, Assay says so ("Are you logged in (aws sso login, az login, gcloud
+auth login, or your Okta tool)?") rather than failing with a database error.
+
 There are two ways to connect by hand. Both feed the same measures.
 
 ### 1. Point Assay at your database (read-only)

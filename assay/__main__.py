@@ -38,6 +38,12 @@ def main(argv=None) -> int:
     cn.add_argument("--apply", action="store_true", help="code: write the change (it's shown first either way)")
     cn.add_argument("--out", help="db: where to write the mapping (default: mappings/<database>.json)")
     cn.add_argument("--force", action="store_true", help="db: overwrite the mapping file")
+    cn.add_argument("--password-command", metavar="CMD",
+                    help="db: a command that prints a short-lived password (your cloud CLI's login), "
+                         "run when connecting; nothing is stored")
+    cn.add_argument("--preset", choices=["aws-rds", "azure", "gcloud", "okta", "snowflake-sso"],
+                    help="db: build the password command for your cloud's login (suggested when one fits)")
+    cn.add_argument("--profile", help="db: the AWS profile, for aws-rds and okta")
 
     k = sub.add_parser("keys", help="Create, list and revoke API keys")
     ks = k.add_subparsers(dest="keys_cmd", required=True)
@@ -246,7 +252,7 @@ def main(argv=None) -> int:
         from assay import attach
         root = Path.cwd()
         if args.what == "db":
-            return attach.db(root, args.target, args.out, args.force)
+            return attach.db(root, args.target, args.out, args.force, args.password_command, args.preset, args.profile)
         if args.what == "code":
             return attach.code(Path(args.target) if args.target else root, args.apply)
         if args.what == "verify":
@@ -258,7 +264,12 @@ def main(argv=None) -> int:
             print("Set ASSAY_SOURCE_URL first.", file=sys.stderr)
             return 2
         from assay.sources.sql import SQLSource
-        report = SQLSource(settings.source_url).check()
+        from assay.credentials import CredentialError
+        try:
+            report = SQLSource(settings.source_url, password_command=settings.source_password_command).check()
+        except CredentialError as exc:
+            print(exc, file=sys.stderr)
+            return 2
         bad = 0
         for table, fields in report.items():
             for field, err in fields.items():

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import shlex
 import json
 import os
 import re
@@ -438,7 +439,10 @@ def overview(root: Path) -> int:
         print(f"  {k:<{w}}  {v}")
     ways = []
     if url:
-        ways.append(("Read your database. No code changes.", "assay connect db"))
+        from assay import credentials
+        login = None if re.search(r"//[^:/@]+:[^@]+@", url) else credentials.suggest(url)
+        ways.append((f"Read your database with your {login} login: no password to store, no code changes." if login
+                     else "Read your database. No code changes.", "assay connect db"))
     if f.otel or otel_env:
         ways.append(("Send your traces: point an OpenTelemetry collector's otlphttp exporter (encoding: json) at "
                      f"{(server or 'https://<assay>').rstrip('/')}/v1/otlp.", None))
@@ -457,20 +461,51 @@ def overview(root: Path) -> int:
     return 0
 
 
-def db(root: Path, url: Optional[str], out: Optional[str], force: bool = False) -> int:
-    """`assay connect db`: read the schema, write the mapping, test it against the database."""
+def db(root: Path, url: Optional[str], out: Optional[str], force: bool = False,
+       password_command: Optional[str] = None, preset: Optional[str] = None, profile: Optional[str] = None) -> int:
+    """`assay connect db`: read the schema, write the mapping, test it against the database. With a
+    login instead of a password: --password-command, or --preset for the cloud's (assay/credentials.py)."""
     import sys
-    from sqlalchemy import create_engine
+    from assay import credentials
     url = _db_url(url)
     if not url:
         print("Give the database: assay connect db postgresql+psycopg://readonly:…@host/db "
               "(or set ASSAY_SOURCE_URL). Use a read-only login.", file=sys.stderr)
         return 2
+    password_command = password_command or os.environ.get(credentials.ENV)
+    notes: List[str] = []
+    has_password = bool(re.search(r"//[^:/@]+:[^@]+@", url))
+    if not password_command and not preset and not has_password:
+        preset = credentials.suggest(url)
+        if preset:
+            print(_p(f"No password in the URL: using your {preset} login (--preset {preset}).", "dim"))
+    if preset:
+        try:
+            got = credentials.preset(preset, url, profile)
+        except credentials.CredentialError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        password_command, url, notes = got["command"], got["url"], got["notes"]
+    if password_command:
+        print(_p(f"Getting a short-lived password with: {password_command}", "dim"))
     try:
-        engine = create_engine(url)
+        engine = credentials.engine(url, password_command)
         mapping, report = map_database(engine)
+    except credentials.CredentialError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    except ModuleNotFoundError as exc:  # the database's driver isn't installed
+        drivers = {"psycopg": "pip install 'assay-server[postgres]'", "psycopg2": "pip install psycopg2-binary",
+                   "pymysql": "pip install pymysql", "snowflake": "pip install snowflake-sqlalchemy",
+                   "pyodbc": "pip install pyodbc"}
+        name = (exc.name or "").split(".")[0]
+        print(f"The driver for this database isn't installed ({name}): {drivers.get(name, 'pip install ' + name)}",
+              file=sys.stderr)
+        return 2
     except Exception as exc:
         print(f"Couldn't read the database's schema: {str(getattr(exc, 'orig', exc)).splitlines()[0]}", file=sys.stderr)
+        for n in notes:
+            print(f"  note: {n}", file=sys.stderr)
         return 2
     name = re.sub(r"[^\w-]", "_", Path(url.rsplit("/", 1)[-1].split("?")[0] or "pipeline").stem) or "pipeline"
     path = Path(out) if out else root / "mappings" / f"{name}.json"
@@ -511,6 +546,11 @@ def db(root: Path, url: Optional[str], out: Optional[str], force: bool = False) 
     print(f"\nWrote {shown}. Every field it maps works against the database." if not broken else f"\nWrote {shown}.")
     print("\n" + _p("Next:", "bold"))
     print(f"  {_p(f'$ export ASSAY_SOURCE_URL={safe_url}', 'green')}   (a read-only login)")
+    if password_command:
+        print(f"  {_p(f'$ export ASSAY_SOURCE_PASSWORD_COMMAND={shlex.quote(password_command)}', 'green')}"
+              "   (run for each connection; nothing is stored)")
+    for n in notes:
+        print(_p(f"  note: {n}", "dim"))
     print(f"  {_p(f'$ export ASSAY_SOURCE_MAPPING={shown}', 'green')}")
     print(f"  {_p('$ assay serve --source sql --every 60', 'green')}   (then open the Workflow page)")
     return 0
