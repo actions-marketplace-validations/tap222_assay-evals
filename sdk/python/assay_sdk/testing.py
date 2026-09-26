@@ -292,8 +292,11 @@ class Expectations:
     def failures(self) -> List[str]:
         """Every expectation that doesn't hold, as "name: why"."""
         out = []
+        self.took: dict = {}
         for name, rule in self.rules:
+            t0 = time.perf_counter()
             why = rule()
+            self.took[name] = (time.perf_counter() - t0) * 1000  # ms: could it run in the request path?
             if why:
                 out.append(f"{name}: {why}")
         return out
@@ -308,7 +311,7 @@ class Expectations:
                 bad = {f.split(": ", 1)[0]: f.split(": ", 1)[1] for f in failed}
                 for name, _ in self.rules:
                     self.run.check(f"expect.{name}", "fail" if name in bad else "pass", evaluator="assay.expect@1",
-                                   reason=bad.get(name))
+                                   reason=bad.get(name), duration_ms=getattr(self, "took", {}).get(name))
         if failed:
             raise AssertionError("Expected of the run:\n  " + "\n  ".join(failed))
 

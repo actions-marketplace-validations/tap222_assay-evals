@@ -615,6 +615,8 @@ def _brief(v, n=300) -> Optional[str]:
 
 def checks_for(traj: dict, ref: Optional[dict], rules: List[dict]) -> List[dict]:
     """The five checks as evaluation results (only those the reference and contracts make possible)."""
+    import time
+    t0 = time.perf_counter()
     ev = evaluate_one(traj, ref, rules)
     out = []
 
@@ -674,7 +676,8 @@ def checks_for(traj: dict, ref: Optional[dict], rules: List[dict]) -> List[dict]
                     "expected": _brief(" → ".join(call_text(x["tool"], x["args"]) for x in pa["planned"])),
                     "actual": _brief(" → ".join(call_text(c["name"], c.get("args")) for c in tool_calls(traj))),
                     "reason": None if pa["passed"] else plan_reason(pa)[:2000]})
-    return out
+    each = (time.perf_counter() - t0) * 1000 / max(1, len(out))  # deterministic, and cheap: roughly shared
+    return [{**c, "duration_ms": round(each, 3)} for c in out]
 
 
 def run_trajectories(engine: Engine, tenant: str, run_id: str) -> List[dict]:

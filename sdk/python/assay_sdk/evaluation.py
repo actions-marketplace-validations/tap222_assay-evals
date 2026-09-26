@@ -196,7 +196,15 @@ def verdict_of(out: Any, schema: Optional[dict], threshold: Optional[float],
 
 # ---------- evaluate ----------
 
-def _record(result: Result, run, field: Optional[str], evaluator: Optional[str], inputs: Optional[dict]) -> None:
+def _spent(spent: dict, out: Any) -> None:
+    """Add what a provider's answer cost, when it says."""
+    cost = getattr(out, "cost", None)
+    if isinstance(cost, (int, float)):
+        spent["cost_usd"] = (spent["cost_usd"] or 0) + cost
+
+
+def _record(result: Result, run, field: Optional[str], evaluator: Optional[str], inputs: Optional[dict],
+            spent: Optional[dict] = None) -> None:
     if run is None:
         return
     status = {PASS: "pass", FAIL: "fail"}.get(result.status, "error")
@@ -206,7 +214,8 @@ def _record(result: Result, run, field: Optional[str], evaluator: Optional[str],
               reason=result.reason if result.valid else result.error, evaluator=evaluator, inputs=inputs,
               error_kind=None if result.valid else result.error_kind, tries=result.attempts, raw_output=raw,
               **({"category": result.category} if result.category else {}),
-              **{k: getattr(result, k) for k in ("judge_model", "judge_prompt") if getattr(result, k)})
+              **{k: getattr(result, k) for k in ("judge_model", "judge_prompt") if getattr(result, k)},
+              **{k: v for k, v in (spent or {}).items() if v is not None})
 
 
 def _step(result: Result, out: Any, schema, threshold, score_range) -> bool:
@@ -275,17 +284,22 @@ def evaluate(judge: Callable, *args, schema: Optional[dict] = None, threshold: O
     _collisions(judge, {"schema": schema, "run": run, "field": field, "evaluator": evaluator, "inputs": inputs})
     kwargs = {**kwargs, **(judge_kwargs or {})}
     result = Result(status=INVALID, judge_model=judge_model or model_of(judge), judge_prompt=judge_prompt)
+    spent = {"duration_ms": 0.0, "cost_usd": None}  # the calls, not the waits between them
     for i in range(retries + 1):
         result.attempts = i + 1
+        t0 = time.perf_counter()
         try:
-            done = _step(result, judge(*args, **kwargs), schema, threshold, score_range)
+            out = judge(*args, **kwargs)
+            spent["duration_ms"] += (time.perf_counter() - t0) * 1000
+            _spent(spent, out)
+            done = _step(result, out, schema, threshold, score_range)
         except Exception as exc:
             done = _failed(result, exc)
         if done:
             break
         if i < retries and backoff:
             time.sleep(backoff * 2 ** i)
-    _record(result, run, field, evaluator, inputs)
+    _record(result, run, field, evaluator, inputs, spent)
     return result
 
 
@@ -299,15 +313,20 @@ async def aevaluate(judge: Callable, *args, schema: Optional[dict] = None, thres
     _collisions(judge, {"schema": schema, "run": run, "field": field, "evaluator": evaluator, "inputs": inputs})
     kwargs = {**kwargs, **(judge_kwargs or {})}
     result = Result(status=INVALID, judge_model=judge_model or model_of(judge), judge_prompt=judge_prompt)
+    spent = {"duration_ms": 0.0, "cost_usd": None}
     for i in range(retries + 1):
         result.attempts = i + 1
+        t0 = time.perf_counter()
         try:
-            done = _step(result, await judge(*args, **kwargs), schema, threshold, score_range)
+            out = await judge(*args, **kwargs)
+            spent["duration_ms"] += (time.perf_counter() - t0) * 1000
+            _spent(spent, out)
+            done = _step(result, out, schema, threshold, score_range)
         except Exception as exc:
             done = _failed(result, exc)
         if done:
             break
         if i < retries and backoff:
             await asyncio.sleep(backoff * 2 ** i)
-    _record(result, run, field, evaluator, inputs)
+    _record(result, run, field, evaluator, inputs, spent)
     return result

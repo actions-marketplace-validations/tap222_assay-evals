@@ -222,6 +222,8 @@ eval_results = Table(
     Column("category", String(64)),  # the kind of failure, as the evaluator named it (assay/acks.py)
     Column("judge_model", String(128)),  # the model that judged: another one isn't like for like
     Column("judge_prompt", String(192)),  # the judge's prompt or rubric, id@version
+    Column("duration_ms", Float),  # how long the evaluator took (assay/guardrails.py)
+    Column("cost_usd", Float),  # what the evaluator cost to run
 )
 
 # --- Agents: one trajectory per run of an agent on a task, its steps, and what a case expects ---

@@ -164,6 +164,11 @@ def main(argv=None) -> int:
     ea = evs.add_parser("audit", help="What each evaluator costs to keep: code checks and judges apart")
     ea.add_argument("--days", type=float, default=30)
     ea.add_argument("--format", choices=["text", "json"], default="text")
+    eg = evs.add_parser("guardrails", help="Which evaluators could run in the request path: latency, cost, and false "
+                                            "positives and negatives against people's labels")
+    eg.add_argument("--days", type=float, default=30)
+    eg.add_argument("--format", choices=["text", "json"], default="text")
+    eg.add_argument("--export", help="Write the candidates to this file, for your guardrail layer")
 
     rd = sub.add_parser("redact", help="Check redaction: personal data that got through, and whether edited traces "
                                        "still behave like the real ones")
@@ -266,6 +271,9 @@ def main(argv=None) -> int:
         return triage.cli(Path.cwd(), args)
     if args.cmd == "evals":
         from pathlib import Path
+        if args.evals_cmd == "guardrails":
+            from assay import guardrails
+            return guardrails.cli(Path.cwd(), args.days, args.format, args.export)
         from assay import upkeep
         return upkeep.cli(Path.cwd(), args.days, args.format)
     if args.cmd == "redact":

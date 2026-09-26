@@ -2486,6 +2486,7 @@ def golden_add(root: Path, case: str, score: float, by: Optional[str], tags: Lis
         mine["tags"] = sorted(set(mine["tags"]) | set(tags))
         calibrate.save_golden(path, items)
         return 0
+    output_from_run = output is None
     if output is None:
         engine, state = _open(root)
         run_id = run_id or (state or {}).get("last")
@@ -2507,6 +2508,8 @@ def golden_add(root: Path, case: str, score: float, by: Optional[str], tags: Lis
     item = {"id": case, "input": input_, "output": output,
             "labels": [{"by": by, "score": score, **({"critique": critique} if critique else {})}],
             "tags": sorted(set(tags))}
+    if output_from_run:  # which run's output was labeled: what each evaluator said of it can be matched
+        item["run"] = run_id
     if note:
         item["note"] = note
     calibrate.save_golden(path, items + [item])

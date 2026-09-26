@@ -298,10 +298,13 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
 
     tries, text, served = 0, None, None
 
+    took = {"ms": 0.0, "cost": None}
+
     def result(status, reason, score=None, kind=None, category=None):
         return {"status": status, "score": score, "reason": reason, "inputs": inputs, "error_kind": kind,
                 "tries": tries, "raw_output": text[:16384] if text else None, "category": category,
-                "judge_model": served or model, "judge_prompt": PROMPT}
+                "judge_model": served or model, "judge_prompt": PROMPT, "duration_ms": round(took["ms"], 1) or None,
+                "cost_usd": took["cost"]}
 
     def all_(status, reason, kind=None):
         return {f: result(status, reason, kind=kind) for f in fields}
@@ -320,8 +323,13 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
         if tries > 1:
             from assay_sdk.runtime import note_retry
             note_retry()  # counted in the run's summary
+        import time as _time
+        t0 = _time.perf_counter()
         try:
             resp = asker.ask(trace, system=RUBRIC, schema=SCHEMA, check=False, **extra)
+            took["ms"] += (_time.perf_counter() - t0) * 1000
+            if isinstance(getattr(resp, "cost", None), (int, float)):
+                took["cost"] = (took["cost"] or 0) + resp.cost
         except ImportError as exc:
             return all_("error", f"the judge needs the {provider} SDK: {exc}", "error")
         if resp.exception is not None:  # it raised: the SDK has already retried what's worth retrying
@@ -489,7 +497,8 @@ def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
                          "inputs": r["inputs"], "lineage": h["lineage"], "ts": _now(),
                          "error_kind": r.get("error_kind"), "tries": r.get("tries"), "raw_output": r.get("raw_output"),
                          "category": r.get("category"), "judge_model": r.get("judge_model"),
-                         "judge_prompt": r.get("judge_prompt")})
+                         "judge_prompt": r.get("judge_prompt"), "duration_ms": r.get("duration_ms"),
+                         "cost_usd": r.get("cost_usd")})
     ingest.upsert(engine, store.eval_results, rows, "result_id")
     return {"judged": len(work) - not_run, "results": len(rows), "errors": sum(1 for r in rows if r["status"] == "error"),
             "not_run": not_run, "summary": report.to_dict(), "report": str(report)}

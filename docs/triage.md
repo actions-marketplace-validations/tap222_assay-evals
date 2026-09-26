@@ -67,6 +67,8 @@ Evaluators in the last 30 days: 41 code checks, 2 judges.
   - tone: never calibrated against people (assay calibrate)
 ```
 
+For which of them could run in the request path as a guardrail, see [guardrail candidates](guardrails.md).
+
 Code checks and judges are counted apart. For each judge: labels against the 100 or so it needs,
 days since its calibration, its trust label ([calibration](calibration.md)), and whether most of its
 failures are about something a rule could check.

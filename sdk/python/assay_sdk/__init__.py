@@ -546,7 +546,8 @@ def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[
           version: Optional[Dict[str, str]] = None, inputs: Optional[Dict[str, Any]] = None,
           error_kind: Optional[str] = None, tries: Optional[int] = None, raw_output: Optional[str] = None,
           category: Optional[str] = None, judge_model: Optional[str] = None,
-          judge_prompt: Optional[str] = None) -> None:
+          judge_prompt: Optional[str] = None, duration_ms: Optional[float] = None,
+          cost_usd: Optional[float] = None) -> None:
     """One result from a test run: status pass, fail, or error (the check couldn't run). Send passes too.
     test_run None: the run `assay test` is doing (else "local").
     inputs: what the evaluator saw, e.g. {"query": ..., "output": ..., "context": ...}, so Assay can
@@ -556,7 +557,9 @@ def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[
     category, with status fail: the kind of failure in your evaluator's words (grounding,
     policy_refusal, ...). An acknowledged failure wakes when its category changes, at any score.
     judge_model, judge_prompt ("rubric@3"): which judge it was. When either differs from the
-    baseline's, the check isn't compared with it as if nothing changed but the AI."""
+    baseline's, the check isn't compared with it as if nothing changed but the AI. duration_ms and
+    cost_usd: what the evaluator took to run (`assay evals guardrails` asks whether it could run in the
+    request path)."""
     s = lambda v: None if v is None else v if isinstance(v, str) else json.dumps(_json_safe(v))
     t = _test({"case": case, **({"run": test_run} if test_run else {}),
                **({"attempt": attempt} if attempt is not None else {})})
@@ -567,7 +570,9 @@ def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[
                "raw_output": None if raw_output is None else str(raw_output)[:16384],
                "category": _category(category),
                "judge_model": None if judge_model is None else str(judge_model)[:128],
-               "judge_prompt": None if judge_prompt is None else str(judge_prompt)[:192]})
+               "judge_prompt": None if judge_prompt is None else str(judge_prompt)[:192],
+               "duration_ms": None if duration_ms is None else round(float(duration_ms), 3),
+               "cost_usd": cost_usd})
 
 
 def _category(v: Any) -> Optional[str]:
