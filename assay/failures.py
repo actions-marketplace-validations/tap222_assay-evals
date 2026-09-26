@@ -757,7 +757,11 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
              "outputs": sorted({str(a.actual) for a in attempts})[:4],
              "shape": diff_shape(r.expected, r.actual), "features": features_of(r),
              # The same output passed on another attempt: the evaluator is inconsistent.
-             "disagreement": any(a.status == "pass" and a.actual == r.actual for a in attempts),
+             # The same output: the same value, or the same run. Two checks with no actual, from two
+             # different runs, aren't the same output.
+             "disagreement": any(a.status == "pass" and ((r.actual is not None and a.actual == r.actual)
+                                                         or (r.document_id and a.document_id == r.document_id))
+                                 for a in attempts),
              "audit": audited.get(r.result_id)}
         failures.append(f)
         if r.document_id and r.field and r.status == "fail":
