@@ -548,7 +548,8 @@ class EvalRuntime:
     async def arun(self, judge: Callable, samples: Iterable, *, schema: Optional[dict] = None,
                    threshold: Optional[float] = 0.5, score_range: Tuple[float, float] = (0.0, 1.0),
                    run=None, field: Optional[str] = None, evaluator: Optional[str] = None,
-                   judge_kwargs: Optional[Dict[str, Any]] = None) -> Report:
+                   judge_kwargs: Optional[Dict[str, Any]] = None, judge_model: Optional[str] = None,
+                   judge_prompt: Optional[str] = None) -> Report:
         from assay_sdk.llm import Judge
         is_judge = isinstance(judge, Judge)
         call = judge.ask if is_judge else judge
@@ -556,8 +557,11 @@ class EvalRuntime:
         if is_judge and schema is not None:
             extra.setdefault("schema", schema)  # the provider is asked for it, and the answer checked
 
+        from assay_sdk.evaluation import model_of
+        who = judge_model or model_of(judge)
+
         def begin():
-            return Result(status=INVALID)
+            return Result(status=INVALID, judge_model=who, judge_prompt=judge_prompt)
 
         def take(res: Result, out: Any) -> bool:
             return _step(res, out, schema, threshold, score_range)

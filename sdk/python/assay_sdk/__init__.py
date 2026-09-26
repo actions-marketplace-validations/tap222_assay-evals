@@ -491,7 +491,8 @@ def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[
           score: Optional[float] = None, reason: Optional[str] = None,
           version: Optional[Dict[str, str]] = None, inputs: Optional[Dict[str, Any]] = None,
           error_kind: Optional[str] = None, tries: Optional[int] = None, raw_output: Optional[str] = None,
-          category: Optional[str] = None) -> None:
+          category: Optional[str] = None, judge_model: Optional[str] = None,
+          judge_prompt: Optional[str] = None) -> None:
     """One result from a test run: status pass, fail, or error (the check couldn't run). Send passes too.
     test_run None: the run `assay test` is doing (else "local").
     inputs: what the evaluator saw, e.g. {"query": ..., "output": ..., "context": ...}, so Assay can
@@ -499,7 +500,9 @@ def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[
     error_kind, with status "error": why it couldn't be judged (invalid, timeout, rate_limited,
     unavailable, error). tries: how many times the evaluator was asked; raw_output: what it said.
     category, with status fail: the kind of failure in your evaluator's words (grounding,
-    policy_refusal, ...). An acknowledged failure wakes when its category changes, at any score."""
+    policy_refusal, ...). An acknowledged failure wakes when its category changes, at any score.
+    judge_model, judge_prompt ("rubric@3"): which judge it was. When either differs from the
+    baseline's, the check isn't compared with it as if nothing changed but the AI."""
     s = lambda v: None if v is None else v if isinstance(v, str) else json.dumps(_json_safe(v))
     t = _test({"case": case, **({"run": test_run} if test_run else {}),
                **({"attempt": attempt} if attempt is not None else {})})
@@ -508,7 +511,9 @@ def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[
                "evaluator": evaluator, "score": score, "reason": reason, "version": version,
                "inputs": _c().clean(inputs), "error_kind": error_kind, "tries": tries,
                "raw_output": None if raw_output is None else str(raw_output)[:16384],
-               "category": _category(category)})
+               "category": _category(category),
+               "judge_model": None if judge_model is None else str(judge_model)[:128],
+               "judge_prompt": None if judge_prompt is None else str(judge_prompt)[:192]})
 
 
 def _category(v: Any) -> Optional[str]:

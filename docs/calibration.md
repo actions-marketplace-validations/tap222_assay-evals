@@ -112,5 +112,10 @@ the judge's prompt or model changes:
 - run: assay calibrate
 ```
 
+When the judge's model or prompt changes, `assay test` doesn't compare the new judge's results with
+the old one's baseline as if only the AI had changed ([When the judge or the model
+changes](testing.md#when-the-judge-or-the-model-changes)). Calibrating the new judge is how to
+know whether to trust it.
+
 `assay calibrate --baseline none` starts over, `--baseline ID` compares with a given one, and
 `--format json` gives it all as data.

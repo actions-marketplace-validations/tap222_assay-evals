@@ -174,6 +174,8 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
         reasons = [local._tidy(f"{local._label(f)}: {r.splitlines()[0][:200]}") for f, r in checks]
         reasons += [x["text"] for x in worse.get(case, [])]
         reasons = sorted(dict.fromkeys(reasons), key=local._rank)
+        reasons = [f"{local._label(k[1])}: {local.routed(r)}" for k, r in (result.get("routing") or {}).items()
+                   if k[0] == case and local.routed(r)] + reasons  # the model it was routed to, first
         return {"case": case, "name": local._short(case),
                 "expected": list(before[case]["flow"]) if case in before else None,
                 "actual": list(now[case]["flow"]) if case in now else None,
@@ -185,8 +187,10 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
                 "severity": _severity(fields, ch, behavior_only=not fields and case in worse)}
 
     regressions = [entry(case) for case in b["regressed"]]
+    rejudged = {k[1] for k in result.get("judge_changed") or {}}
     for f in result["fields"]:  # your own fields whose accuracy dropped, e.g. extraction
-        if f["field"] in local.CHECK_NAMES or f["field"].startswith("expect.") or not f["base_total"]:
+        if f["field"] in local.CHECK_NAMES or f["field"].startswith("expect.") or not f["base_total"] \
+                or f["field"] in rejudged:  # a new judge's accuracy isn't comparable with the old one's
             continue
         was, is_ = f["base_passed"] / f["base_total"], f["passed"] / f["total"]
         if is_ < was:
@@ -202,7 +206,10 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
     flaky = []
     for case in b["flaky"]:  # the checks that varied, not the ones that always passed
         varied = [(f, x) for (k, f), x in result["attempts"].items() if k == case and not all(x)]
-        detail = "; ".join(f"{local._label(f)} passed {sum(x)} of {len(x)} attempts" for f, x in varied)
+        detail = "; ".join(f"{local._label(f)} passed {sum(x)} of {len(x)} attempts"
+                           + (f" ({local.routed(result['routing'][(case, f)])})"
+                              if local.routed((result.get("routing") or {}).get((case, f)) or {"now": {}}) else "")
+                           for f, x in varied)
         flaky.append({"case": case, "name": local._short(case), "detail": detail or "varied across attempts"})
     unchanged = len(b["passed"]) - len(improved & set(b["passed"])) - len(changed)
     return {"baseline": {"run_id": baseline, "label": label(runs.get(baseline), baseline)},
@@ -211,11 +218,14 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
             "counts": {"unchanged": unchanged, "improved": len(improved), "regressed": len(b["regressed"]),
                        "flaky": len(b["flaky"]), "changed": len(changed), "new_failures": len(b["new failure"]),
                        "not_judged": len(b["couldn't be judged"]), "known_failures": len(b["known failure"]),
-                       "acknowledged": len(b.get("acknowledged") or [])},
+                       "acknowledged": len(b.get("acknowledged") or []), "judge_changed": len(b.get("judge changed") or [])},
             "regressions": regressions, "new_failures": [entry(c) for c in b["new failure"]],
             "changed": changed, "flaky": flaky, "improved": [local._short(c) for c in sorted(improved)],
             "not_judged": [{"name": local._short(x["case_id"]), "field": x["field"], "reason": x["reason"]}
                            for x in result["not_judged"]],
+            "judge_changed": [{"name": local._short(p["case_id"]), "field": p["field"], "before": p["before"],
+                               "now": p["now"]} for p in c.get("judge_changed") or []],
+            "models": result.get("models") or {},
             "totals": [{**x, "most": [{**m, "name": local._short(m["case_id"])} for m in x["most"]]}
                        for x in result.get("behavior_suite") or []] if cfg["behavior"]["fail"] else [],
             "totals_info": [] if cfg["behavior"]["fail"] else result.get("behavior_suite") or []}
@@ -251,7 +261,8 @@ def text(d: dict) -> str:
                                  (k["regressed"], "✗", "regressed", "red"), (k["new_failures"], "✗", "new failing", "red"),
                                  (k["flaky"], "⚠", "flaky", "yellow"), (k["not_judged"], "?", "couldn't be judged", "yellow"),
                                  (k["known_failures"], "·", "failing before too", "dim"),
-                                 (k.get("acknowledged", 0), "·", "acknowledged, quiet until worse", "dim")):
+                                 (k.get("acknowledged", 0), "·", "acknowledged, quiet until worse", "dim"),
+                                 (k.get("judge_changed", 0), "?", "judged by a new judge, not compared", "yellow")):
         if n or word in ("unchanged", "regressed"):
             out.append(f"{paint(mark, color)} {n} {word}")
     for title, items in (("REGRESSIONS", d["regressions"]), ("NEW FAILING", d["new_failures"]),
@@ -269,6 +280,13 @@ def text(d: dict) -> str:
             out.append(f"- {x['text']}")
             if x.get("most"):
                 out.append(paint("  grew most: " + ", ".join(m.get("name") or m["case_id"] for m in x["most"]), "dim"))
+    if d.get("judge_changed"):
+        pairs = sorted({(x["before"], x["now"]) for x in d["judge_changed"]})
+        out += ["", paint("JUDGE CHANGED", "bold"), "",
+                f"{', '.join(f'{a} → {b}' for a, b in pairs)}: {len(d['judge_changed'])} failing check(s) not compared, "
+                f"since a drop could be the judge, not the AI. `assay calibrate` checks the new judge."]
+    if d.get("models"):
+        out += ["", paint("BY MODEL", "bold"), ""] + [f"- {m}: {ok}/{n} cases passing" for m, (ok, n) in d["models"].items()]
     if d["flaky"]:
         out += ["", paint("FLAKY", "bold"), ""] + [f"- {x['name']}: {x['detail']}, the way it did before"
                                                    for x in d["flaky"]]

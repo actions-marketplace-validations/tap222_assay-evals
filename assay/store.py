@@ -217,6 +217,8 @@ eval_results = Table(
     Column("tries", Integer),  # how many times the evaluator was asked for this verdict
     Column("raw_output", Text),  # what the evaluator returned, as it returned it
     Column("category", String(64)),  # the kind of failure, as the evaluator named it (assay/acks.py)
+    Column("judge_model", String(128)),  # the model that judged: another one isn't like for like
+    Column("judge_prompt", String(192)),  # the judge's prompt or rubric, id@version
 )
 
 # --- Agents: one trajectory per run of an agent on a task, its steps, and what a case expects ---

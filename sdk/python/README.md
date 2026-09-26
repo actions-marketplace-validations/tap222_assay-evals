@@ -179,7 +179,9 @@ The judge may return a bool, a number, a dict (`score`, `passed` or `pass`, `rea
 text, or an object with those attributes. `aevaluate()` is the same for an async judge. A
 `category` in the verdict (`{"score": 0.2, "category": "grounding"}`) names the kind of failure:
 it's `result.category`, it's recorded with the check, and an acknowledged failure wakes when it
-changes.
+changes. `judge_model=` and `judge_prompt="helpful@3"` say which judge it was (a `Judge`'s
+answer gives its model on its own): a check judged by another model or prompt than its
+baseline's isn't compared with it as a regression.
 
 ## Many samples at once: `EvalRuntime`
 

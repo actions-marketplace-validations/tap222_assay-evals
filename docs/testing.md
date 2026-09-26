@@ -89,6 +89,44 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
 - **Where things live:** everything goes in `.assay/` (recordings, the store, the baseline),
   which ignores itself in git. `assay test -- pytest -q tests/ai` overrides the command.
 
+## When the judge or the model changes
+
+A comparison with the baseline assumes only your AI changed. Two things break that.
+
+**A new judge.** Moving the judge to another model, or editing its rubric, changes the measure.
+A drop could then be the judge, not your app. Each result records which judge it was: its model
+(from an `assay_sdk.Judge` answer on its own, or `judge_model=` on `evaluate()` and
+`run.check()`) and its prompt (`judge_prompt="helpful@3"`). The built-in judge records its model
+and a fingerprint of its rubric. A failing check whose judge differs from its baseline's isn't
+reported as a regression:
+
+```
+? 3 failing checks judged by a different judge than their baseline: not compared, since a drop could be the judge, not the AI
+  claude-opus-5 · helpful@3 → claude-fable-5-1 · helpful@3: q1 Helpful, q7 Helpful, q9 Helpful
+  They're the baseline from this run on. `assay calibrate` with the new judge checks it agrees with people first.
+```
+
+The run's results then become the baseline, so the next run compares new judge with new judge.
+[`assay calibrate`](calibration.md) is how to check the new judge before trusting it.
+
+**Routing.** When more than one model serves (a router, a fallback, an A/B), each attempt is
+tied to the model its calls went to. The report then shows how each model did, and a failure that
+lines up with the model says so, instead of looking like chance:
+
+```
+By model
+  claude-opus-5  38/40 cases
+  gpt-5-mini     30/40 cases
+
+1. refund  Answer
+   fails only on gpt-5-mini (0/2), passes on claude-opus-5 (2/2): the model it was routed to, not chance
+```
+
+Otherwise, each model's pass rate is shown next to the baseline's (`claude-opus-5 passed 3/3 (3/3
+before) · gpt-5-mini passed 0/2 (not in the baseline)`). A flaky check whose passes and failures
+follow the model is explained the same way, and so is `assay diff`. Routing is part of the app,
+so a regression that comes from routing still fails the run; the report says where it came from.
+
 ## Acknowledging a failure
 
 "I already know about this one" is an acknowledgement, not a mute. It covers one check of one

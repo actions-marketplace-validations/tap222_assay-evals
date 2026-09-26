@@ -95,6 +95,12 @@ SCHEMA = {"type": "object", "properties": {f: _DIMENSION for f in FIELDS},
           "required": list(FIELDS), "additionalProperties": False}
 
 
+# Which judge this is: its rubric and schema. Changing either makes a new judge, whose results aren't
+# compared with the old one's as if only the agent had changed.
+PROMPT = f"{EVALUATOR}#" + __import__("hashlib").sha256(
+    (RUBRIC + json.dumps(SCHEMA, sort_keys=True)).encode()).hexdigest()[:8]
+
+
 def _clip(v: Any, n: int = MAX_VALUE) -> str:
     s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str, sort_keys=True)
     return s if len(s) <= n else s[:n] + f" [... {len(s) - n} more characters not shown]"
@@ -228,11 +234,12 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
     inputs = {k: v for k, v in inputs.items() if v is not None}
     fields = [f for f in FIELDS if f != "plan_quality" or has_plan]
 
-    tries, text = 0, None
+    tries, text, served = 0, None, None
 
     def result(status, reason, score=None, kind=None, category=None):
         return {"status": status, "score": score, "reason": reason, "inputs": inputs, "error_kind": kind,
-                "tries": tries, "raw_output": text[:16384] if text else None, "category": category}
+                "tries": tries, "raw_output": text[:16384] if text else None, "category": category,
+                "judge_model": served or model, "judge_prompt": PROMPT}
 
     def all_(status, reason, kind=None):
         return {f: result(status, reason, kind=kind) for f in fields}
@@ -262,7 +269,7 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
                             "error")
             kind, reason = _classify(resp.exception)
             return all_("error", reason, kind)
-        text = resp.text
+        text, served = resp.text, resp.model or served
         if resp.finish_reason in ("refusal", "content_filter"):
             return all_("error", "the judge declined to judge this run (refusal)", "error")
         if resp.finish_reason == "length":
@@ -342,7 +349,8 @@ def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
                          "expected": f"≥ {PASS_SCORE}/5", "actual": f"{r['score']}/5" if r["score"] else None,
                          "inputs": r["inputs"], "lineage": h["lineage"], "ts": _now(),
                          "error_kind": r.get("error_kind"), "tries": r.get("tries"), "raw_output": r.get("raw_output"),
-                         "category": r.get("category")})
+                         "category": r.get("category"), "judge_model": r.get("judge_model"),
+                         "judge_prompt": r.get("judge_prompt")})
     ingest.upsert(engine, store.eval_results, rows, "result_id")
     return {"judged": len(work) - not_run, "results": len(rows), "errors": sum(1 for r in rows if r["status"] == "error"),
             "not_run": not_run, "summary": report.to_dict(), "report": str(report)}

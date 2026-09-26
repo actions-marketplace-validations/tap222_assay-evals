@@ -25,7 +25,7 @@ import re
 import shlex
 import subprocess
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from statistics import median
 from pathlib import Path
@@ -794,7 +794,8 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, tenant, base_rows)]
     out = {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
            "attempts": attempts(rows), "base_attempts": attempts(base_rows),
-           "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg, tenant)}
+           "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg, tenant),
+           "judge_changed": judge_changes(rows, base_rows), **routing(engine, tenant, rows, base_rows)}
     from assay import acks as acks_
     acks_.apply(engine, tenant, run_id, out, acks or [])
     return out
@@ -821,6 +822,87 @@ def _rows(engine, run_id: str, tenant: str = TENANT) -> list:
     t = store.eval_results
     with engine.connect() as conn:
         return conn.execute(select(t).where((t.c.tenant == tenant) & (t.c.run_id == run_id))).all()
+
+
+# ---------- which judge, and which model served ----------
+
+def _judge_id(r) -> Optional[str]:
+    m, p = getattr(r, "judge_model", None), getattr(r, "judge_prompt", None)
+    return None if not (m or p) else " · ".join(x for x in (m, p) if x)
+
+
+def judge_changes(rows: list, base_rows: list) -> Dict[Tuple[str, str], dict]:
+    """(case, field) whose judge (model or prompt) differs from the baseline's: {"before", "now"}.
+    Results that didn't say which judge they were are left alone."""
+    def ids(rs):
+        by: Dict[Tuple[str, str], Counter] = defaultdict(Counter)
+        for r in rs:
+            j = _judge_id(r)
+            if j:
+                by[(r.case_id, r.field or "result")][j] += 1
+        return {k: c.most_common(1)[0][0] for k, c in by.items()}
+    now, before = ids(rows), ids(base_rows)
+    return {k: {"before": before[k], "now": now[k]} for k in now.keys() & before.keys() if now[k] != before[k]}
+
+
+def serving_models(engine, tenant: str, trajectories: List[str]) -> Dict[str, str]:
+    """The model(s) that served each run, from its model calls: "claude-opus-5", or "a + b"."""
+    st = store.agent_steps
+    got: Dict[str, set] = defaultdict(set)
+    ids = sorted({t for t in trajectories if t})
+    with engine.connect() as conn:
+        for i in range(0, len(ids), 500):
+            for r in conn.execute(select(st.c.trajectory_id, st.c.model).where(
+                    (st.c.tenant == tenant) & st.c.trajectory_id.in_(ids[i:i + 500]) & (st.c.kind == "reason")
+                    & st.c.model.isnot(None))):
+                got[r.trajectory_id].add(r.model)
+    return {t: " + ".join(sorted(ms)) for t, ms in got.items()}
+
+
+def routing(engine, tenant: str, rows: list, base_rows: list) -> dict:
+    """With more than one model serving: {"routing": {(case, field): {"now": {model: [passed, n]},
+    "before": {...}}}, "models": {model: [cases passing on it, cases]}}. Empty with one model."""
+    served = serving_models(engine, tenant, [r.document_id for r in [*rows, *base_rows]])
+    if len(set(served.values())) < 2:
+        return {"routing": {}, "models": {}}
+
+    def split(rs):
+        out: Dict[Tuple[str, str], Dict[str, list]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+        for r in rs:
+            m = served.get(r.document_id)
+            if m and r.status != "error":
+                x = out[(r.case_id, r.field or "result")][m]
+                x[0] += r.status == "pass"
+                x[1] += 1
+        return out
+    now, before = split(rows), split(base_rows)
+    keys = [k for k in now if len(set(now[k]) | set(before.get(k, {}))) > 1]
+    cases: Dict[str, Dict[str, bool]] = defaultdict(dict)
+    for (case, _), ms in now.items():
+        for m, (p, n) in ms.items():
+            cases[m][case] = cases[m].get(case, True) and p == n
+    return {"routing": {k: {"now": {m: list(v) for m, v in now[k].items()},
+                            "before": {m: list(v) for m, v in before.get(k, {}).items()}} for k in keys},
+            "models": {m: [sum(c.values()), len(c)] for m, c in sorted(cases.items())}}
+
+
+def routing_line(r: dict) -> str:
+    """claude-opus-5 passed 3/3 (3/3 before) · gpt-5-mini passed 0/2 (not in the baseline)"""
+    parts = []
+    for m, (p, n) in sorted(r["now"].items(), key=lambda kv: -kv[1][0] / kv[1][1]):
+        b = r["before"].get(m)
+        parts.append(f"{m} passed {p}/{n}" + (f" ({b[0]}/{b[1]} before)" if b else " (not in the baseline)"))
+    return " · ".join(parts)
+
+
+def routed(r: dict) -> Optional[str]:
+    """When passing and failing line up with the model: "fails only on gpt-5-mini (0/3), passes on ..."."""
+    bad = {m: v for m, v in r["now"].items() if v[0] == 0}
+    good = {m: v for m, v in r["now"].items() if v[0] == v[1]}
+    if bad and good and len(bad) + len(good) == len(r["now"]):
+        fmt = lambda d: ", ".join(f"{m} ({p}/{n})" for m, (p, n) in sorted(d.items()))
+        return f"fails only on {fmt(bad)}, passes on {fmt(good)}: the model it was routed to, not chance"
+    return None
 
 
 def attempts(rows: list) -> Dict[Tuple[str, str], List[bool]]:
@@ -868,11 +950,16 @@ def classify(result: dict, has_baseline: bool) -> dict:
     out = {"problems": [], "flaky": [], "still": [], "acked": []}
     decided = result.get("acks") or {}
     quiet, woke = decided.get("quiet") or {}, decided.get("woke") or {}
+    changed = result.get("judge_changed") or {}
+    out["judge_changed"] = []
     for key, a in sorted(cur.items()):
         if all(a):
             continue
         item = {"case_id": key[0], "field": key[1], "rate": sum(a) / len(a), "base_rate": None, "kind": "failing"}
         b = base.get(key)
+        if key in changed and b is not None:  # a new judge: not the AI's doing, and not the same measure
+            out["judge_changed"].append({**item, "base_rate": sum(b) / len(b), **changed[key]})
+            continue
         if key in woke:  # acknowledged, but worse than it was: it says so, and blocks
             out["problems"].append({**item, "kind": "worse than acknowledged", "base_rate": sum(b) / len(b) if b else None,
                                     "ack": woke[key][0], "woke": woke[key][1]})
@@ -898,7 +985,8 @@ def verdict(result: dict, has_baseline: bool) -> Tuple[bool, dict]:
     """(passed, the classified failures). Flaky checks and ones that already failed don't block, but
     a pass rate that dropped beyond chance across flaky checks still does."""
     c = classify(result, has_baseline)
-    dropped = has_baseline and result["stability"]["outcome"] == "rollback"
+    result["_judge_changed"] = c["judge_changed"]
+    dropped = has_baseline and result["stability"]["outcome"] == "rollback" and not result.get("judge_changed")
     worse = (result.get("behavior") or result.get("behavior_suite")) if result.get("behavior_fails", True) else []
     return not c["problems"] and not dropped and not worse, c
 
@@ -951,10 +1039,14 @@ def _groups(problems: List[dict]) -> List[Tuple[str, List[dict]]]:
     return out
 
 
-def _explain(ps: List[dict], fails: dict, repeat: int) -> List[str]:
-    """Each distinct reason once (at most 3), and pass rates where they say something."""
+def _explain(ps: List[dict], fails: dict, repeat: int, routes: Optional[dict] = None) -> List[str]:
+    """Each distinct reason once (at most 3), pass rates where they say something, and per model
+    when more than one served."""
     lines, seen = [], set()
     for p in ps:
+        r = (routes or {}).get((p["case_id"], p["field"]))
+        if r:
+            lines.append(_paint(routed(r) or routing_line(r), "yellow" if routed(r) else "dim"))
         if p.get("woke"):
             lines.append(_paint(f"Acknowledged by {p['ack']['by']} ({p['ack']['reason']}), but worse: {p['woke']}",
                                 "yellow"))
@@ -968,7 +1060,8 @@ def _explain(ps: List[dict], fails: dict, repeat: int) -> List[str]:
     for p in rates[:3]:
         before = f"{p['base_rate']:.0%} of attempts before, " if p["base_rate"] is not None else ""
         lines.append(_paint(f"{p['case_id']} {_label(p['field'])}: passed {before}{p['rate']:.0%} now", "dim"))
-    if repeat > 1 and any(p.get("unsure") for p in ps):  # with one attempt, the hint below covers it
+    explained = any(routed((routes or {}).get((p["case_id"], p["field"])) or {"now": {}}) for p in ps)
+    if repeat > 1 and any(p.get("unsure") for p in ps) and not explained:  # with one attempt, the hint below covers it
         lines.append(_paint("Could be chance: too few attempts to tell. `assay test --repeat 10` settles it.",
                             "yellow"))
     return lines
@@ -1075,6 +1168,7 @@ CATEGORIES = [  # (name, which checks): the first that matches a check's field t
     ("Output quality", lambda f: True),  # the answer, the end state, your asserts, your own fields
 ]
 BUCKETS = [("regressed", "✗", "red"), ("new failure", "✗", "red"), ("couldn't be judged", "?", "yellow"),
+           ("judge changed", "?", "yellow"),
            ("flaky", "⚠", "yellow"), ("known failure", "·", "dim"), ("acknowledged", "·", "dim"),
            ("passed", "✓", "green")]
 
@@ -1094,11 +1188,12 @@ def summarize(result: dict, c: dict, baseline: Optional[str]) -> dict:
         (worse_behavior if fails_behavior else set())
     new = {p["case_id"] for p in c["problems"] if p["kind"] not in ("regression", "worse than acknowledged")} - regressed
     unjudged = {x["case_id"] for x in result["not_judged"]} - regressed - new
-    flaky = {p["case_id"] for p in c["flaky"]} - regressed - new - unjudged
-    known = {p["case_id"] for p in c["still"]} - regressed - new - unjudged - flaky
-    acked = {p["case_id"] for p in c.get("acked") or []} - regressed - new - unjudged - flaky - known
-    buckets = {"regressed": regressed, "new failure": new, "couldn't be judged": unjudged, "flaky": flaky,
-               "known failure": known, "acknowledged": acked}
+    rejudged = {p["case_id"] for p in c.get("judge_changed") or []} - regressed - new - unjudged
+    flaky = {p["case_id"] for p in c["flaky"]} - regressed - new - unjudged - rejudged
+    known = {p["case_id"] for p in c["still"]} - regressed - new - unjudged - rejudged - flaky
+    acked = {p["case_id"] for p in c.get("acked") or []} - regressed - new - unjudged - rejudged - flaky - known
+    buckets = {"regressed": regressed, "new failure": new, "couldn't be judged": unjudged, "judge changed": rejudged,
+               "flaky": flaky, "known failure": known, "acknowledged": acked}
     buckets["passed"] = cases - set().union(*buckets.values())
     by_case = defaultdict(dict)
     for (case, field), a in att.items():
@@ -1123,7 +1218,8 @@ def summary_block(s: dict) -> List[str]:
     for name, mark, color in BUCKETS:
         n = len(s["buckets"][name])
         if n or name == "passed":
-            label = name if n == 1 or name in ("passed", "flaky", "regressed", "couldn't be judged", "acknowledged") \
+            label = name if n == 1 or name in ("passed", "flaky", "regressed", "couldn't be judged", "acknowledged",
+                                               "judge changed") \
                 else name + "s"
             out.append(_paint(mark, color) + f" {n} {label}")
     if s["improved"]:
@@ -1192,6 +1288,21 @@ def _ack_parts(result: dict) -> Tuple[list, list, list, int]:
     return quiet, d.get("expired") or [], d.get("spent") or [], sum(1 for a in quiet if acks.soon(a))
 
 
+def judge_changed_lines(items: List[dict]) -> List[str]:
+    """Checks judged by another model or prompt than their baseline: not compared, and why."""
+    by: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+    for p in items:
+        by[(p["before"], p["now"])].append(p)
+    out = [_paint(f"? {_n(len(items), 'failing check')} judged by a different judge than their baseline: not "
+                  f"compared, since a drop could be the judge, not the AI", "yellow")]
+    for (was, now), ps in by.items():
+        names = ", ".join(f"{p['case_id']} {_label(p['field'])}" for p in ps[:3]) + (", …" if len(ps) > 3 else "")
+        out.append(_paint(f"  {was} → {now}: {names}", "dim"))
+    out.append(_paint("  They're the baseline from this run on. `assay calibrate` with the new judge checks it "
+                      "agrees with people first.", "dim"))
+    return out + [""]
+
+
 def ack_lines(result: dict) -> List[str]:
     """The terminal's lines on acknowledgements: the quiet ones in one line, the ended ones each."""
     quiet, expired, spent, soon = _ack_parts(result)
@@ -1236,6 +1347,9 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     for name in ("regressed", "new failure", "flaky", "couldn't be judged", "known failure", "acknowledged"):
         if b.get(name):
             counts.append(f"{len(b[name])} {name}")
+    jc = result.get("_judge_changed") or []
+    if b.get("judge changed"):
+        counts.append(f"{len(b['judge changed'])} judge changed")
     if s["improved"]:
         counts.append(f"{len(s['improved'])} improved")
     paths = result.get("flows") or {}  # cases whose flow differs from their baseline's (assay/diff.py)
@@ -1252,6 +1366,9 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
                 reasons[case].append(line)
     for x in result.get("behavior") or []:
         reasons[x["case_id"]] += [ch["text"] for ch in x["changes"]]
+    for key, r in (result.get("routing") or {}).items():
+        if key[0] in reasons and routed(r):
+            reasons[key[0]].append(f"{_label(key[1])}: {routed(r)}")
     for (case, check), (a, why) in ((result.get("acks") or {}).get("woke") or {}).items():
         if not check.startswith("behavior."):
             reasons[case].insert(0, f"Worse than acknowledged ({_label(check)}, by {a['by']}): {why}")
@@ -1266,8 +1383,10 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     for x in result.get("behavior_suite") or []:
         changes.append(f"- {_md(x['text'])}" + (f" (most: {', '.join(_code(_short(m['case_id'])) for m in x['most'])})"
                                                 if x["most"] else ""))
+    rejudged = {k[1] for k in result.get("judge_changed") or {}}
     for f in result["fields"]:  # your own fields whose accuracy dropped, e.g. extraction
         if f["field"] not in CHECK_NAMES and not f["field"].startswith("expect.") and f["base_total"] and \
+                f["field"] not in rejudged and \
                 f["passed"] / f["total"] < f["base_passed"] / f["base_total"]:
             changes.append(f"- {_code(f['label'])} accuracy {_pct(f['base_passed'], f['base_total'])} → "
                            f"{_pct(f['passed'], f['total'])}")
@@ -1288,6 +1407,15 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         out += ["| Category | Passed |", "|---|---|"] + [f"| {_md(k)} | {ok}/{n} |" for k, (ok, n) in s["categories"].items()]
         out.append("")
     out += ack_markdown(result)
+    if jc:
+        pairs = sorted({(p["before"], p["now"]) for p in jc})
+        out += [f"**Judge changed** ({', '.join(f'{_md(a)} → {_md(b)}' for a, b in pairs)}): "
+                f"{_n(len(jc), 'failing check')} not compared with their baseline, since a drop could be the judge. "
+                f"Run `assay calibrate` with the new judge.", ""]
+    models = result.get("models") or {}
+    if models:
+        out += ["| Model | Cases passing |", "|---|---|"] + [f"| {_md(m)} | {ok}/{n} |" for m, (ok, n) in models.items()]
+        out.append("")
     nj = result["not_judged"]
     if nj:
         out += [f"<details><summary>{_n(len(nj), 'result')} couldn't be judged</summary>", ""]
@@ -1313,6 +1441,9 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     out += [f"{_n(cases, 'case')} · {_n(repeat, 'attempt')} each · {against}", ""]
     result["summary"] = summarize(result, c, baseline)
     out += summary_block(result["summary"])
+    if result.get("models"):  # several models served: how each did
+        w = max(len(m) for m in result["models"])
+        out += [_paint("By model", "bold")] + [f"  {m:<{w}}  {ok}/{n} cases" for m, (ok, n) in result["models"].items()] + [""]
     out += files_block(case_states(result, c))
     width = max((len(f["label"]) for f in fields), default=0)
     out.append(_paint("Checks", "bold"))
@@ -1330,7 +1461,7 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
         out.append(_paint(f"⚠ {_n(n_cases, 'case')} {what} ({_n(len(problems), 'check')})", "yellow"))
         for i, (title, ps) in enumerate(_groups(problems)[:20], 1):
             out.append(f"\n{i}. {title}")
-            out += [f"   {line}" for line in _explain(ps, fails, repeat)]
+            out += [f"   {line}" for line in _explain(ps, fails, repeat, result.get("routing"))]
         if len(_groups(problems)) > 20:
             out.append(f"\n… and {len(_groups(problems)) - 20} more")
         out.append("")
@@ -1377,7 +1508,12 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
         for p in c["flaky"][:10]:
             out.append(_paint(f"  {p['case_id']}  {_label(p['field'])}  "
                               f"{p['base_rate']:.0%} → {p['rate']:.0%}", "dim"))
+            why = routed((result.get("routing") or {}).get((p["case_id"], p["field"])) or {"now": {}})
+            if why:
+                out.append(_paint(f"    {why}", "yellow"))
         out.append("")
+    if c.get("judge_changed"):
+        out += judge_changed_lines(c["judge_changed"])
     out += ack_lines(result)
     if c["still"]:
         out.append(_paint(f"{_n(len(c['still']), 'check')} also failed in the baseline, so they don't count "

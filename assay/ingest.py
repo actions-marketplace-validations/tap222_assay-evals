@@ -121,6 +121,8 @@ class EvalResultEvent(Event):
                                       description="status error: why it couldn't be judged. invalid (the evaluator answered, but not with a verdict: unparseable, off-schema, a score that isn't a number), timeout, rate_limited, unavailable (connection error, 5xx), error (anything else)")
     tries: Optional[int] = Field(None, ge=1, description="How many times the evaluator was asked")
     raw_output: Optional[str] = Field(None, max_length=16384, description="What the evaluator returned, as it did")
+    judge_model: Optional[str] = Field(None, max_length=128, description="The model that judged: a result judged by another model isn't compared with its baseline as like for like")
+    judge_prompt: Optional[str] = Field(None, max_length=192, description="The judge's prompt or rubric, as id@version: changing it makes a new judge, like its model")
     category: Optional[str] = Field(None, max_length=64, pattern=r"^[A-Za-z0-9 _./-]+$", description="fail: the kind of failure, as the evaluator names it (grounding, policy_refusal, ...). An acknowledged failure wakes when it changes")
 
     @model_validator(mode="after")
