@@ -33,9 +33,10 @@ def main(argv=None) -> int:
     cn = sub.add_parser("connect", help="Attach Assay to your pipeline: what's here and the least-work way in; "
                                         "db (read the schema, write the mapping), code (the change, as a diff), "
                                         "verify (the pipeline Assay found)")
-    cn.add_argument("what", nargs="?", choices=["db", "code", "verify"], help="Leave out for what's here")
+    cn.add_argument("what", nargs="?", choices=["db", "code", "evals", "verify"],
+                    help="Leave out for what's here; evals: a proposed test for every model call")
     cn.add_argument("target", nargs="?", help="db: the database URL; code: the folder or file (default: here)")
-    cn.add_argument("--apply", action="store_true", help="code: write the change (it's shown first either way)")
+    cn.add_argument("--apply", action="store_true", help="code, evals: write the change (it's shown first either way)")
     cn.add_argument("--out", help="db: where to write the mapping (default: mappings/<database>.json)")
     cn.add_argument("--force", action="store_true", help="db: overwrite the mapping file")
     cn.add_argument("--password-command", metavar="CMD",
@@ -318,6 +319,8 @@ def main(argv=None) -> int:
             return attach.code(Path(args.target) if args.target else root, args.apply)
         if args.what == "verify":
             return attach.verify(root)
+        if args.what == "evals":
+            return attach.evals(Path(args.target) if args.target else root, args.apply)
         return attach.overview(Path(args.target) if args.target else root)
 
     if args.cmd == "check-source":

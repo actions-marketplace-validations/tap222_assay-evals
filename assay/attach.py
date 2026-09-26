@@ -592,6 +592,37 @@ def code(root: Path, apply: bool = False) -> int:
     return 0
 
 
+def evals(root: Path, apply: bool = False, folder: str = "tests/ai") -> int:
+    """`assay connect evals`: a proposed test per model call site; written only with --apply."""
+    import sys
+    from assay import scaffold
+    items = scaffold.plan(root, folder)
+    if not items:
+        print(f"No model calls in top-level functions under {root}: nothing to propose.", file=sys.stderr)
+        return 2
+    new = [x for x in items if x["state"] == "new"]
+    print(_p(f"{len(items)} model call site{'s' * (len(items) != 1)}:", "bold"))
+    for x in items:
+        s = x["site"]
+        what = {"new": _p(f"+ {x['path']}", "green"), "exists": f"  {x['path']} (there already)",
+                "tested": "  has a test already"}[x["state"]]
+        print(f"  {s.function} ({s.file}:{s.line})  {what}")
+    if not new:
+        print("\nNothing to propose: every model call has a test.")
+        return 0
+    print("\n" + _p(f"{new[0]['path']}:", "bold"))
+    print(new[0]["text"])
+    if not apply:
+        print(f"Nothing is written yet. `assay connect evals --apply` writes {len(new)} file{'s' * (len(new) != 1)}.")
+        return 0
+    for x in new:
+        x["path"].parent.mkdir(parents=True, exist_ok=True)
+        x["path"].write_text(x["text"])
+    print(f"Wrote {len(new)} file{'s' * (len(new) != 1)}. Each is skipped until you write its spec and cases and remove "
+          f"its skip mark: proposed, not trusted.")
+    return 0
+
+
 def verify(root: Path) -> int:
     """`assay connect verify`: the pipeline Assay found in what was recorded, and what's still dark."""
     import sys

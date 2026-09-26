@@ -147,6 +147,7 @@ $ assay connect db              # reads your database's schema, writes the mappi
 $ assay connect code            # the code change, as a diff (nothing is written)
 $ assay connect code --apply    # write it
 $ assay connect verify          # the pipeline Assay found, and the steps it hasn't seen yet
+$ assay connect evals           # a proposed test for every model call (--apply writes them)
 ```
 
 - **`db`** reads table and column names (with a read-only login: `DATABASE_URL`,
@@ -163,6 +164,15 @@ $ assay connect verify          # the pipeline Assay found, and the steps it has
 - **`verify`** reads what was recorded (`.assay/events.jsonl`, or the server at `ASSAY_URL`) and
   prints the pipeline as Assay sees it, such as `Received → classify → extract → validate →
   Done`, with the steps your code has that no run has reached yet.
+
+- **`evals`** finds every public function that calls a model and proposes a pytest file for it
+  under `tests/ai/`. The file holds the call's facts as context (model, system prompt, tools,
+  structured output), a spec to write, cases to fill in, and the checks that need no judge (output
+  present, the fields a structured output requires, the tools it may use). A judge is left
+  commented, for what no rule can check, with the reminder to calibrate it. Every file is
+  **proposed, not trusted**: it's skipped until a person writes its spec and cases and removes the
+  mark, because evals the same AI wrote with the code, unreviewed, share its blind spots. A
+  function that already has a test is left alone, and nothing is written without `--apply`.
 
 Then open the Workflow page: your pipeline, and where Assay's checks attach to it.
 
