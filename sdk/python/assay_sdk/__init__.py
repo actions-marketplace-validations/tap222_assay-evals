@@ -23,6 +23,7 @@ SDK never raises into your code (pass strict=True to init while developing).
 from __future__ import annotations
 
 import atexit
+import contextvars
 import json
 import logging
 import os
@@ -303,10 +304,11 @@ class Run:
     def llm(self, model: Optional[str] = None, tokens_in: Optional[int] = None, tokens_out: Optional[int] = None,
             cost_usd: Optional[float] = None, prompt: Optional[str] = None, text: Optional[str] = None,
             started: Optional[datetime] = None, ended: Optional[datetime] = None, error: Optional[str] = None,
-            tools: Optional[List[Any]] = None) -> None:
+            tools: Optional[List[Any]] = None, name: Optional[str] = None) -> None:
         """A model call. prompt is "id@version"; text is the output (or a summary of it); tools are the
-        tools the model was offered (names, or the tool definitions you passed the model)."""
-        self._step("llm", started, model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
+        tools the model was offered (names, or the tool definitions you passed the model). name: the
+        step it belongs to, for a pipeline (the calls of a step are its cost and its models)."""
+        self._step("llm", started, name=name, model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
                    prompt=prompt, text=self._c.clean(text), ended_at=_ts(ended),
                    status="error" if error else "ok", error=error, tools=_tool_names(tools))
 
@@ -378,6 +380,7 @@ class Run:
         started = datetime.now(timezone.utc)
         with self._lock:
             seq, self._seq = self._seq, self._seq + 1
+            parent = self._parents[-1] if self._parents else None  # a stage inside a stage
             self._parents.append(seq)
         error = None
         try:
@@ -390,7 +393,7 @@ class Run:
                 self._parents.remove(seq)
             if self._on:
                 self._c.emit({"type": "step", "run_id": self.id, "seq": seq, "kind": "stage", "name": name,
-                              "ts": _ts(started), "ended_at": _now(), "status": "error" if error else "ok",
+                              "parent_seq": parent, "ts": _ts(started), "ended_at": _now(), "status": "error" if error else "ok",
                               "error": error, "outputs": self._c.clean(handle.outputs) or None,
                               "did_work": handle.did_work, "prompt": prompt})
 
@@ -417,6 +420,7 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
     r = Run(c, rid, recorded)
     r.test = _test(test)
     r.request = input
+    token = _current.set(r)  # assay.current(): what @assay.step, @assay.tool and assay.instrument() record into
     if recorded:
         c.emit({"type": "run.start", "run_id": rid, "kind": kind, "task": task, "segment": segment,
                 "input": c.clean(input), "input_ref": input_ref, "version": version, "test": r.test,
@@ -434,9 +438,21 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
         status, error = "failed", f"{type(e).__name__}: {e}"[:2000]
         raise
     finally:
+        try:
+            _current.reset(token)
+        except ValueError:  # exited in another context (a generator closed elsewhere): nothing to restore
+            pass
         r.ended = time.monotonic()
         if recorded and status:
             c.emit({"type": "run.end", "run_id": rid, "status": status, "error": error, "outcome": r.outcome_value})
+
+
+_current: "contextvars.ContextVar[Optional[Run]]" = contextvars.ContextVar("assay_run", default=None)
+
+
+def current() -> Optional[Run]:
+    """The run being recorded here (this thread or task), or None."""
+    return _current.get()
 
 
 def feedback(run_id: str, kind: str, note: Optional[str] = None) -> None:
@@ -496,3 +512,5 @@ atexit.register(lambda: _client and _client.close())
 
 # Your own evaluators, with results whose validity is explicit (assay_sdk/evaluation.py).
 from assay_sdk.evaluation import Result, aevaluate, evaluate  # noqa: E402
+# Attach to code with a few lines: @assay.step, @assay.tool, assay.instrument() (assay_sdk/auto.py).
+from assay_sdk.auto import agent, instrument, pipeline, step, tool  # noqa: E402

@@ -1,0 +1,312 @@
+"""Attach Assay to code with a few lines, not a rewrite.
+
+    import assay_sdk as assay
+    assay.init()
+    assay.instrument()                       # Anthropic and OpenAI calls are recorded
+
+    @assay.step("classification")            # a step of the pipeline
+    def classify(doc): ...
+
+    @assay.step("process", id_from="document_id")   # the outermost step starts the run
+    def process(document_id, pages): ...
+
+    @assay.tool                              # a tool an agent calls
+    def get_order(order_id): ...
+
+    @assay.pipeline("invoice", id_from="document_id")   # one run of the pipeline, around the entry
+    def handle(document_id, pdf): return graph.invoke(...)
+
+A step records itself as a stage of the run in progress; the outermost decorated call starts a
+run of its own when there is none (kind "pipeline", named after the step; `id_from` names the
+argument whose value is the run's id, e.g. the document id). A step's return value is kept as
+its outputs when it's a dict (or a model with .model_dump()), so checks on fields can find
+the step that produced them. A tool records its arguments, its result or error, and its timing,
+into the run in progress; with no run, the function just runs.
+
+instrument() records every model call made inside a run, as a model call of the step it's in:
+model, tokens in and out, the tools offered, the answer's text, and errors. It never changes
+what the call returns, and never breaks it: anything the recording can't read is left out.
+Works on sync and async functions.
+"""
+from __future__ import annotations
+
+import contextvars
+import functools
+import inspect
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Callable, List, Optional
+
+log = logging.getLogger("assay_sdk")
+_stage: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar("assay_stage", default=None)
+MAX_TEXT = 2000
+
+
+def _sdk():
+    import assay_sdk
+    return assay_sdk
+
+
+def _arguments(fn: Callable, args: tuple, kwargs: dict) -> dict:
+    try:
+        bound = inspect.signature(fn).bind_partial(*args, **kwargs)
+    except (TypeError, ValueError):
+        return {f"arg{i}": a for i, a in enumerate(args)} | kwargs
+    return {k: v for k, v in bound.arguments.items() if k not in ("self", "cls")}
+
+
+def _outputs(handle, out: Any) -> None:
+    if hasattr(out, "model_dump"):
+        try:
+            out = out.model_dump()
+        except Exception:
+            return
+    if isinstance(out, dict):
+        handle.outputs.update({str(k): (v[:MAX_TEXT] if isinstance(v, str) else v) for k, v in out.items()})
+    elif isinstance(out, (str, int, float, bool)):
+        handle.outputs["result"] = out[:MAX_TEXT] if isinstance(out, str) else out
+
+
+def step(name: Any = None, *, id_from: Optional[str] = None, task: Optional[str] = None):
+    """@assay.step or @assay.step("name"): record the function as a step of the pipeline."""
+    def deco(fn: Callable) -> Callable:
+        label = name if isinstance(name, str) else fn.__name__
+
+        def run_for(args, kwargs):
+            a = _sdk()
+            rid = None
+            if id_from:
+                v = _arguments(fn, args, kwargs).get(id_from)
+                rid = None if v is None else str(v)[:128]
+            return a.run(task or label, run_id=rid or uuid.uuid4().hex, kind="pipeline")
+
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrapper(*args, **kwargs):
+                a = _sdk()
+                async def inside(run):
+                    token = _stage.set(label)
+                    try:
+                        with run.stage(label) as s:
+                            out = await fn(*args, **kwargs)
+                            _outputs(s, out)
+                            return out
+                    finally:
+                        _stage.reset(token)
+                run = a.current()
+                if run is not None:
+                    return await inside(run)
+                with run_for(args, kwargs) as run:
+                    return await inside(run)
+            return awrapper
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            a = _sdk()
+            def inside(run):
+                token = _stage.set(label)
+                try:
+                    with run.stage(label) as s:
+                        out = fn(*args, **kwargs)
+                        _outputs(s, out)
+                        return out
+                finally:
+                    _stage.reset(token)
+            run = a.current()
+            if run is not None:
+                return inside(run)
+            with run_for(args, kwargs) as run:
+                return inside(run)
+        return wrapper
+    return deco(name) if callable(name) else deco
+
+
+def tool(name: Any = None, *, server: Optional[str] = None):
+    """@assay.tool or @assay.tool("name"): record each call of the function as a tool call."""
+    def deco(fn: Callable) -> Callable:
+        label = name if isinstance(name, str) else fn.__name__
+
+        def record(run, args, kwargs, started, out=None, exc=None):
+            try:
+                run.tool(label, _arguments(fn, args, kwargs), None if exc else out,
+                         error=f"{type(exc).__name__}: {exc}"[:2000] if exc else None, started=started,
+                         ended=datetime.now(timezone.utc), server=server)
+            except Exception:  # recording must never break the tool
+                log.debug("Assay couldn't record tool %s", label, exc_info=True)
+
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrapper(*args, **kwargs):
+                run = _sdk().current()
+                if run is None:
+                    return await fn(*args, **kwargs)
+                started = datetime.now(timezone.utc)
+                try:
+                    out = await fn(*args, **kwargs)
+                except Exception as exc:
+                    record(run, args, kwargs, started, exc=exc)
+                    raise
+                record(run, args, kwargs, started, out)
+                return out
+            return awrapper
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            run = _sdk().current()
+            if run is None:
+                return fn(*args, **kwargs)
+            started = datetime.now(timezone.utc)
+            try:
+                out = fn(*args, **kwargs)
+            except Exception as exc:
+                record(run, args, kwargs, started, exc=exc)
+                raise
+            record(run, args, kwargs, started, out)
+            return out
+        return wrapper
+    return deco(name) if callable(name) else deco
+
+
+def _runs(kind: str):
+    def maker(task: Any = None, *, id_from: Optional[str] = None):
+        """@assay.pipeline / @assay.agent: each call of the function is one run; the steps, tools and
+        model calls inside it are recorded into it. Inside a run already, it just runs."""
+        def deco(fn: Callable) -> Callable:
+            label = task if isinstance(task, str) else fn.__name__
+
+            def opened(args, kwargs):
+                rid = None
+                if id_from:
+                    v = _arguments(fn, args, kwargs).get(id_from)
+                    rid = None if v is None else str(v)[:128]
+                return _sdk().run(label, run_id=rid or uuid.uuid4().hex, kind=kind)
+
+            if inspect.iscoroutinefunction(fn):
+                @functools.wraps(fn)
+                async def awrapper(*args, **kwargs):
+                    if _sdk().current() is not None:
+                        return await fn(*args, **kwargs)
+                    with opened(args, kwargs) as run:
+                        out = await fn(*args, **kwargs)
+                        if kind == "agent" and isinstance(out, str):
+                            run.answer(out)
+                        return out
+                return awrapper
+
+            @functools.wraps(fn)
+            def wrapper(*args, **kwargs):
+                if _sdk().current() is not None:
+                    return fn(*args, **kwargs)
+                with opened(args, kwargs) as run:
+                    out = fn(*args, **kwargs)
+                    if kind == "agent" and isinstance(out, str):
+                        run.answer(out)
+                    return out
+            return wrapper
+        return deco(task) if callable(task) else deco
+    return maker
+
+
+pipeline = _runs("pipeline")
+agent = _runs("agent")
+
+
+# ---------- model calls ----------
+
+def _anthropic_reading(kwargs: dict, resp: Any) -> dict:
+    usage = getattr(resp, "usage", None)
+    text = "".join(getattr(b, "text", "") for b in (getattr(resp, "content", None) or [])
+                   if getattr(b, "type", None) == "text")
+    return {"model": getattr(resp, "model", None) or kwargs.get("model"),
+            "tokens_in": getattr(usage, "input_tokens", None), "tokens_out": getattr(usage, "output_tokens", None),
+            "text": text[:MAX_TEXT] or None, "tools": [t.get("name") for t in kwargs.get("tools") or []
+                                                       if isinstance(t, dict) and t.get("name")] or None}
+
+
+def _openai_chat_reading(kwargs: dict, resp: Any) -> dict:
+    usage = getattr(resp, "usage", None)
+    choices = getattr(resp, "choices", None) or []
+    msg = getattr(choices[0], "message", None) if choices else None
+    tools = [(t.get("function") or {}).get("name") for t in kwargs.get("tools") or [] if isinstance(t, dict)]
+    return {"model": getattr(resp, "model", None) or kwargs.get("model"),
+            "tokens_in": getattr(usage, "prompt_tokens", None), "tokens_out": getattr(usage, "completion_tokens", None),
+            "text": (getattr(msg, "content", None) or "")[:MAX_TEXT] or None, "tools": [t for t in tools if t] or None}
+
+
+def _openai_responses_reading(kwargs: dict, resp: Any) -> dict:
+    usage = getattr(resp, "usage", None)
+    return {"model": getattr(resp, "model", None) or kwargs.get("model"),
+            "tokens_in": getattr(usage, "input_tokens", None), "tokens_out": getattr(usage, "output_tokens", None),
+            "text": (getattr(resp, "output_text", None) or "")[:MAX_TEXT] or None,
+            "tools": [t.get("name") for t in kwargs.get("tools") or [] if isinstance(t, dict) and t.get("name")] or None}
+
+
+def _record_call(reading: Callable, kwargs: dict, started: datetime, resp: Any = None,
+                 exc: Optional[BaseException] = None) -> None:
+    run = _sdk().current()
+    if run is None or kwargs.get("stream"):  # a stream is read by the caller; there's nothing whole to record
+        return
+    try:
+        fields = reading(kwargs, resp) if exc is None else {"model": kwargs.get("model")}
+        run.llm(**fields, started=started, ended=datetime.now(timezone.utc), name=_stage.get(),
+                error=f"{type(exc).__name__}: {exc}"[:2000] if exc else None)
+    except Exception:  # recording must never break the call
+        log.debug("Assay couldn't record a model call", exc_info=True)
+
+
+def _patch(cls, method: str, reading: Callable) -> bool:
+    original = getattr(cls, method, None)
+    if original is None or getattr(original, "_assay", False):
+        return False
+    if inspect.iscoroutinefunction(original):
+        @functools.wraps(original)
+        async def patched(self, *args, **kwargs):
+            started = datetime.now(timezone.utc)
+            try:
+                resp = await original(self, *args, **kwargs)
+            except Exception as exc:
+                _record_call(reading, kwargs, started, exc=exc)
+                raise
+            _record_call(reading, kwargs, started, resp)
+            return resp
+    else:
+        @functools.wraps(original)
+        def patched(self, *args, **kwargs):
+            started = datetime.now(timezone.utc)
+            try:
+                resp = original(self, *args, **kwargs)
+            except Exception as exc:
+                _record_call(reading, kwargs, started, exc=exc)
+                raise
+            _record_call(reading, kwargs, started, resp)
+            return resp
+    patched._assay = True
+    setattr(cls, method, patched)
+    return True
+
+
+TARGETS = [  # (module, class, method, how to read the response)
+    ("anthropic.resources.messages", "Messages", "create", _anthropic_reading),
+    ("anthropic.resources.messages", "AsyncMessages", "create", _anthropic_reading),
+    ("openai.resources.chat.completions", "Completions", "create", _openai_chat_reading),
+    ("openai.resources.chat.completions", "AsyncCompletions", "create", _openai_chat_reading),
+    ("openai.resources.responses", "Responses", "create", _openai_responses_reading),
+    ("openai.resources.responses", "AsyncResponses", "create", _openai_responses_reading),
+]
+
+
+def instrument() -> List[str]:
+    """Record the model calls the installed Anthropic and OpenAI SDKs make. Returns what was
+    instrumented (e.g. ["anthropic Messages.create"]); calling it twice changes nothing."""
+    import importlib
+    done = []
+    for module, cls_name, method, reading in TARGETS:
+        try:
+            mod = importlib.import_module(module)
+        except ImportError:
+            continue
+        cls = getattr(mod, cls_name, None)
+        if cls is not None and _patch(cls, method, reading):
+            done.append(f"{module.split('.')[0]} {cls_name}.{method}")
+    return done
