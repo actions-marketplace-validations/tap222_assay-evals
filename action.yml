@@ -13,6 +13,11 @@ inputs:
   install:
     description: Installs what the tests need, Assay included (skip it if an earlier step does).
     default: pip install assay-server pytest
+  timeout:
+    description: >-
+      Seconds before a hung test run is stopped (a test that never returns, or a process that
+      won't exit). What it recorded is still judged. Empty uses assay.toml's timeout.
+    default: ""
   comment:
     description: Post the summary on the pull request, updating Assay's earlier comment.
     default: "true"
@@ -47,6 +52,8 @@ runs:
 
     - id: test
       shell: bash
+      env:
+        ASSAY_TIMEOUT: ${{ inputs.timeout }}
       run: |
         set +e
         ${{ inputs.command }}

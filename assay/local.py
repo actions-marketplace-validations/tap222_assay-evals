@@ -423,9 +423,11 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
     """Check the run and compare it with the baseline. None if the run recorded nothing to check."""
     source = EventsSource(engine, TENANT)
     heads = agents.run_trajectories(engine, TENANT, run_id)
+    left_open = 0
     if heads:
         # The command has exited: a run it left open will never end. Say so, instead of skipping it.
-        lifecycle.abandon(engine, tenant=TENANT, ids=[h["trajectory_id"] for h in heads if h["status"] == "running"])
+        left_open = lifecycle.abandon(engine, tenant=TENANT,
+                                      ids=[h["trajectory_id"] for h in heads if h["status"] == "running"])
         lifecycle.evaluate(engine, lifecycle.pending(engine, TENANT, [h["trajectory_id"] for h in heads]),
                            abandoned_why=abandoned_why or "the command exited first")
         if pii and pii["check"]:
@@ -447,7 +449,7 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
     base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, TENANT, base_rows)]
     return {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
             "attempts": attempts(rows), "base_attempts": attempts(base_rows),
-            "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg)}
+            "not_judged": not_judged, "left_open": left_open, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg)}
 
 
 def _behavior_changes(engine, run_id: str, baseline: Optional[str], ran: set, cfg: Optional[dict]) -> dict:
@@ -894,7 +896,11 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     if not baseline and not passed:
         out.append(_paint("If these failures are known, make this run the baseline with `assay accept`: "
                           "later runs then fail only on what gets worse.", "dim"))
-    if TIMED_OUT in codes:
+    if TIMED_OUT in codes and not result.get("left_open"):
+        out.append(_paint(f"Your command timed out ({codes.count(TIMED_OUT)} of {len(codes)} attempts) after every "
+                          "case had finished, and was stopped: it hung on the way out (a thread or event loop "
+                          "that never stopped?). Nothing was lost.", "yellow"))
+    elif TIMED_OUT in codes:
         out.append(_paint(f"Your command timed out ({codes.count(TIMED_OUT)} of {len(codes)} attempts) and was "
                           "stopped; what it recorded is above.", "yellow"))
     if any(x and x != TIMED_OUT for x in codes):
@@ -952,7 +958,8 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     (home / "runs").mkdir(exist_ok=True)
     run_id = new_run_id()
     events = home / "runs" / f"{run_id}.jsonl"
-    timeout = timeout or cfg["timeout"]
+    timeout = timeout or (float(os.environ["ASSAY_TIMEOUT"]) if os.environ.get("ASSAY_TIMEOUT") else None) \
+        or cfg["timeout"]
     if failed:
         rerun = _state(home).get("rerun")
         if rerun is None:

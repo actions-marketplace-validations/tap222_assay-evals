@@ -18,12 +18,20 @@ turns that off. assay_sdk.testing has assertions for the test body: assert_calle
 Assay's report is in pytest's summary, and the exit code says whether anything got worse. A test
 that failed before too doesn't fail the session; one that doesn't take the fixture fails it as
 usual. Exit 6 means inconclusive: nothing got worse, but some results couldn't be judged.
+
+A session that hangs (a test that never returns, e.g. an async evaluation stuck in a race) is
+stopped after `timeout` seconds (assay.toml, --assay-timeout or ASSAY_TIMEOUT): what it recorded
+is still compared, the stuck test is reported as never finished, and the process exits. A
+session that finished but whose process doesn't exit (a thread or event loop still running)
+exits EXIT_GRACE seconds later, with the session's own result.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import sys
+import threading
 from typing import Optional
 
 import pytest
@@ -52,6 +60,7 @@ def _config(config):
 
 
 INCONCLUSIVE = 6  # pytest uses 0-5; 3 would read as its "internal error"
+EXIT_GRACE = float(os.environ.get("ASSAY_EXIT_GRACE", 30))  # seconds a finished session's process gets to exit
 
 
 def pytest_addoption(parser):
@@ -61,6 +70,9 @@ def pytest_addoption(parser):
                      "whether anything got worse")
     g.addoption("--assay-baseline", metavar="RUN", help="Compare with this run instead; 'none' for no baseline")
     g.addoption("--assay-upload", action="store_true", help="Also send the run to ASSAY_URL (with ASSAY_KEY)")
+    g.addoption("--assay-timeout", type=float, metavar="SECONDS",
+                help="Stop a session still running after this long, and report what it recorded "
+                     "(default: timeout in assay.toml, or ASSAY_TIMEOUT; 0: no limit)")
     g.addoption("--assay-rerun", choices=["failed"],
                 help="failed: run only the tests that didn't pass last time (regressed, new failures, flaky, "
                      "couldn't be judged, known failures)")
@@ -125,7 +137,82 @@ def pytest_configure(config):
     os.environ.pop("ASSAY_URL", None)  # record locally; --assay-upload sends it afterwards
     if assay._client is not None:  # init() already ran, e.g. in a conftest: record to the session's file
         assay.init()
-    config._assay_session = {"run_id": run_id, "other_failures": 0, "report": None}
+    config._assay_session = {"run_id": run_id, "other_failures": 0, "report": None, "done": threading.Event(),
+                             "lock": threading.Lock(), "code": None}
+    timeout = _timeout(config)
+    if timeout:
+        threading.Thread(target=_watchdog, args=(config, timeout), name="assay-timeout", daemon=True).start()
+
+
+def _timeout(config) -> Optional[float]:
+    t = config.getoption("assay_timeout", None)
+    if t is None and os.environ.get("ASSAY_TIMEOUT"):
+        t = float(os.environ["ASSAY_TIMEOUT"])
+    if t is None:
+        t = (_config(config) or {}).get("timeout")
+    return t or None
+
+
+def _exit(code: int) -> None:
+    for f in (sys.stdout, sys.stderr):
+        try:
+            f.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
+def _watchdog(config, timeout: float) -> None:
+    """The session is still running at `timeout`: judge what it recorded, say so, and exit."""
+    s = _session(config)
+    if s["done"].wait(timeout):
+        return
+    with s["lock"]:  # the session may be finishing right now; if it is, let it
+        if s["code"] is not None:
+            return
+        s["code"] = "timed out"
+    from assay import local
+    capman = config.pluginmanager.getplugin("capturemanager")
+    try:  # the stuck test's output capture would swallow the report
+        if capman:
+            capman.suspend_global_capture(in_=True)
+    except Exception:
+        pass
+    try:
+        assay.flush()
+        why = f"the pytest session timed out after {timeout:g}s"
+        if not os.path.exists(os.environ["ASSAY_PATH"]):
+            code, text = 2, "Nothing was recorded before the session timed out."
+        else:
+            code, text = local.finish(config.rootpath, local.find_config(config.rootpath), s["run_id"], 1,
+                                      [], config.getoption("assay_baseline"), abandoned_why=why)
+        sys.stderr.write(f"\n{'=' * 30} assay {'=' * 30}\n{text}\n\npytest was still running after {timeout:g}s "
+                         "and was stopped: a test that never returned is reported as never finished above.\n")
+    except Exception as exc:  # the session must still end
+        code = 2
+        sys.stderr.write(f"\nassay: the pytest session timed out after {timeout:g}s, and its report failed: {exc}\n")
+    _exit(1 if s["other_failures"] and code != 2 else INCONCLUSIVE if code == 3 else code or 0)
+
+
+def pytest_unconfigure(config):
+    """A finished session whose process doesn't exit, e.g. an event loop or thread still running:
+    give it EXIT_GRACE seconds, then exit with the session's result."""
+    s = _session(config)
+    if not s:
+        return
+    s["done"].set()
+    # Only when pytest is the program: a process that runs pytest.main() itself goes on afterwards.
+    if not EXIT_GRACE or tuple(config.invocation_params.args) != tuple(sys.argv[1:]):
+        return
+    status = int(getattr(config, "_assay_exitstatus", 0))
+
+    def guard():
+        sys.stderr.write(f"\nassay: pytest finished, but its process was still running {EXIT_GRACE:g}s later (a "
+                         "thread or event loop that never stopped); exiting with the session's result.\n")
+        _exit(status)
+    t = threading.Timer(EXIT_GRACE, guard)
+    t.daemon = True
+    t.start()
 
 
 def pytest_runtest_logreport(report):
@@ -148,6 +235,18 @@ def pytest_sessionfinish(session, exitstatus):
     s = _session(session.config)
     if not s:
         return
+    with s["lock"]:
+        if s["code"] is not None:  # the watchdog is reporting a timeout
+            return
+        s["code"] = "finishing"
+    s["done"].set()
+    try:
+        _finish(session, s, exitstatus)
+    finally:
+        session.config._assay_exitstatus = session.exitstatus
+
+
+def _finish(session, s, exitstatus):
     from assay import local
     assay.shutdown()  # everything recorded is on disk before it's read
     if not os.path.exists(os.environ["ASSAY_PATH"]):

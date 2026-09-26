@@ -152,3 +152,47 @@ def test_the_github_action_is_well_formed():
     script = steps[2]["run"]
     assert all(part in script for part in ("0) result=passed", "1) result=regressed", "3|6) result=inconclusive"))
 
+
+HANGS = '''
+import threading
+
+def test_quick(assay_case):
+    assay_case.answer("ok")
+
+def test_hangs(assay_case):
+    assay_case.tool("evaluate", {"run_async": True}, {"started": 2})
+    threading.Event().wait()  # like evaluate(run_async=True) that never returns
+'''
+
+
+def test_a_pytest_session_that_hangs_is_stopped_and_judged(project):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_suite.py").write_text(HANGS)
+    started = time.time()
+    out = run(project, "--assay-timeout", "3")
+    assert time.time() - started < 30
+    assert out.returncode == 1  # a test that never finished isn't a pass
+    assert "Never finished after step 0: the pytest session timed out after 3s." in out.stderr
+    assert "pytest was still running after 3s and was stopped" in out.stderr
+    md = (project / ".assay" / "summary.md").read_text()  # the PR comment still gets written
+    assert "1 passed" in md and "test_hangs" in md
+
+
+LINGERS = '''
+import threading
+
+def test_done(assay_case):
+    assay_case.answer("ok")
+    threading.Thread(target=threading.Event().wait).start()  # never stops: the process can't exit
+'''
+
+
+def test_a_finished_session_whose_process_wont_exit_exits_with_its_result(project):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_suite.py").write_text(LINGERS)
+    started = time.time()
+    out = run(project, env={"ASSAY_EXIT_GRACE": "2"})
+    assert time.time() - started < 30
+    assert out.returncode == 0 and "1 passed" in out.stdout
+    assert "pytest finished, but its process was still running 2s later" in out.stderr
+
