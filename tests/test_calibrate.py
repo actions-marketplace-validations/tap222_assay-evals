@@ -21,7 +21,17 @@ def grade(question, answer):
         q = 6 - q  # the prompt change that fixed one question type and broke this one
     if mode == "lenient":
         q = min(5, q + 1)
+    if "BROKEN" in answer and mode != "blind":
+        q = max(1, q - 3)  # it notices the answer is wrong
+    if os.environ.get("AS_MODEL"):
+        from assay_sdk.llm import Response
+        return Response(text="x", structured={"score": q}, model=os.environ["AS_MODEL"])
     return {"score": q, "reason": "rubric"}
+
+
+def strict(question, answer):
+    q = int(re.search(r"quality=(\\d)", answer).group(1))
+    return {"score": 6 - q if question.startswith("product") and q in (1, 5) else q}
 '''
 
 
@@ -69,6 +79,8 @@ def test_a_calibrated_judge_then_a_change_that_breaks_one_question_type(project,
     assert main(["calibrate"]) == 1
     out = capsys.readouterr().out
     assert "✗ product" in out and "beyond chance" in out and "Regressed." in out
+    # The code and the golden set are the same as the baseline's: the only explanation left is drift.
+    assert "the provider changed the model under its name" in out
     assert "new ordering violations two or more apart" in out
     assert "  behavioral     Spearman" in out and "✗ behavioral" not in out  # the other type is fine
 
@@ -136,3 +148,48 @@ for i in range(20):
     picked = [line.split()[-1] for line in out.splitlines() if line.strip().startswith("judged")]
     assert picked == ["case-0", "case-5", "case-10", "case-14", "case-19"]  # low to high, not five typical ones
     assert main(["golden", "suggest"]) == 2 and "Which check is the judge" in capsys.readouterr().err
+
+
+def test_variants_a_second_judge_and_a_judge_that_cant_tell_broken_from_good(project, monkeypatch, capsys):
+    items = calibrate.load_golden(project / "golden.jsonl")
+    for x in items[:6]:
+        q = int(x["output"].split("quality=")[1])
+        x["variants"] = [{"output": f"{x['output']} (reworded)", "expect": "same", "note": "paraphrase"},
+                         {"output": f"{x['output']} BROKEN", "expect": "lower", "note": "wrong refund window"}]
+    calibrate.save_golden(project / "golden.jsonl", items)
+    assert main(["calibrate", "--second-judge", "evals/judges.py:strict"]) == 0
+    out = capsys.readouterr().out
+    assert "Variants     " in out and "paraphrases kept their score" in out
+    assert "Second judge evals/judges.py:strict over the same 30 items" in out
+    assert "they disagree on by 2+ points (the rubric is likely ambiguous there)" in out
+
+    monkeypatch.setenv("MODE", "blind")  # scores a broken answer like the good one
+    assert main(["calibrate"]) == 1
+    out = capsys.readouterr().out
+    assert "variants that behaved before no longer do" in out and "should score lower" in out
+
+
+def test_every_judged_number_says_whether_it_can_be_trusted(project, monkeypatch, capsys):
+    (project / "assay.toml").write_text((project / "assay.toml").read_text().replace('command = "true"',
+                                        f'command = "{sys.executable} record.py"') + 'field = "helpful"\n')
+    (project / "record.py").write_text("""
+import os
+import assay_sdk as assay
+assay.init()
+with assay.run("support", test="q1") as r:
+    r.answer("ok")
+    r.check("helpful", "pass", score=4, judge_model=os.environ.get("JUDGE_MODEL"))
+    r.check("tone", "pass", score=5)
+""")
+    monkeypatch.setenv("PYTHONPATH", SDK)
+    monkeypatch.setenv("AS_MODEL", "claude-opus-5")
+    assert main(["calibrate", "--repeat", "1"]) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("JUDGE_MODEL", "claude-opus-5")
+    main(["test"])
+    out = capsys.readouterr().out
+    assert "Judges" in out and "helpful  calibrated today: Spearman" in out and "(claude-opus-5)" in out
+    assert "tone     not calibrated: its scores haven't been checked against people" in out
+    monkeypatch.setenv("JUDGE_MODEL", "claude-fable-5-1")
+    main(["test"])
+    assert "calibrated for claude-opus-5, but judged by claude-fable-5-1 this run" in capsys.readouterr().out

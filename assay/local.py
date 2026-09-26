@@ -800,6 +800,7 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     acks_.apply(engine, tenant, run_id, out, acks or [])
     skip = set(out["judge_changed"]) | set((out.get("acks") or {}).get("quiet") or {})
     out.update(scores(engine, tenant, run_id, rows, base_rows, skip))
+    out["trust"] = trust(engine, tenant, rows)
     return out
 
 
@@ -898,6 +899,68 @@ def scores(engine, tenant: str, run_id: str, rows: list, base_rows: list, skip: 
 
 def _floor(f: dict) -> str:
     return f"{f['min']:g}–{f['max']:g}" if f["min"] != f["max"] else f"{f['min']:g}"
+
+
+# ---------- can a judged number be trusted: its calibration ----------
+
+STALE_DAYS = 30
+
+
+def trust(engine, tenant: str, rows: list) -> Dict[str, dict]:
+    """Per judged field (one with scores): whether its judge was calibrated against people, when,
+    how well, and for the same judge that scored this run."""
+    fields: Dict[str, set] = defaultdict(set)
+    for r in rows:
+        if r.score is not None and r.status in ("pass", "fail"):
+            fields[r.field or "result"].update({r.judge_model} if getattr(r, "judge_model", None) else set())
+    if not fields:
+        return {}
+    c = store.calibrations
+    with engine.connect() as conn:
+        cals = conn.execute(select(c.c.run_id, c.c.created_at, c.c.passed, c.c.result).where(c.c.tenant == tenant)
+                            .order_by(c.c.created_at)).all()
+    latest: Dict[str, Any] = {}
+    for x in cals:
+        f = (x.result.get("calibration") or {}).get("field")
+        if f:
+            latest[f] = x
+    out = {}
+    for f, models in sorted(fields.items()):
+        x = latest.get(f)
+        if x is None:
+            out[f] = {"state": "none"}
+            continue
+        cal = x.result["calibration"]
+        age = (datetime.utcnow() - x.created_at).days
+        cal_models = set(cal.get("models") or [])
+        state = "regressed" if not x.passed else "other_judge" if models and cal_models and models != cal_models \
+            else "stale" if age > STALE_DAYS else "ok"
+        out[f] = {"state": state, "age": age, "spearman": cal.get("spearman"), "n": cal.get("n"),
+                  "models": sorted(cal_models), "now": sorted(models), "run_id": x.run_id}
+    return out
+
+
+def trust_text(field: str, t: dict) -> str:
+    if t["state"] == "none":
+        return "not calibrated: its scores haven't been checked against people (`assay calibrate`)"
+    when = "today" if t["age"] == 0 else f"{t['age']} day{'s' * (t['age'] != 1)} ago"
+    how = f"Spearman {t['spearman']:.2f} on {t['n']} items" if t.get("spearman") is not None else f"{t['n']} items"
+    base = f"calibrated {when}: {how}" + (f" ({', '.join(t['models'])})" if t["models"] else "")
+    return {"ok": base,
+            "stale": f"{base}; over {STALE_DAYS} days old, and a provider can change a model under its name",
+            "regressed": f"its last calibration regressed ({t['run_id']}): don't lean on these scores",
+            "other_judge": f"calibrated for {', '.join(t['models'])}, but judged by {', '.join(t['now'])} this run: "
+                           f"not calibrated for that judge"}[t["state"]]
+
+
+def trust_lines(result: dict) -> List[str]:
+    t = result.get("trust") or {}
+    if not t:
+        return []
+    w = max(len(_label(f)) for f in t)
+    tone = {"ok": "dim", "none": "yellow", "stale": "yellow", "regressed": "red", "other_judge": "yellow"}
+    return [_paint("Judges", "bold")] + [_paint(f"  {_label(f):<{w}}  {trust_text(f, x)}", tone[x["state"]])
+                                         for f, x in t.items()] + [""]
 
 
 # ---------- which judge, and which model served ----------
@@ -1520,6 +1583,9 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         out += ["| Category | Passed |", "|---|---|"] + [f"| {_md(k)} | {ok}/{n} |" for k, (ok, n) in s["categories"].items()]
         out.append("")
     out += ack_markdown(result)
+    tr = result.get("trust") or {}
+    if tr:
+        out += ["**Judges**", ""] + [f"- {_md(_label(f))}: {_md(trust_text(f, x))}" for f, x in tr.items()] + [""]
     flips = result.get("coin_flips") or []
     if flips:
         out += [f"<details><summary>{_n(len(flips), 'coin flip')}: different answers from the same system</summary>",
@@ -1564,6 +1630,7 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
         w = max(len(m) for m in result["models"])
         out += [_paint("By model", "bold")] + [f"  {m:<{w}}  {ok}/{n} cases" for m, (ok, n) in result["models"].items()] + [""]
     out += files_block(case_states(result, c))
+    trust_block = trust_lines(result)
     width = max((len(f["label"]) for f in fields), default=0)
     out.append(_paint("Checks", "bold"))
     for f in fields:
@@ -1573,6 +1640,7 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
             line += _paint(f"   {_pct(f['base_passed'], f['base_total'])} → {_pct(f['passed'], f['total'])}", "dim")
         out.append(line)
     out.append("")
+    out += trust_block
     problems = c["problems"]
     if problems:
         what = "regressed" if baseline and all(p["kind"] == "regression" for p in problems) else "failing"
@@ -2127,7 +2195,7 @@ def golden_suggest(root: Path, n: int, field: Optional[str]) -> int:
 
 
 def calibrate_cmd(root: Path, baseline: Optional[str] = None, fmt: str = "text", judge_spec: Optional[str] = None,
-                  repeat: Optional[int] = None, rt=None) -> int:
+                  repeat: Optional[int] = None, rt=None, second_judge: Optional[str] = None) -> int:
     """`assay calibrate`: the judge over the golden set, compared with the last calibration that passed.
     0 as good as before, 1 worse, 2 nothing to run."""
     from assay import calibrate
@@ -2138,11 +2206,19 @@ def calibrate_cmd(root: Path, baseline: Optional[str] = None, fmt: str = "text",
         spec = judge_spec or ccfg["judge"]
         items = calibrate.load_golden(root / ccfg["golden"])
         judge = calibrate.load_judge(spec, root)
+        second_spec = second_judge or ccfg.get("second_judge")
+        second_fn = calibrate.load_judge(second_spec, root) if second_spec else None
     except (calibrate.CalibrationError, SetupError) as exc:
         print(exc, file=sys.stderr)
         return 2
     results, report = calibrate.run_judge(judge, items, ccfg, rt)
     a = calibrate.analyze(items, results, ccfg)
+    a["judge"] = {"spec": spec, "source": calibrate.fingerprint(judge), "models": a["models"]}
+    a["field"] = ccfg.get("field")
+    second = None
+    if second_fn is not None:
+        r2, _ = calibrate.run_judge(second_fn, items, ccfg, rt)
+        second = {**calibrate.between_judges(a, calibrate.analyze(items, r2, ccfg)), "spec": second_spec}
     home = ensure_home(root)
     engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
     state = _state(home)
@@ -2171,9 +2247,9 @@ def calibrate_cmd(root: Path, baseline: Optional[str] = None, fmt: str = "text",
     cost = f"estimated ${s['cost_usd']:,.2f}" if s["cost_usd"] is not None else "cost unknown (set [prices])"
     line = f"{_n(s['llm_calls'], 'LLM call')}, {s['retries']} retries, {cost}, {report.seconds:.1f}s"
     if fmt == "json":
-        print(json.dumps({"run_id": run_id, "passed": passed, **stored}, indent=1, default=str))
+        print(json.dumps({"run_id": run_id, "passed": passed, **stored, "second_judge": second}, indent=1, default=str))
     else:
-        print(calibrate.text(run_id, spec, a, ccfg, cmp, base_id, line, _paint))
+        print(calibrate.text(run_id, spec, a, ccfg, cmp, base_id, line, _paint, second))
     return 0 if passed else 1
 
 

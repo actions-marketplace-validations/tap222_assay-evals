@@ -26,6 +26,17 @@ golden.jsonl, one item a line:
 
 An item's label is the median of its labels. Items two people labeled say how much people agree:
 the ceiling for any judge.
+
+Three more things say whether a judge can be trusted:
+
+  variants     versions of an item's output with what should happen to its score: a paraphrase
+               should keep it ("same"), a subtly broken answer should lose it ("lower"):
+               {"id": "q17", ..., "variants": [{"output": "...", "expect": "same", "note": "paraphrase"}]}
+  second judge another judge over the same items (second_judge): how often they agree, and the
+               items they disagree on, which is usually where the rubric is ambiguous
+  drift        the same judge (its code, and the models that answered) over the same items,
+               agreeing with people less than it did: the provider changed the model under its
+               name. Only a calibration run on a schedule, with nothing else changed, catches it.
 """
 from __future__ import annotations
 
@@ -45,7 +56,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 BOOTSTRAP, SEED = 1000, 0
 MIN_TAG_ITEMS = 8  # fewer can't say whether a tag got worse
 DEFAULTS = {"golden": "golden.jsonl", "judge": None, "repeat": 5, "score_range": [1, 5], "label_range": None,
-            "threshold": None, "concurrency": 8, "min_drop": 0.05, "field": None}
+            "threshold": None, "concurrency": 8, "min_drop": 0.05, "field": None, "second_judge": None}
+EXPECTS = ("same", "lower", "higher")
 
 
 class CalibrationError(ValueError):
@@ -81,6 +93,12 @@ def load_golden(path: Path) -> List[dict]:
         seen.add(x["id"])
         x["labels"], x["label"] = labels, median(lab["score"] for lab in labels)
         x["tags"] = [str(t) for t in x.get("tags") or []]
+        vs = x.get("variants") or []
+        if not isinstance(vs, list) or any(not isinstance(v, dict) or "output" not in v or v.get("expect") not in EXPECTS
+                                           for v in vs):
+            raise CalibrationError(f"{path.name}, line {n}: each variant needs output, and expect: same, lower or "
+                                   f"higher (what should happen to the score).")
+        x["variants"] = vs
         items.append(x)
     if not items:
         raise CalibrationError(f"{path.name} is empty.")
@@ -118,9 +136,10 @@ def coverage(items: List[dict], label_range: Tuple[float, float]) -> dict:
                  "within_one": sum(abs(a - b) <= 1 for a, b in pairs) / len(pairs),
                  "spearman": spearman([a for a, _ in pairs], [b for _, b in pairs]) if len(pairs) >= 3 else None}
     tags = Counter(t for x in items for t in x["tags"])
+    variants = Counter(v["expect"] for x in items for v in x.get("variants") or [])
     return {"items": len(items), "levels": {lv: per.get(lv, 0) for lv in levels},
             "missing": [lv for lv in levels if not per.get(lv)], "labelers": dict(by.most_common()),
-            "labeler_agreement": agree, "tags": dict(tags.most_common())}
+            "labeler_agreement": agree, "tags": dict(tags.most_common()), "variants": dict(variants)}
 
 
 # ---------- statistics ----------
@@ -228,6 +247,15 @@ def load_judge(spec: str, root: Path) -> Callable:
     return fn
 
 
+def fingerprint(judge: Callable) -> Optional[str]:
+    """The judge's code, as a digest of its source file: an edited rubric is another judge."""
+    import inspect
+    try:
+        return hashlib.sha256(Path(inspect.getsourcefile(judge)).read_bytes()).hexdigest()[:12]
+    except (TypeError, OSError):
+        return None
+
+
 def _to_labels(s: float, score_range, label_range) -> float:
     (a, b), (c, d) = score_range, label_range
     return s if (a, b) == (c, d) else c + (s - a) * (d - c) / (b - a)
@@ -239,6 +267,8 @@ def run_judge(judge: Callable, items: List[dict], cfg: dict, rt=None):
     rt = rt or EvalRuntime(concurrency=int(cfg["concurrency"]), retries=2)
     samples = [Sample(x.get("input"), x["output"], id=f"{x['id']}#{k}", **(x.get("args") or {}))
                for x in items for k in range(int(cfg["repeat"]))]
+    samples += [Sample(x.get("input"), v["output"], id=f"{x['id']}~{j}#{k}", **(x.get("args") or {}))
+                for x in items for j, v in enumerate(x.get("variants") or []) for k in range(int(cfg["repeat"]))]
     lo, hi = cfg["score_range"]
     report = rt.run(judge, samples, score_range=(lo, hi), threshold=cfg["threshold"] if cfg["threshold"] is not None
                     else (lo + hi) / 2)
@@ -271,6 +301,22 @@ def analyze(items: List[dict], results: Dict[str, list], cfg: dict) -> dict:
                      "flips": len({s >= threshold for s in scores}) > 1})
     judged = [r for r in rows if r["judged"] is not None]
     L, J = [r["label"] for r in judged], [r["judged"] for r in judged]
+    span = label_range[1] - label_range[0]
+    variants = []
+    for r in judged:
+        for j, v in enumerate(r.get("variants") or []):
+            vs = [_to_labels(x.result.score, score_range, label_range) for x in results.get(f"{r['id']}~{j}", [])
+                  if x.result is not None and x.result.valid and x.result.score is not None]
+            if not vs:
+                continue
+            vm = median(vs)
+            noise = max(r["spread"] or 0, max(vs) - min(vs), 0.1 * span)
+            ok = abs(vm - r["judged"]) <= noise if v["expect"] == "same" else \
+                vm < r["judged"] - noise / 2 if v["expect"] == "lower" else vm > r["judged"] + noise / 2
+            variants.append({"id": r["id"], "variant": j, "expect": v["expect"], "note": v.get("note"),
+                             "original": r["judged"], "judged": vm, "ok": ok})
+    models = sorted({x.result.judge_model for rs in results.values() for x in rs
+                     if x.result is not None and getattr(x.result, "judge_model", None)})
     rho = spearman(L, J)
     viol, comparable = violations(judged)
     levels = sorted({int(round(r["label"])) for r in judged})
@@ -296,7 +342,22 @@ def analyze(items: List[dict], results: Dict[str, list], cfg: dict) -> dict:
                         "flips": [r["id"] for r in judged if r["flips"]],
                         "widest": sorted(judged, key=lambda r: -(r["spread"] or 0))[:3]},
         "tags": tags, "coverage": coverage(items, label_range), "label_range": label_range,
+        "variants": variants, "models": models, "golden_digest": digest(items),
     }
+
+
+def between_judges(a: dict, b: dict) -> dict:
+    """Two judges over the same items: how often they agree, and where they don't (by 2+ points)."""
+    x = {r["id"]: r for r in a["items"] if r.get("judged") is not None}
+    y = {r["id"]: r for r in b["items"] if r.get("judged") is not None}
+    ids = [i for i in x if i in y]
+    A, B = [x[i]["judged"] for i in ids], [y[i]["judged"] for i in ids]
+    apart = sorted(({"id": i, "label": x[i]["label"], "first": x[i]["judged"], "second": y[i]["judged"]}
+                    for i in ids if abs(x[i]["judged"] - y[i]["judged"]) >= 2), key=lambda d: -abs(d["first"] - d["second"]))
+    return {"items": len(ids), "spearman": spearman(A, B),
+            "exact": mean(round(p) == round(q) for p, q in zip(A, B)) if ids else None,
+            "within_one": mean(abs(p - q) <= 1 for p, q in zip(A, B)) if ids else None,
+            "apart": apart, "second_spearman": b["spearman"], "first_spearman": a["spearman"]}
 
 
 def compare(now: dict, before: dict, cfg: dict) -> dict:
@@ -323,8 +384,22 @@ def compare(now: dict, before: dict, cfg: dict) -> dict:
             out["tags"][t] = test(ids)
     old = {(v["high"], v["low"]) for v in violations([a[i] for i in common])[0]}
     out["new_violations"] = [v for v in violations([b[i] for i in common])[0] if (v["high"], v["low"]) not in old]
+    was_ok = {(v["id"], v["variant"]) for v in before.get("variants") or [] if v["ok"]}
+    out["new_variant_failures"] = [v for v in now.get("variants") or [] if not v["ok"] and (v["id"], v["variant"]) in was_ok]
+    blind = [v for v in out["new_variant_failures"] if v["expect"] == "lower" and v["judged"] >= v["original"]]
     out["regressed"] = bool((out["overall"] or {}).get("worse") or any((t or {}).get("worse") for t in out["tags"].values())
-                            or any(v["gap"] >= 2 for v in out["new_violations"]))
+                            or any(v["gap"] >= 2 for v in out["new_violations"]) or blind)
+    # Why: the judge changed (its code, its model), or nothing did and the provider's model moved.
+    j0, j1 = before.get("judge") or {}, now.get("judge") or {}
+    same_items = before.get("golden_digest") == now.get("golden_digest")
+    if j0.get("source") and j0.get("source") != j1.get("source"):
+        out["cause"] = "the judge's code changed since the baseline"
+    elif (before.get("models") or []) != (now.get("models") or []) and before.get("models") and now.get("models"):
+        out["cause"] = f"the judge's model changed: {', '.join(before['models'])} → {', '.join(now['models'])}"
+    elif out["regressed"] and same_items and j0.get("source") and j0 == j1:
+        out["cause"] = ("the same judge (its code and its model's name) over the same items agrees with people less "
+                        "than it did: the provider changed the model under its name")
+        out["drift"] = True
     return out
 
 
@@ -338,8 +413,13 @@ def _pct(v: Optional[float]) -> str:
     return "n/a" if v is None else f"{v:.0%}"
 
 
+def _variant(v: dict) -> str:
+    what = {"same": "should stay the same", "lower": "should score lower", "higher": "should score higher"}[v["expect"]]
+    return f"{v['id']}{' (' + v['note'] + ')' if v.get('note') else ''}: {v['original']:.1f} → {v['judged']:.1f}, {what}"
+
+
 def text(run_id: str, spec: str, a: dict, cfg: dict, cmp: Optional[dict], baseline: Optional[str],
-         runtime_line: Optional[str], paint=lambda s, c: s) -> str:
+         runtime_line: Optional[str], paint=lambda s, c: s, second: Optional[dict] = None) -> str:
     cov = a["coverage"]
     out = [paint("Judge calibration", "bold") + f"  {run_id}", "─" * 44,
            f"{spec} · {a['n']} items · {cfg['repeat']} judgements each", ""]
@@ -387,6 +467,28 @@ def text(run_id: str, spec: str, a: dict, cfg: dict, cmp: Optional[dict], baseli
         out.append(paint(f"             e.g. {a['first_error'][:200]}", "dim"))
     if a["tags"]:
         out.append("By tag       " + "   ".join(f"{t} {_f(v['spearman'])} (n={v['n']})" for t, v in a["tags"].items()))
+    vs = a.get("variants") or []
+    if vs:
+        ok = sum(v["ok"] for v in vs)
+        parts = []
+        for e, words in (("same", "paraphrases kept their score"), ("lower", "broken versions scored lower"),
+                         ("higher", "improved versions scored higher")):
+            mine = [v for v in vs if v["expect"] == e]
+            if mine:
+                parts.append(f"{words} {sum(v['ok'] for v in mine)}/{len(mine)}")
+        out.append(f"Variants     {ok} of {len(vs)} as expected: " + ", ".join(parts))
+        out += [paint(f"               {_variant(v)}", "yellow") for v in vs if not v["ok"]][:5]
+    if second:
+        s = second
+        out += ["", f"Second judge {s['spec']} over the same {s['items']} items",
+                f"             agrees with the first: Spearman {_f(s['spearman'])}, exact {_pct(s['exact'])}, "
+                f"within one {_pct(s['within_one'])}",
+                f"             with people: first {_f(s['first_spearman'])}, second {_f(s['second_spearman'])}"]
+        if s["apart"]:
+            out.append(paint(f"             {len(s['apart'])} item{'s' * (len(s['apart']) != 1)} they disagree on by 2+ "
+                             f"points (the rubric is likely ambiguous there):", "yellow"))
+            out += [f"               {d['id']}: labeled {d['label']:g}, first {d['first']:.1f}, second {d['second']:.1f}"
+                    for d in s["apart"][:5]]
     if a["matrix"]:
         cols = sorted({j for row in a["matrix"].values() for j in row})
         out += ["", "Label × judge  " + " ".join(f"{j:>3}" for j in cols)]
@@ -417,6 +519,12 @@ def text(run_id: str, spec: str, a: dict, cfg: dict, cmp: Optional[dict], baseli
     near = len(cmp["new_violations"]) - len(far)
     if near:
         out.append(paint(f"  {near} new near-miss{'es' * (near != 1)} one label apart (not failing)", "dim"))
+    nv = cmp.get("new_variant_failures") or []
+    if nv:
+        out.append(paint(f"✗ {len(nv)} variant{'s' * (len(nv) != 1)} that behaved before no longer do:", "red"))
+        out += [f"    {_variant(v)}" for v in nv[:5]]
+    if cmp.get("cause"):
+        out.append(paint(f"Why: {cmp['cause']}.", "yellow" if cmp.get("drift") else "dim"))
     out += ["", paint("Regressed.", "red") if cmp["regressed"] else paint("Calibrated as before.", "green")]
     return "\n".join(out)
 

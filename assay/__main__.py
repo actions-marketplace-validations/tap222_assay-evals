@@ -136,6 +136,8 @@ def main(argv=None) -> int:
     cb.add_argument("--baseline", help="A calibration id, or 'none'")
     cb.add_argument("--judge", help="module:function or path.py:function (default: [calibrate] judge)")
     cb.add_argument("--repeat", type=int, help="Judgements per item (default: [calibrate] repeat)")
+    cb.add_argument("--second-judge", help="Another judge over the same items, to see where they disagree "
+                                           "(default: [calibrate] second_judge)")
     cb.add_argument("--format", choices=["text", "json"], default="text")
     al = sub.add_parser("acks", help="What's acknowledged, what expires soon, and what woke up")
     al.add_argument("--prune", action="store_true", help="Remove the ones that ended (expired, or passing since)")
@@ -181,7 +183,8 @@ def main(argv=None) -> int:
         if args.cmd == "acks":
             return local.list_acks(root, args.prune)
         if args.cmd == "calibrate":
-            return local.calibrate_cmd(root, args.baseline, args.format, args.judge, args.repeat)
+            return local.calibrate_cmd(root, args.baseline, args.format, args.judge, args.repeat,
+                                       second_judge=args.second_judge)
         if args.cmd == "golden":
             try:
                 if args.golden_cmd == "add":

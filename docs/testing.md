@@ -89,6 +89,17 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
 - **Where things live:** everything goes in `.assay/` (recordings, the store, the baseline),
   which ignores itself in git. `assay test -- pytest -q tests/ai` overrides the command.
 
+## Can a judged number be trusted?
+
+Every judged check in the report says whether its judge was calibrated against people, how well,
+and whether for the judge that scored this run (see [Judge calibration](calibration.md#every-judged-number-says-whether-it-can-be-trusted)):
+
+```
+Judges
+  helpful      calibrated 3 days ago: Spearman 0.82 on 60 items (claude-opus-5)
+  consistency  not calibrated: its scores haven't been checked against people (`assay calibrate`)
+```
+
 ## Noise floors and coin flips
 
 A judged case can score 5/5 on one run and 2/5 on the next with nothing changed. Comparing only

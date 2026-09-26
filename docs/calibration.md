@@ -95,6 +95,62 @@ Regressed.
 - **Validity:** answers that weren't verdicts, and timeouts, are counted apart. They never
   become scores.
 
+## Variants: does the score move for the right reasons?
+
+A judge you can trust gives a paraphrase the same score and a subtly wrong answer a lower one.
+Give golden items variants, each with what should happen to its score:
+
+```json
+{"id": "q17", "input": "...", "output": "...", "score": 4, "variants": [
+  {"output": "the same answer, reworded", "expect": "same", "note": "paraphrase"},
+  {"output": "the same answer, with the refund window wrong", "expect": "lower", "note": "wrong fact"}]}
+```
+
+```
+Variants     11 of 12 as expected: paraphrases kept their score 6/6, broken versions scored lower 5/6
+               q17 (wrong fact): 4.0 → 4.0, should score lower
+```
+
+"Same" allows for the noise the item already shows across repeats. You write the variants, so
+nothing is generated and the check is repeatable. A broken variant that used to score lower
+and now doesn't fails the calibration: the judge can no longer tell a wrong answer from a right
+one.
+
+## A second judge
+
+```toml
+[calibrate]
+second_judge = "evals/judges.py:helpfulness_gpt"   # or: assay calibrate --second-judge ...
+```
+
+Another judge over the same items says how often two judges agree, which of them tracks people
+better, and where they disagree by two points or more. That's usually where the rubric is
+ambiguous, and it's the first place to tighten it.
+
+## Drift: the same judge, scoring differently
+
+A provider can change a model without changing its name. A judge that became stricter overnight
+still returns valid verdicts, so the scores just move. Each calibration records the judge's code
+(a digest of its file) and the models that answered. When a calibration regresses with the same
+code, the same model names and the same golden set, the report says so:
+
+```
+Why: the same judge (its code and its model's name) over the same items agrees with people less than it did: the provider changed the model under its name.
+```
+
+Only a calibration run with nothing else changed catches this, so run it on a schedule:
+
+```yaml
+on:
+  schedule: [{cron: "0 6 * * *"}]   # every morning
+jobs:
+  judge-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install assay-server && assay calibrate
+```
+
 ## As a regression test
 
 Each calibration is stored and compared with the last one that passed, over the items both
@@ -116,6 +172,21 @@ When the judge's model or prompt changes, `assay test` doesn't compare the new j
 the old one's baseline as if only the AI had changed ([When the judge or the model
 changes](testing.md#when-the-judge-or-the-model-changes)). Calibrating the new judge is how to
 know whether to trust it.
+
+## Every judged number says whether it can be trusted
+
+`assay test` lists each judged check with its calibration, so a score is never read without
+knowing whether anyone checked the judge against people:
+
+```
+Judges
+  helpful      calibrated 3 days ago: Spearman 0.82 on 60 items (claude-opus-5)
+  consistency  not calibrated: its scores haven't been checked against people (`assay calibrate`)
+```
+
+`[calibrate] field` says which check the calibrated judge is. A calibration older than 30 days is
+marked stale, one that regressed says not to lean on the scores, and one made for another judge
+model than the one that scored this run says so. The PR comment has the same list.
 
 `assay calibrate --baseline none` starts over, `--baseline ID` compares with a given one, and
 `--format json` gives it all as data.
