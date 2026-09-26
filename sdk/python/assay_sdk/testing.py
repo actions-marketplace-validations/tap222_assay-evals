@@ -123,6 +123,21 @@ def _max(run, key: str) -> int:
                 for s in run.steps if s["kind"] == "llm"), default=0)
 
 
+def _false_success(run) -> Optional[str]:
+    from assay_sdk.checks import claims_success
+    claim = claims_success(run.answer_text or "")
+    if claim is None:
+        return None
+    calls = tool_calls(run)
+    for i, c in enumerate(calls):
+        if c.get("error") and not any(d["name"] == c["name"] and not d.get("error") for d in calls[i + 1:]):
+            return f"The answer says “{claim}”, but {_call(c)} failed and was never done."
+    offered = any(s.get("tools") for s in run.steps if s["kind"] == "llm")
+    if offered and not any(s["kind"] in ("tool", "state") for s in run.steps):
+        return f"The answer says “{claim}”, but no tool was called and nothing changed."
+    return None
+
+
 class Expectations:
     """What a run should do, beyond its answer. Declare them anywhere in the test, even before the
     agent runs; they're checked when the test ends, and every one that fails is reported, not just
@@ -209,6 +224,70 @@ class Expectations:
             return (f"The run's outcome is {o}, not resolved." if o else
                     "The run has no outcome: call run.outcome(\"resolved\") when it resolves the request.")
         return self._add("must_resolve()", rule)
+
+    def well_formed_arguments(self) -> "Expectations":
+        """Every tool call's arguments fit the tool's input schema (the definition the model was given):
+        nothing required missing, the right types, values in the enum, no fields the tool doesn't take."""
+        def rule():
+            from assay_sdk.checks import arg_problems
+            bad = []
+            for c in tool_calls(self.run):
+                schema = self.run.tool_schemas.get(c["name"])
+                p = arg_problems(schema, c.get("args") or {}) if schema else []
+                if p:
+                    bad.append(f"{c['name']} at step {c['seq']}: {', '.join(p)}")
+            return ("Malformed arguments: " + "; ".join(bad) + ".") if bad else None
+        return self._add("well_formed_arguments()", rule)
+
+    def no_false_success(self) -> "Expectations":
+        """The answer doesn't say an action was done when the tool for it failed (and wasn't retried
+        successfully), or when no tool ran at all."""
+        return self._add("no_false_success()", lambda: _false_success(self.run))
+
+    def handles_failure(self, max_retries: int = 2) -> "Expectations":
+        """After a tool failed or came back empty (assay.faults() makes it happen): the answer doesn't
+        claim success, no tool is retried more than max_retries times, and the user is told (or the run
+        is escalated, or a retry worked)."""
+        def rule():
+            calls = tool_calls(self.run)
+            hit = [c for c in calls if c.get("error") or c.get("fault")]
+            if not hit:
+                return "No tool failed or came back empty: inject one with assay.faults(tool=\"error\")."
+            why = _false_success(self.run)
+            if why:
+                return why
+            for name in {c["name"] for c in hit}:
+                n = sum(1 for c in calls if c["name"] == name)
+                if n > max_retries + 1:
+                    return f"{name} was called {n} times after it failed; at most {max_retries} retries expected."
+            from assay_sdk.checks import says_it_failed
+            recovered = all(any(d["name"] == c["name"] and not d.get("error") and not d.get("fault")
+                                for d in calls[calls.index(c) + 1:]) for c in hit)
+            told = says_it_failed(self.run.answer_text) or self.run.outcome_value in ("unresolved", "escalated")
+            if not (recovered or told):
+                return ("The answer doesn't tell the user anything went wrong: "
+                        f"{(self.run.answer_text or '(no answer)')[:160]!r}.")
+            return None
+        return self._add(f"handles_failure({max_retries})", rule)
+
+    def checkpoint(self, name: str, rule: Optional[Callable[[Any], bool]] = None, *, tool: Optional[str] = None,
+                   args: Optional[dict] = None, result: str = "ok", answer: Optional[str] = None) -> "Expectations":
+        """A goal checkpoint of a long workflow, passing or failing on its own: rule(run) -> bool, or a
+        tool call (tool=, args= partial, result= "ok" | "nonempty"), or text the answer has."""
+        def check():
+            if rule is not None:
+                return None if rule(self.run) else "not met"
+            if tool is not None:
+                same = [c for c in tool_calls(self.run) if c["name"] == tool and _matches(c, args or {})]
+                ok = [c for c in same if not c.get("error") and (result != "nonempty" or c.get("result") not in
+                                                                (None, [], {}, ""))]
+                return None if ok else (f"{tool} was never called" + (f" with {args}" if args else "") if not same else
+                                        f"{tool} failed: {same[-1]['error']}" if same[-1].get("error") else
+                                        f"{tool} returned nothing")
+            if answer is not None:
+                return None if answer.lower() in (self.run.answer_text or "").lower() else f"the answer doesn't say {answer!r}"
+            return "give rule=, tool= or answer="
+        return self._add(f"checkpoint({name})", check)
 
     def failures(self) -> List[str]:
         """Every expectation that doesn't hold, as "name: why"."""

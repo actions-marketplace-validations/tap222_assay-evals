@@ -231,6 +231,8 @@ class ReferenceEvent(Event):
         default_factory=list, description='End-state assertions: {"object": "refund:*", "exists": false} or '
                                           '{"object": "order:1001", "field": "qty", "equals": 2}')
     max_steps: Optional[int] = Field(None, ge=1)
+    split: bool = Field(False, description="Check the tool calls in parts too: tool_choice, tool_args, tool_results")
+    checkpoints: List[Dict[str, Any]] = Field(default_factory=list, max_length=50, description='Goal checkpoints of a long workflow, in order, each passing or failing on its own: {"name": "availability checked", "tool": "check_availability", "args": {...}, "result": "ok" | "nonempty"}, or {"name", "state": {"object", "exists" | "field" + "equals"}}, or {"name", "answer": "text it contains"}')
 
 
 class CallEvent(Event):

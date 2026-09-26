@@ -142,6 +142,11 @@ Send passes too: they're what failures are compared against.
 `run_id`, `field` (required; dotted paths like `line_items.0.total`), `expected`,
 `observed`, `kind` (`wrong` \| `missing` \| `extra`), `reporter`.
 
+### Step fields for agent diagnostics
+`tool_schemas` on an `llm` step: the input schema of each tool offered, `{name: schema}`, sent once per
+run and tool; tool calls are checked against it. `fault` on a `tool` step: the fault `assay.faults()`
+injected (`empty`, `error`, `timeout`, `return`). An `expect` event takes `checkpoints` and `split`.
+
 ### `claim_review`: an expert's decision on one claim
 `run_id`, `claim`, `verdict` (required: `supported` \| `wrong` \| `conflict_resolved` \| `unsure`),
 `evidence` (the sources checked, `[{"id", "text" | "uri"}]`), `correction` (what the claim should

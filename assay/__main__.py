@@ -145,6 +145,12 @@ def main(argv=None) -> int:
     gg.add_argument("--vs", help="Another judge's check: pick the runs the two scored furthest apart")
     gg.add_argument("--disagree", action="store_true",
                     help="Pick runs the judge passed but a deterministic check failed")
+    mx = sub.add_parser("matrix", help="Transition failure matrix of a test run: the last step that went right "
+                                       "against the first that failed")
+    mx.add_argument("--run", help="A test run (default: the latest)")
+    mx.add_argument("--baseline", help="Another run, to see which transition got worse")
+    mx.add_argument("--task")
+    mx.add_argument("--format", choices=["text", "json"], default="text")
     tg = sub.add_parser("triage", help="For each failure category: fix the prompt, a code check, or (if it persists) "
                                        "a judge; drafts the code checks")
     tg.add_argument("--url")
@@ -250,6 +256,10 @@ def main(argv=None) -> int:
         from pathlib import Path
         from assay import diff
         return diff.main(Path.cwd(), args.baseline, args.current, args.format)
+    if args.cmd == "matrix":
+        from pathlib import Path
+        from assay import transitions
+        return transitions.cli(Path.cwd(), args.run, args.baseline, args.task, args.format)
     if args.cmd == "triage":
         from pathlib import Path
         from assay import triage

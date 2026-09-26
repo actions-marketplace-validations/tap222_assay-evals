@@ -39,6 +39,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional
 
+from assay_sdk.faults import call as _fault_call, of as _fault_of
+
 log = logging.getLogger("assay_sdk")
 _stage: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar("assay_stage", default=None)
 MAX_TEXT = 2000
@@ -128,11 +130,11 @@ def tool(name: Any = None, *, server: Optional[str] = None):
     def deco(fn: Callable) -> Callable:
         label = name if isinstance(name, str) else fn.__name__
 
-        def record(run, args, kwargs, started, out=None, exc=None):
+        def record(run, args, kwargs, started, out=None, exc=None, fault=None):
             try:
                 run.tool(label, _arguments(fn, args, kwargs), None if exc else out,
                          error=f"{type(exc).__name__}: {exc}"[:2000] if exc else None, started=started,
-                         ended=datetime.now(timezone.utc), server=server)
+                         ended=datetime.now(timezone.utc), server=server, fault=fault or _fault_of(exc))
             except Exception:  # recording must never break the tool
                 log.debug("Assay couldn't record tool %s", label, exc_info=True)
 
@@ -140,30 +142,32 @@ def tool(name: Any = None, *, server: Optional[str] = None):
             @functools.wraps(fn)
             async def awrapper(*args, **kwargs):
                 run = _sdk().current()
-                if run is None:
-                    return await fn(*args, **kwargs)
                 started = datetime.now(timezone.utc)
                 try:
-                    out = await fn(*args, **kwargs)
+                    out, fault = _fault_call(label, fn, args, kwargs)
+                    if inspect.isawaitable(out):
+                        out = await out
                 except Exception as exc:
-                    record(run, args, kwargs, started, exc=exc)
+                    if run is not None:
+                        record(run, args, kwargs, started, exc=exc)
                     raise
-                record(run, args, kwargs, started, out)
+                if run is not None:
+                    record(run, args, kwargs, started, out, fault=fault)
                 return out
             return awrapper
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             run = _sdk().current()
-            if run is None:
-                return fn(*args, **kwargs)
             started = datetime.now(timezone.utc)
             try:
-                out = fn(*args, **kwargs)
+                out, fault = _fault_call(label, fn, args, kwargs)
             except Exception as exc:
-                record(run, args, kwargs, started, exc=exc)
+                if run is not None:
+                    record(run, args, kwargs, started, exc=exc)
                 raise
-            record(run, args, kwargs, started, out)
+            if run is not None:
+                record(run, args, kwargs, started, out, fault=fault)
             return out
         return wrapper
     return deco(name) if callable(name) else deco
@@ -220,10 +224,8 @@ def _reading(provider: str):
     def read(kwargs: dict, resp: Any) -> dict:
         from assay_sdk.llm import normalize
         r = normalize(resp, provider)
-        offered = []
-        for t in kwargs.get("tools") or []:
-            if isinstance(t, dict):
-                offered.append(t.get("name") or (t.get("function") or {}).get("name"))
+        offered = [t for t in kwargs.get("tools") or []  # the definitions: names, and the schemas to check calls with
+                   if isinstance(t, dict) and (t.get("name") or (t.get("function") or {}).get("name"))]
         from assay_sdk.runtime import cost_of, env_prices
         if r.model is None and kwargs.get("model"):
             r.model = kwargs["model"]

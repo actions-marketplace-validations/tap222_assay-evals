@@ -322,6 +322,8 @@ agent_steps = Table(
     Column("tokens_out", Integer),  # a model call's output
     Column("prompt", String(192)),  # the prompt a model call used, id@version
     Column("server", String(128)),  # the MCP server a tool call, resource read or prompt went to
+    Column("tool_schemas", JSON),  # llm: input schemas of the tools offered (sent once per run and tool)
+    Column("fault", String(16)),  # tool: a fault injected by assay.faults()
     Column("finish_reason", String(24)),  # a model call's: stop | length | tool_call | refusal | content_filter | error
     Column("tool_calls", JSON),  # the tool calls a model asked for: [{"name", "arguments", "id"}]
     Column("tokens_cached", Integer),
@@ -466,6 +468,8 @@ agent_references = Table(
     Column("answer_match", String(16)),  # contains | equals
     Column("state", JSON),  # [{"object", "exists" | "field" + "equals"}], objects may use * wildcards
     Column("max_steps", Integer),
+    Column("checkpoints", JSON),  # [{"name", "tool" + "args" + "result" | "state" | "answer"}]: goal milestones
+    Column("split", Boolean),  # the tool calls checked in parts too: choice, arguments, results
     Column("updated_at", DateTime, nullable=False),
 )
 

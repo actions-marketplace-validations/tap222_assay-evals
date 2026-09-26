@@ -51,7 +51,9 @@ CHECK_NAMES = {"plan_quality": "Plan quality", "consistency": "Consistency", "co
                "plan": "Plan adherence", "injection": "Prompt injection", "max_fragments": "Fragments per query",
                "max_retrieved_tokens": "Retrieved tokens per query", "max_context_tokens": "Prompt size",
                "faithfulness": "Faithfulness", "context_relevance": "Context relevance",
-               "max_fixed_context_tokens": "Fixed context per call"}
+               "max_fixed_context_tokens": "Fixed context per call", "tool_choice": "Tool choice",
+               "tool_args": "Tool arguments", "tool_results": "Tool results", "arguments": "Well-formed arguments",
+               "claimed_success": "Claimed success", "context_retention": "Context retention"}
 PII_EVALUATOR = "assay.pii@1"
 
 CONFIG_TEMPLATE = '''\
@@ -513,6 +515,7 @@ def as_trajectory(steps: List[dict], answer: Optional[str]) -> dict:
                     {"steps": s.get("plan")} if kind == "plan" else
                     schema.retrieval_args(s.get("query"), s.get("fragments")) if kind == "retrieval" else s.get("args"),
                     "tokens_in": s.get("tokens_in"), "tools": s.get("tools"), "context": s.get("context"),
+                    "tool_schemas": s.get("tool_schemas"), "fault": s.get("fault"), "tool_calls": s.get("tool_calls"),
                     "media": s.get("media"), "settings": s.get("settings"),
                     "result": s.get("value") if state else s.get("fragments") if kind == "retrieval" else
                     s.get("result"), "error": s.get("error"),
@@ -532,7 +535,8 @@ def check_run(steps: List[dict], expected: Optional[dict], answer: Optional[str]
     if expected:
         ref = {"calls": expected.get("calls") or [], "answer": expected.get("answer"),
                "answer_match": expected.get("answer_match") or "contains", "state": expected.get("state") or [],
-               "allow_extra": expected.get("allow_extra") or [], "max_steps": expected.get("max_steps")}
+               "allow_extra": expected.get("allow_extra") or [], "max_steps": expected.get("max_steps"),
+               "checkpoints": expected.get("checkpoints") or [], "split": bool(expected.get("split"))}
     rules = [{"severity": "critical", **c} for c in cfg["contracts"]]
     by_reason: Dict[str, List[str]] = {}  # one line per reason: several checks often share one
     for c in agents.checks_for(traj, ref, rules):

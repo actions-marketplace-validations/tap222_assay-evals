@@ -91,6 +91,11 @@ class Step(_E):
     prompt: Optional[str] = Field(None, max_length=192, description="id@version")
     text: Optional[str] = Field(None, max_length=32768)
     tools: Optional[List[str]] = Field(None, max_length=500, description="llm: the tools the model was offered")
+    tool_schemas: Optional[Dict[str, Dict[str, Any]]] = Field(
+        None, description="llm: the input schema of each tool offered, sent once per run: tool calls are checked "
+                          "against it")
+    fault: Optional[Literal["empty", "error", "timeout", "return"]] = Field(
+        None, description="tool: a fault assay.faults() injected in place of the call")
     finish_reason: Optional[str] = Field(None, max_length=24, description="llm: stop, length, tool_call, refusal, "
                                                                           "content_filter or error")
     tool_calls: Optional[List[Dict[str, Any]]] = Field(None, max_length=200, description="llm: the tool calls the "
@@ -271,6 +276,9 @@ class Expect(_E):
     answer_match: Literal["contains", "equals"] = "contains"
     state: List[Dict[str, Any]] = Field(default_factory=list)
     max_steps: Optional[int] = Field(None, ge=1)
+    split: bool = Field(False, description="Check the tool calls in parts too: tool_choice, tool_args, tool_results")
+    checkpoints: List[Dict[str, Any]] = Field(default_factory=list, max_length=50,
+                                              description="Goal checkpoints, each checked on its own (see /v1/agents/references)")
 
 
 class PromptVersion(_E):
@@ -392,7 +400,7 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                         "tokens_in": e.tokens_in, "tokens_out": e.tokens_out, "prompt": e.prompt, "tools": e.tools,
                         "finish_reason": e.finish_reason, "tool_calls": e.tool_calls, "tokens_cached": e.tokens_cached,
                         "tokens_reasoning": e.tokens_reasoning, "context": e.context, "media": e.media,
-                        "settings": e.settings,
+                        "settings": e.settings, "tool_schemas": e.tool_schemas, "fault": e.fault,
                         "result": e.value if e.kind == "state" else e.fragments if e.kind == "retrieval" else e.result,
                         "error": e.error if e.status == "error" else None, "text": e.text, "model": e.model,
                         "tokens": tokens or None, "cost_usd": e.cost_usd, "started_at": e.ts,
@@ -436,7 +444,9 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
             elif isinstance(e, Expect):
                 rows["refs"].append({"tenant": tenant, "case_id": e.case, "calls": e.calls,
                                      "allow_extra": e.allow_extra, "answer": e.answer, "answer_match": e.answer_match,
-                                     "state": e.state or None, "max_steps": e.max_steps, "updated_at": e.ts})
+                                     "state": e.state or None, "max_steps": e.max_steps,
+                                     "checkpoints": e.checkpoints or None, "split": e.split or None,
+                                     "updated_at": e.ts})
         _upsert(conn, engine, runs_t, _merge(rows["runs"], "run_id"), ["tenant", "run_id"])
         _upsert(conn, engine, store.event_documents, _merge(rows["docs"], "document_id"), ["tenant", "document_id"])
         _upsert(conn, engine, store.trace_inputs, rows["inputs"], ["tenant", "trace_id"])

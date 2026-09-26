@@ -276,6 +276,7 @@ class Run:
         self.started, self.ended = time.monotonic(), None  # for the run's latency
         self.expectations: List[Any] = []  # assay_sdk.testing.expect(run): checked when the test ends
         self.request: Any = None  # what the run was asked (input=): personal data it gave may be said back
+        self.tool_schemas: Dict[str, dict] = {}  # the input schema of each tool a model was offered
 
     def _case(self) -> Dict[str, Any]:
         if not self.test:
@@ -321,7 +322,11 @@ class Run:
             p = price_of(env_prices(), model)
             if p:
                 cost_usd = round(((tokens_in or 0) * p[0] + (tokens_out or 0) * p[1]) / 1e6, 8)
+        from assay_sdk.checks import tool_schemas
+        schemas = {k: v for k, v in tool_schemas(tools).items() if self.tool_schemas.get(k) != v}
+        self.tool_schemas.update(schemas)  # sent once per run and tool, not with every call
         self._step("llm", started, name=name, finish_reason=finish_reason, tool_calls=self._c.clean(tool_calls),
+                   tool_schemas=schemas or None,
                    tokens_cached=tokens_cached, tokens_reasoning=tokens_reasoning, model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
                    prompt=prompt, text=self._c.clean(text), ended_at=_ts(ended),
                    status="error" if error else "ok", error=error, tools=_tool_names(tools),
@@ -338,11 +343,13 @@ class Run:
         self.outcome_value = value
 
     def tool(self, name: str, args: Optional[Dict[str, Any]] = None, result: Any = None, error: Optional[str] = None,
-             started: Optional[datetime] = None, ended: Optional[datetime] = None, server: Optional[str] = None) -> None:
-        """A tool call you've already made. server: the MCP server it went to, if any."""
+             started: Optional[datetime] = None, ended: Optional[datetime] = None, server: Optional[str] = None,
+             fault: Optional[str] = None) -> None:
+        """A tool call you've already made. server: the MCP server it went to, if any. fault: the fault
+        assay.faults() injected in its place (empty, error, timeout, return)."""
         from assay_sdk.llm import normalize_args  # a JSON string, a list, a value: never rejected
         self._step("tool", started, name=name, args=self._c.clean(normalize_args(args)), result=self._c.clean(result),
-                   ended_at=_ts(ended), status="error" if error else "ok", error=error, server=server)
+                   ended_at=_ts(ended), status="error" if error else "ok", error=error, server=server, fault=fault)
 
     def resource(self, uri: str, contents: Any = None, server: Optional[str] = None, error: Optional[str] = None,
                  started: Optional[datetime] = None, ended: Optional[datetime] = None) -> None:
@@ -382,14 +389,15 @@ class Run:
     def call(self, name: str, fn: Callable, *positional, **args):
         """Call fn(*positional, **args), record it as a tool call (result or error, and timing), and
         return its result. Exceptions are recorded, then re-raised."""
+        from assay_sdk.faults import call as fault_call, of as fault_of
         started = datetime.now(timezone.utc)
         try:
-            out = fn(*positional, **args)
+            out, fault = fault_call(name, fn, positional, args)
         except Exception as e:
             self.tool(name, args, error=f"{type(e).__name__}: {e}"[:2000], started=started,
-                      ended=datetime.now(timezone.utc))
+                      ended=datetime.now(timezone.utc), fault=fault_of(e))
             raise
-        self.tool(name, args, out, started=started, ended=datetime.now(timezone.utc))
+        self.tool(name, args, out, started=started, ended=datetime.now(timezone.utc), fault=fault)
         return out
 
     def state(self, obj: str, op: str = "update", value: Any = None) -> None:
@@ -593,10 +601,15 @@ def claim_review(run_id: str, claim: str, verdict: str, *, evidence: Optional[Li
 
 def expect(case: str, *, calls: Optional[List[Dict[str, Any]]] = None, answer: Optional[str] = None,
            state: Optional[List[Dict[str, Any]]] = None, allow_extra: Optional[List[str]] = None,
-           max_steps: Optional[int] = None, answer_match: str = "contains") -> None:
-    """What a test case should do: the tool calls, the answer, and the end state."""
+           max_steps: Optional[int] = None, answer_match: str = "contains",
+           checkpoints: Optional[List[Dict[str, Any]]] = None, split: bool = False) -> None:
+    """What a test case should do: the tool calls, the answer, the end state, and goal checkpoints
+    ([{"name": "listings retrieved", "tool": "search_listings", "result": "nonempty"}, ...]), each
+    checked on its own. split=True checks the tool calls in parts too: the tools chosen, their arguments,
+    and whether they worked."""
     _c().emit({"type": "expect", "case": case, "calls": calls or [], "answer": answer, "answer_match": answer_match,
-               "state": state or [], "allow_extra": allow_extra or [], "max_steps": max_steps})
+               "state": state or [], "allow_extra": allow_extra or [], "max_steps": max_steps,
+               "checkpoints": checkpoints or [], "split": split})
 
 
 def flush() -> bool:
@@ -622,3 +635,5 @@ from assay_sdk.runtime import EvalRuntime, Report, Sample  # noqa: E402
 from assay_sdk.faithfulness import faithfulness  # noqa: E402
 from assay_sdk.simulate import Persona, Simulation, load_personas, simulate  # noqa: E402
 from assay_sdk.golden import golden_examples  # noqa: E402
+# Breaking tools on purpose, to test error handling (assay_sdk/faults.py).
+from assay_sdk.faults import ToolFault, faults  # noqa: E402

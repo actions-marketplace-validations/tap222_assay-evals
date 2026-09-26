@@ -147,6 +147,10 @@ measured on: `golden_examples(split="train", k=8)` returns them with their label
 and `assay calibrate` fails a judge that read dev or test (see
 [calibration](../../docs/calibration.md)).
 
+`with assay.faults(get_order="error"):` breaks a tool on purpose, and
+`expect(run).handles_failure()`, `.no_false_success()`, `.well_formed_arguments()` and
+`.checkpoint(name, ...)` check what the agent did about it (see [agents](../../docs/agents.md)).
+
 `assay.claim_review(run_id, claim, verdict, evidence=..., correction=..., by=...)` records an
 expert's decision on one claim (supported, wrong, a conflict between sources resolved), made while
 they use the product. A run tagged `consent="shared"` is one its user agreed to share. See

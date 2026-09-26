@@ -1319,6 +1319,21 @@ function lifecyclePanel(l){
           .map(([why,checks])=>`<div><b>${esc([...new Set(checks)].join(", "))}</b> <span class="ref">${esc(why)}</span></div>`).join("")}</td><td class="ref">${esc(r.evaluated_at.slice(0,16).replace("T"," "))}</td></tr>`).join("")}</table></div>`
       :`<p class="note">${l.evaluated?"No evaluated run failed a check.":"No run has ended yet."}</p>`}</div>`;
 }
+async function agentMatrix(el,run,baseline){
+  const m=await api(`/v1/agents/matrix?${q({source:src(),run,baseline})}`).catch(()=>null);
+  if(!m||!m.cells.some(c=>c.count||c.change)){el.innerHTML="";return}
+  const at={};m.cells.forEach(c=>at[c.from+"\u0000"+c.to]=c);
+  const rows=m.states.filter(s=>m.cells.some(c=>c.from===s)),cols=m.states.filter(s=>m.cells.some(c=>c.to===s));
+  const top=Math.max(...m.cells.map(c=>c.count),1);
+  const cell=(r,k)=>{const c=at[r+"\u0000"+k];if(!c)return`<td class="ref" style="text-align:center">·</td>`;
+    const ch=m.baseline&&c.change?` <span class="${c.change>0?"worse":"better"}">${c.change>0?"+":""}${c.change}</span>`:"";
+    return`<td style="text-align:center;background:color-mix(in srgb,var(--bad) ${Math.round(c.count/top*45)}%,transparent)" title="${esc(Object.entries(c.how).map(([h,n])=>h+" "+n).join(", "))}">${c.count}${ch}</td>`};
+  const hot=(m.baseline?m.worse:m.hotspots)||[];
+  el.innerHTML=`<h3 style="margin:14px 0 6px">Transition failures</h3><p class="sub">Rows: the last step that went right. Columns: the first that failed (goal checkpoints, where a case has them). ${m.failed} of ${m.runs} runs failed${m.baseline?`; the change is against ${esc(m.baseline)}`:""}.</p>
+    <div class="scroll"><table><tr><th>last ok \\ failed</th>${cols.map(k=>`<th class="mono">${esc(k)}</th>`).join("")}</tr>
+    ${rows.map(r=>`<tr><th class="mono" style="text-align:left">${esc(r)}</th>${cols.map(k=>cell(r,k)).join("")}</tr>`).join("")}</table></div>
+    ${hot.length?`<p class="note">${m.baseline?"Got worse":"Where most fail"}: ${hot.map(c=>`<b class="mono">${esc(c.from)} → ${esc(c.to)}</b> ${c.count}${m.baseline?` (${c.change>0?"+":""}${c.change})`:""}`).join(" · ")}</p>`:""}`;
+}
 async function renderAgents(){
   const box=$("#tab-agents");
   const [runs,life]=await Promise.all([api(`/v1/agents/runs?${q({source:src()})}`).catch(()=>[]),
@@ -1348,6 +1363,7 @@ async function renderAgents(){
       ${Object.keys(c.mechanisms).length?`<div class="kindbar">${Object.entries(c.mechanisms).map(([m,n])=>`<i style="width:${n/mechTotal*100}%;background:${MECH[m][1]}" title="${esc(MECH[m][0])}: ${n}"></i>`).join("")}</div>
       <div class="legend">${Object.entries(c.mechanisms).map(([m,n])=>`<span><i style="background:${MECH[m][1]}"></i>${esc(MECH[m][0])} · ${n}${p&&p.mechanisms[m]!=null?` <span class="ref">(was ${p.mechanisms[m]})</span>`:p?` <span class="ref">(new)</span>`:""}</span>`).join("")}</div>
       <p class="note"><a href="#failures" id="to-causes">See these grouped into causes, with the release call →</a></p>`:`<p class="note">No failing runs.</p>`}</div>
+    <div id="agent-matrix"></div>
   </div>
   <div class="two"><div class="panel"><h2>Efficiency</h2><p class="sub">Average per run. Getting to the same answer by a different path isn't a regression; getting there with twice the steps might be.</p>
       <table style="margin-top:8px"><tr><th>Measure</th><th class="num">Before</th><th class="num">Now</th><th class="num">Change</th></tr>
@@ -1361,6 +1377,7 @@ async function renderAgents(){
       ${Object.keys(CHECK_LABEL).map(k=>`<td>${t.checks[k]==null?"":`<span class="okx ${t.checks[k]==="pass"?"y":"n"}">${t.checks[k]==="pass"?"✓":"✗"}</span>`}</td>`).join("")}
       <td class="num">${t.steps}</td><td class="num">${money(t.cost_usd)}</td></tr>`).join("")}</table></div></div>`;
   $("#agent-run").onchange=e=>{store.set("assay-agent-run",e.target.value);renderAgents()};
+  agentMatrix($("#agent-matrix"),run,s.baseline||undefined);
   $("#agent-bad").onchange=e=>{store.set("assay-agent-bad",e.target.checked?"1":"0");renderAgents()};
   $("#agent-eval").onclick=async e=>{const b=e.target;b.disabled=true;b.textContent="Evaluating…";
     try{await api(`/v1/agents/runs/${encodeURIComponent(run)}/evaluate?${q({source:src()})}`,{method:"POST"});renderAgents()}catch(err){b.textContent=err.message}};

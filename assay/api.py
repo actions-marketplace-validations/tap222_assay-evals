@@ -669,6 +669,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, f"No trajectories in run '{run_id}' for {source}.")
         return out
 
+    @app.get("/v1/agents/matrix", tags=["results"],
+             summary="Transition failure matrix: the last state that went right against the first that failed")
+    def agents_matrix(source: str, run: Optional[str] = None, baseline: Optional[str] = None,
+                      task: Optional[str] = None, days: float = 30, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        from assay import transitions
+        if run is None:  # from the first failures people marked in the Review tab
+            return transitions.of_review(engine, _tenant(source), days)
+        src_ = runner.CachedSource(resolve(p, source))
+        now = transitions.of_run(engine, src_, _tenant(source), run, task)
+        return transitions.compare(now, transitions.of_run(engine, src_, _tenant(source), baseline, task)) \
+            if baseline else now
+
     @app.get("/v1/agents/runs/{run_id}", tags=["results"],
              summary="Pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline")
     def agent_run_summary(run_id: str, source: str, baseline: Optional[str] = None,

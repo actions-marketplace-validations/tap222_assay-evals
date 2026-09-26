@@ -1,0 +1,97 @@
+"""Step-level checks shared by the SDK's expectations and the server's evaluation.
+
+  arg_problems      a tool call's arguments against the tool's own input schema (the definition the
+                    model was given): required fields missing, wrong types, values outside an enum,
+                    fields the schema doesn't have
+  claims_success    whether an answer says an action was done ("Your order has been cancelled")
+  says_it_failed    whether an answer tells the user something didn't work
+"""
+from __future__ import annotations
+
+import re
+from typing import Any, Dict, List, Optional
+
+_TYPES = {"string": (str,), "integer": (int,), "number": (int, float), "boolean": (bool,), "array": (list, tuple),
+          "object": (dict,), "null": (type(None),)}
+
+
+def tool_schemas(tools: Optional[List[Any]]) -> Dict[str, dict]:
+    """{name: input schema} from tool definitions as providers take them: Anthropic's input_schema,
+    OpenAI's function parameters (or a flat {"name", "parameters"}), MCP's inputSchema."""
+    out = {}
+    for t in tools or []:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") if isinstance(t.get("function"), dict) else t
+        name = fn.get("name")
+        schema = fn.get("input_schema") or fn.get("parameters") or fn.get("inputSchema")
+        if name and isinstance(schema, dict):
+            out[str(name)[:128]] = schema
+    return out
+
+
+def _type_ok(value: Any, kind: Any) -> bool:
+    kinds = kind if isinstance(kind, list) else [kind]
+    for k in kinds:
+        py = _TYPES.get(k)
+        if py is None:
+            return True  # a type this checker doesn't know: not a problem it can see
+        if isinstance(value, bool) and k in ("integer", "number"):
+            continue
+        if isinstance(value, py):
+            return True
+    return False
+
+
+def arg_problems(schema: Optional[dict], args: Any, path: str = "") -> List[str]:
+    """What's wrong with the arguments, as the schema says: ["order_id is missing", ...]. [] when fine."""
+    if not isinstance(schema, dict):
+        return []
+    out = []
+    if schema.get("type") and not _type_ok(args, schema["type"]):
+        return [f"{path or 'the arguments'} should be {schema['type']}, got {type(args).__name__}"]
+    if "enum" in schema and args not in schema["enum"]:
+        return [f"{path or 'the value'} is {args!r}, not one of {', '.join(map(repr, schema['enum'][:8]))}"]
+    if isinstance(args, dict):
+        props = schema.get("properties") or {}
+        for k in schema.get("required") or []:
+            if k not in args or args[k] is None:
+                out.append(f"{path + k} is missing")
+        if schema.get("additionalProperties") is False:
+            out += [f"{path + k} isn't a field the tool takes" for k in args if k not in props]
+        for k, v in args.items():
+            if k in props and v is not None:
+                out += arg_problems(props[k], v, f"{path + k}.")
+    elif isinstance(args, (list, tuple)) and isinstance(schema.get("items"), dict):
+        for i, v in enumerate(args[:50]):
+            out += arg_problems(schema["items"], v, f"{path}{i}.")
+    return [p.replace(". should", " should").replace(". is ", " is ").rstrip(".") for p in out]
+
+
+_DONE = re.compile(r"\b(?:successfully|has been|have been|is now|was|were|I've|I have|we've)\s+(?:\w+\s+){0,2}?"
+                   r"(?:cancel+ed|refunded|booked|scheduled|sent|deleted|removed|updated|changed|confirmed|processed|"
+                   r"completed|created|submitted|placed|paid|issued|reset|added|saved|approved|transferred)\b|"
+                   r"\b(?:cancel+ed|refunded|booked|scheduled|sent|deleted|processed|issued|submitted) (?:it|your|the)\b|"
+                   r"\b(?:done|all set)\b[.!]", re.I)
+_NOT = re.compile(r"\b(?:not|n't|couldn't|could not|unable|failed|fail|won't|cannot|can't|wasn't|haven't|hasn't|"
+                  r"didn't|error|problem|unfortunately|sorry)\b", re.I)
+_FAILED = re.compile(r"\b(?:couldn't|could not|unable to|wasn't able|weren't able|failed|isn't available|"
+                     r"not available|unavailable|no results|didn't find|did not find|couldn't find|can't|cannot|"
+                     r"something went wrong|try again|error|sorry|unfortunately|having trouble|no longer)\b", re.I)
+
+
+def _sentences(text: str) -> List[str]:
+    return [s for s in re.split(r"(?<=[.!?])\s+|\n+", text or "") if s.strip()]
+
+
+def claims_success(answer: Optional[str]) -> Optional[str]:
+    """The sentence where the answer says an action was done, or None. A sentence that says it wasn't
+    ("couldn't be cancelled") isn't a claim."""
+    for s in _sentences(answer or ""):
+        if _DONE.search(s) and not _NOT.search(s):
+            return s.strip()[:200]
+    return None
+
+
+def says_it_failed(answer: Optional[str]) -> bool:
+    return bool(_FAILED.search(answer or ""))

@@ -123,13 +123,14 @@ itself was a good one needs a judge; this checks only that it was followed.
 ### An LLM judge: was the plan a good one, and does the run hang together?
 
 Rules can check that a plan was followed. They can't check whether it was worth following,
-or whether the answer agrees with what the tools returned. An LLM judge scores both, 1 to 5,
-with a reason that names the step it rests on:
+or whether the answer agrees with what the tools returned. An LLM judge decides each, PASS or
+FAIL, with a critique that names the step it rests on:
 
 | Check | What the judge looks at |
 |---|---|
 | **Plan quality** | whether the plan, given the request and the tools offered, addresses what was asked, in a workable order, without steps it didn't need. Only for runs that record a plan |
 | **Consistency** | whether the reasoning, the tool results and the answer agree: nothing contradicted, nothing stated as fact that no step established |
+| **Context retention** | in a conversation, whether later answers and tool calls keep what the user said earlier ("I'm vegan"). Only for runs with more than one user message; each dropped constraint is quoted from what the user said, and a quote that isn't there makes the verdict INVALID |
 
 ```bash
 pip install anthropic                       # and ANTHROPIC_API_KEY, or `ant auth login`
@@ -214,6 +215,78 @@ the text, not taken on trust.
 Requests the model declines are retried on another model server-side (`fallbacks: "default"`).
 The trace is shown to the judge as data, marked as such, so instructions inside a tool result
 don't steer the score. Long tool results are cut, and the cut is marked.
+
+### Step by step: where an agentic workflow fails, and why
+
+First the whole task: did the run meet the user's goal (the answer, the end state, `success=` for
+a simulated user, `must_resolve()`, or a calibrated judge)? Then, where error analysis says a
+workflow fails most, the steps.
+
+**Tool calls in parts.** `"split": true` on a case's reference (or `assay.expect(case, split=True)`)
+checks the tool calls in parts, each passing or failing on its own: `tool_choice` (the expected
+tools, and no others), `tool_args` (called with the right arguments), `tool_results` (every expected
+call worked). The resulting state is `end_state`. Without it, `tool_calls` is one check for all three.
+
+**Well-formed arguments.** The input schema of each tool a model was offered is recorded with the
+run (`assay.instrument()` takes it from the request; `run.llm(tools=[definitions])` otherwise).
+Every call is checked against it (`arguments`): required fields missing, wrong types, values outside
+an enum, fields the tool doesn't take. It needs no reference, so production traces are checked too:
+a malformed call is a failure signal in `assay learn`. `expect(run).well_formed_arguments()` in pytest.
+
+**A claimed success that didn't happen.** When the answer says an action was done ("Your order has
+been cancelled"), `claimed_success` fails if the tool for it failed and was never retried
+successfully, if the end state the reference expects doesn't hold, or if no tool ran at all. Also a
+production signal, and `expect(run).no_false_success()`.
+
+**Goal checkpoints.** A long workflow's milestones, each checked on its own:
+
+```python
+assay.expect("berkeley-viewings", checkpoints=[
+    {"name": "listings retrieved", "tool": "search_listings", "args": {"city": "Berkeley"}, "result": "nonempty"},
+    {"name": "availability checked", "tool": "check_availability"},
+    {"name": "invites sent", "state": {"object": "invite:*", "exists": True}},
+    {"name": "told the user", "answer": "scheduled"}])
+```
+
+Each is a check (`checkpoint.listings retrieved`). In pytest: `expect(run).checkpoint("invites sent",
+tool="send_invite")`, or `checkpoint(name, rule=lambda run: ...)`.
+
+**Error handling, by breaking tools on purpose.**
+
+```python
+with assay.faults(get_order="empty", search="error", calendar="timeout", pay="error:1"):
+    reply = my_agent("Cancel O-17", run=assay_case)
+expect(assay_case).handles_failure(max_retries=2)
+```
+
+For a tool recorded with `@assay.tool` or `run.call`: `empty` returns `[]`, `error` raises, `timeout`
+raises `TimeoutError`, `error:N` fails the first N calls and then calls it for real (does it retry?),
+`{"return": value}` returns that. The step records which fault it was. `handles_failure()` passes when
+the answer doesn't claim success, no tool is retried more than `max_retries` times, and the user is
+told (or the run escalated, or a retry worked).
+
+**Where failures cluster: the transition failure matrix.** Rows are the last step that went right,
+columns the first that failed: the goal checkpoints when a case has them, else the last tool call
+that worked and the first bad step credit assignment found.
+
+```
+assay matrix                          # the latest test run; --run, --task, --format json
+assay matrix --baseline t-0924-1100   # the change in each cell: which transition got worse
+```
+
+```
+4 of 5 runs failed (baseline r0: 2).
+
+last ok / failed  exec_sql  answer
+gen_sql                3+2       .
+exec_sql                 .       1
+
+Got worse:
+  gen_sql → exec_sql: 3 (+2), Tool error, not recovered 3; e.g. a, b, c
+```
+
+It's in the Agents tab under the run, and at `GET /v1/agents/matrix?source=…&run=…&baseline=…`.
+Without `run`, it's built from the first failures people marked in the Review tab.
 
 ### Simulated users: the whole conversation, not one message
 

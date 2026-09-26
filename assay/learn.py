@@ -75,10 +75,10 @@ THRESHOLD = 2.0  # signal weight that makes a trace anomalous
 WEIGHTS = {"contract_critical": 3.0, "contract_warning": 1.0, "reported": 3.0, "feedback": 3.0, "retry": 1.5,
            "failed_step": 2.0, "tool_error": 2.0, "loop": 2.0, "fallback": 1.0, "outlier": 1.0,
            "rare_path": 1.0, "stuck": 1.5, "restated": 2.0, "asked_again": 2.0, "reopened": 3.0, "redone": 3.0,
-           "expert": 3.0}
+           "expert": 3.0, "claimed_success": 3.0, "malformed_args": 2.0}
 SIMILAR = 0.5  # word overlap at which a later request is the same request again
 AGAIN_WITHIN = timedelta(hours=24)
-PRIORITY = ["contract", "reported", "expert", "tool_error", "loop", "failed_step", "reopened", "redone", "feedback", "restated",
+PRIORITY = ["contract", "reported", "expert", "claimed_success", "malformed_args", "tool_error", "loop", "failed_step", "reopened", "redone", "feedback", "restated",
             "asked_again", "fallback", "stuck",
             "outlier_steps", "outlier_seconds", "outlier_cost", "rare_path"]
 INFRA = re.compile(r"time ?out|timed out|connection|refused|unavailable|unreachable|\b5\d\d\b|rate.?limit|"
@@ -405,6 +405,18 @@ def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) 
                         "field": e.field, "expected": e.expected, "observed": e.observed})
         kinds = Counter(fb.get(d_id, []))
         sig += quiet.get(d_id, [])
+        tr = trajs.get(d_id)
+        if tr is not None:  # step-level checks that need no reference
+            from assay import agents
+            fs = agents.false_success(tr)
+            if fs and not fs["passed"]:
+                sig.append({"type": "claimed_success", "weight": WEIGHTS["claimed_success"], "stage": fs.get("tool"),
+                            "key": fs.get("tool") or "answer", "text": fs["detail"]})
+            malformed = agents.argument_problems(tr)
+            if malformed:
+                m = malformed[0]
+                sig.append({"type": "malformed_args", "weight": WEIGHTS["malformed_args"], "stage": m["tool"],
+                            "key": m["tool"], "text": f"Malformed arguments to {m['tool']}: {', '.join(m['problems'][:3])}"})
         if wrong.get(d_id):
             n = len(wrong[d_id])
             sig.append({"type": "expert", "weight": WEIGHTS["expert"], "stage": None, "key": "claim",
@@ -485,7 +497,8 @@ NAMES = {
 }
 
 
-CAUSES = {"contract", "reported", "expert", "tool_error", "loop", "failed_step", "fallback"}
+CAUSES = {"contract", "reported", "expert", "claimed_success", "malformed_args", "tool_error", "loop", "failed_step",
+          "fallback"}
 TASK_RELATIVE = {"outlier_steps", "outlier_seconds", "outlier_cost", "rare_path", "feedback", "stuck", "restated",
                  "asked_again", "reopened", "redone"}
 
