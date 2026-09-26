@@ -878,7 +878,9 @@ says so: evaluation that's stuck is noticed, not silent.
 An LLM judge given the wrong thing still returns a valid-looking score. Real examples:
 `{{generation}}` filled with the trace's input, so the judge grades the user's own question;
 `{{query}}` and `{{generation}}` holding the same text; a template variable nobody filled in;
-the rubric sent as the user's message, so the judge confuses it with the request.
+the rubric sent as the user's message, so the judge confuses it with the request;
+`{{context}}` filled with the request or another run's documents, so a faithfulness judge
+checks the answer against the wrong sources.
 
 Send what the evaluator saw with its result, by role, and Assay checks it against the trace:
 
@@ -895,10 +897,16 @@ assay.check("nightly", "case-17", "pass", run_id=run.id, field="helpful", evalua
 | query and output are the same text | both variables were filled from the same place |
 | a template variable nobody filled in | `{{query}}` or `${input.text}` reached the judge |
 | instructions sent as the user's message | the rubric is in a `user` message and in no `system` one |
+| context isn't what the run retrieved | the run's tools returned documents, and none of the context's passages is among them |
+| context is the run's input | the context is the user's request, not retrieved documents |
+| context is empty | the judge got no context, though the run's tools returned results |
 
 Roles accept the names judges use: `generation`, `response` or `completion` for the output,
-`question` or `input` for the query, `reference` or `ground_truth` for the expected answer,
-`rubric` or `criteria` for the instructions.
+`question` or `input` for the query, `context`, `documents` or `retrieved` for the context
+(a list of passages, or one text), `reference` or `ground_truth` for the expected answer,
+`rubric` or `criteria` for the instructions. The context is only compared with the trace
+when the run recorded tool results: if it didn't, the context may have come from somewhere
+Assay doesn't see.
 
 A result with a finding says nothing about the AI, whether it passed or failed. Release
 calls leave it out ("judged on data that doesn't match the trace"). Failure causes group it

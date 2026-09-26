@@ -7,10 +7,13 @@ A judge that was handed the wrong thing still returns a valid-looking score:
   - {{query}} and {{generation}} both filled with the same text;
   - a template variable nobody filled in;
   - the evaluator's own instructions sent as the user's message, so the judge
-    confuses the rubric with the request.
+    confuses the rubric with the request;
+  - {{context}} filled with the request, with another run's documents, or with
+    nothing, so a faithfulness judge checks the answer against the wrong sources.
 
 A check can say what its evaluator saw (`inputs`, by role). This compares that
-with what the run recorded: its input, its answer and its model outputs. A result
+with what the run recorded: its input, its answer and its model outputs, and for
+the context, what its tools returned. A result
 with a finding isn't evidence about the AI, pass or fail: failure causes and
 release calls leave it out (flaky.ROLES["evaluator_input"]).
 
@@ -92,15 +95,45 @@ def _same(a: str, b: str) -> bool:
     return min(len(a), len(b)) >= MIN_TEXT and (a in b or b in a)
 
 
+def _passages(v: Any) -> List[str]:
+    """The context as the passages it was made of, each normalised; too-short ones can't be told apart."""
+    items = v if isinstance(v, (list, tuple)) else [v]
+    return [t for t in (_norm(x) for x in items) if len(t) >= MIN_TEXT]
+
+
+def _context_findings(ctx: Any, run: dict, q: str, o: str) -> List[str]:
+    """Was the judge's context what the run retrieved? Only asked when the run retrieved something:
+    a run with no tool results may have had its context from somewhere Assay doesn't see."""
+    given_in = _norm(run.get("input"))
+    got = _passages(ctx)
+    if not got:
+        return []
+    joined = " ".join(got)
+    if given_in and joined in given_in:  # not the other way: a document may well quote the question
+        return ["context is the run's input, not what it retrieved"]
+    retrieved = [t for t in (_norm(x) for x in run.get("retrieved") or []) if t]
+    if not retrieved or (o and joined == o):
+        return []
+    everything = " ".join(retrieved)
+    found = [p for p in got if p in everything or any(_same(p, r) for r in retrieved)]
+    if not found:
+        return [f"context isn't what the run retrieved (its tools returned {_show(run['retrieved'][0])})"]
+    return []
+
+
 def findings(inputs: Dict[str, Any], run: Optional[dict]) -> List[str]:
-    """What's wrong with what the evaluator saw. run: {"input", "outputs": [texts]} or None."""
+    """What's wrong with what the evaluator saw.
+    run: {"input", "outputs": [texts], "retrieved": [tool results]} or None."""
     got = roles(inputs)
     out = []
+    ctx_name = next((n for n in ROLES["context"] if n in {str(k).lower() for k in inputs or {}}), None)
     for name, v in (inputs or {}).items():
         if isinstance(v, str) and TEMPLATE.search(v):
             out.append(f"{name} still holds a template variable nobody filled in: {TEMPLATE.search(v).group(0)}")
         elif v is None or (isinstance(v, (str, list, dict)) and not v):
-            out.append(f"{name} is empty")
+            n = len((run or {}).get("retrieved") or [])
+            out.append(f"{name} is empty" + (f", but the run's tools returned {n} result{'s' * (n != 1)}"
+                                             if n and str(name).lower() == ctx_name else ""))
     # A template placeholder is already reported: comparing it with the trace would say so twice.
     blank = lambda role: "" if isinstance(got.get(role), str) and TEMPLATE.search(got[role]) else _norm(got.get(role))
     q, o = blank("query"), blank("output")
@@ -121,6 +154,8 @@ def findings(inputs: Dict[str, Any], run: Optional[dict]) -> List[str]:
             out.append("output is the run's input, not its answer")
         if q and given_in and not _same(q, given_in) and q not in given_in:
             out.append(f"query isn't the run's input (the run was asked {_show(run['input'])})")
+        if ctx and not (isinstance(got.get("context"), str) and TEMPLATE.search(got["context"])):
+            out += _context_findings(got.get("context"), run, q, o)
 
     rubric = _norm(got.get("instructions"))
     if len(rubric) >= MIN_TEXT:
@@ -135,9 +170,10 @@ def findings(inputs: Dict[str, Any], run: Optional[dict]) -> List[str]:
 
 
 def run_context(engine: Engine, tenant: str, ids: Iterable[str]) -> Dict[str, dict]:
-    """Per run: its input, and every output it produced (answer, model texts, stage outputs)."""
+    """Per run: its input, every output it produced (answer, model texts, stage outputs), and what
+    its tools returned."""
     ids = list({i for i in ids if i})
-    ctx: Dict[str, dict] = {i: {"input": None, "outputs": []} for i in ids}
+    ctx: Dict[str, dict] = {i: {"input": None, "outputs": [], "retrieved": []} for i in ids}
     if not ids:
         return {}
     ti, t, st, runs, stages = (store.trace_inputs, store.agent_trajectories, store.agent_steps, store.runs,
@@ -151,6 +187,10 @@ def run_context(engine: Engine, tenant: str, ids: Iterable[str]) -> Dict[str, di
                     st.c.tenant == tenant, st.c.trajectory_id.in_(chunk), st.c.kind.in_(("reason", "answer")),
                     st.c.text.is_not(None))).order_by(st.c.trajectory_id, st.c.seq)):
                 ctx[r.trajectory_id]["outputs"].append(r.text)
+            for r in conn.execute(select(st.c.trajectory_id, st.c.result).where(and_(  # what the judge's context
+                    st.c.tenant == tenant, st.c.trajectory_id.in_(chunk), st.c.kind == "tool",  # should come from
+                    st.c.error.is_(None), st.c.result.is_not(None))).order_by(st.c.trajectory_id, st.c.seq)):
+                ctx[r.trajectory_id]["retrieved"].append(r.result)
             for tbl, key in ((t, t.c.trajectory_id), (runs, runs.c.run_id)):
                 for r in conn.execute(select(key.label("id"), tbl.c.answer).where(and_(
                         tbl.c.tenant == tenant, key.in_(chunk), tbl.c.answer.is_not(None)))):
