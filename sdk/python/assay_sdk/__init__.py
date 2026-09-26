@@ -590,3 +590,4 @@ from assay_sdk.llm import Judge, Response, normalize, normalize_args  # noqa: E4
 from assay_sdk.runtime import EvalRuntime, Report, Sample  # noqa: E402
 from assay_sdk.faithfulness import faithfulness  # noqa: E402
 from assay_sdk.simulate import Persona, Simulation, simulate  # noqa: E402
+from assay_sdk.golden import golden_examples  # noqa: E402

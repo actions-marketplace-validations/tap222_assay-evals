@@ -42,6 +42,35 @@ labels per score (`nothing labeled 1: the judge is untested there`), who labeled
 two people labeled, how much they agree. That agreement is the ceiling: no judge will match a
 person much better than two people match each other.
 
+A label can carry a critique, what's wrong in words, the way a domain expert would explain it
+to someone new: `assay golden add q17 --score 1 --critique "Quotes the refund policy; they asked
+where the order is."` Critiques are what a judge learns from, and what a person reads when the
+judge disagrees.
+
+### Splits: examples from train, measured on dev and test
+
+A judge prompt with examples taken from the items it's then measured on says nothing about unseen
+data. `assay golden split` assigns each item to train, dev or test (20%, 40%, 40% by default,
+stratified by label, so every label is in each, and seeded so it's the same every time; items
+already split keep theirs):
+
+```
+assay golden split                    # --train 0.2 --dev 0.4 --seed 0
+assay calibrate                       # on dev: iterate on the judge here
+assay calibrate --final               # on test, once, for the number you report
+```
+
+A judge takes its few-shot examples from train:
+
+```python
+from assay_sdk import golden_examples
+SHOTS = golden_examples(split="train", k=8)   # [{"id", "input", "output", "label", "critique", "tags"}]
+```
+
+Calibration checks for a leak and fails on one: the judge asked for the split it's measured on
+(`golden_examples(split="dev")`), or an item's output from that split is in the judge's source
+file. An unsplit golden set is calibrated as a whole, with a reminder to split it.
+
 How big? The report answers it for your set. The Spearman interval narrows as items are added:
 at 30 items it's wide, and at 100 it can tell 0.8 from 0.9. Label every score level, and have a
 second person label 20 or so items.

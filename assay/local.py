@@ -2459,7 +2459,7 @@ def _calib_cfg(root: Path) -> dict:
 
 
 def golden_add(root: Path, case: str, score: float, by: Optional[str], tags: List[str], run_id: Optional[str],
-               input_: Optional[str], output: Optional[str], note: Optional[str]) -> int:
+               input_: Optional[str], output: Optional[str], note: Optional[str], critique: Optional[str] = None) -> int:
     """`assay golden add CASE --score N`: a recorded output, labeled; a second labeler adds a label."""
     from assay import acks, calibrate
     ccfg = _calib_cfg(root)
@@ -2472,11 +2472,12 @@ def golden_add(root: Path, case: str, score: float, by: Optional[str], tags: Lis
     by = by or acks.who()
     mine = next((x for x in items if x["id"] == case), None)
     if mine is not None:  # another label for an item that's there: how much people agree
+        crit = {"critique": critique} if critique else {}
         if any(lab.get("by") == by for lab in mine["labels"]):
-            mine["labels"] = [{**lab, "score": score} if lab.get("by") == by else lab for lab in mine["labels"]]
+            mine["labels"] = [{**lab, "score": score, **crit} if lab.get("by") == by else lab for lab in mine["labels"]]
             print(f"{case}: {by}'s label is now {score:g}.")
         else:
-            mine["labels"].append({"by": by, "score": score})
+            mine["labels"].append({"by": by, "score": score, **crit})
             print(f"{case}: labeled {score:g} by {by} too ({len(mine['labels'])} labels).")
         mine["tags"] = sorted(set(mine["tags"]) | set(tags))
         calibrate.save_golden(path, items)
@@ -2499,12 +2500,28 @@ def golden_add(root: Path, case: str, score: float, by: Optional[str], tags: Lis
         if input_ is None:
             input_ = (learn._inputs(engine, TENANT, [tid]).get(tid) or {}).get("input")
         case = heads[0]["case_id"] or case
-    item = {"id": case, "input": input_, "output": output, "labels": [{"by": by, "score": score}],
+    item = {"id": case, "input": input_, "output": output,
+            "labels": [{"by": by, "score": score, **({"critique": critique} if critique else {})}],
             "tags": sorted(set(tags))}
     if note:
         item["note"] = note
     calibrate.save_golden(path, items + [item])
     print(f"Added {case} to {path.name}, labeled {score:g} by {by}. It's {len(items) + 1} items now.")
+    return 0
+
+
+def golden_split(root: Path, train: float = 0.2, dev: float = 0.4, seed: int = 0) -> int:
+    from assay import calibrate
+    ccfg = _calib_cfg(root)
+    path = root / ccfg["golden"]
+    items = calibrate.load_golden(path)
+    if not 0 < train < 1 or not 0 < dev < 1 or train + dev >= 1:
+        print("--train and --dev are shares that leave some for test, e.g. 0.2 and 0.4.", file=sys.stderr)
+        return 2
+    sizes = calibrate.assign_splits(items, train, dev, seed)
+    calibrate.save_golden(path, items)
+    print(f"{path.name}: " + ", ".join(f"{k} {sizes.get(k, 0)}" for k in calibrate.SPLITS) + ". A judge takes its "
+          f"examples from train (assay_sdk.golden_examples); `assay calibrate` reports on dev, `--final` on test.")
     return 0
 
 
@@ -2534,6 +2551,12 @@ def golden_stats(root: Path) -> int:
                      "person labeling 20 of them (`assay golden add ID --score N --by NAME`) says.", "dim"))
     if cov["tags"]:
         print("Tags: " + ", ".join(f"{t} ({n})" for t, n in cov["tags"].items()))
+    if cov["splits"]:
+        print("Splits: " + ", ".join(f"{k} {cov['splits'].get(k, 0)}" for k in calibrate.SPLITS))
+    else:
+        print(_paint("Not split yet: a judge built from these items would be measured on what it learned. "
+                     "`assay golden split` assigns train, dev and test.", "dim"))
+    print(f"{_n(cov['critiques'], 'item')} with a critique (why it was scored so).")
     return 0
 
 
@@ -2619,7 +2642,7 @@ def golden_suggest(root: Path, n: int, field: Optional[str], vs: Optional[str] =
 
 
 def calibrate_cmd(root: Path, baseline: Optional[str] = None, fmt: str = "text", judge_spec: Optional[str] = None,
-                  repeat: Optional[int] = None, rt=None, second_judge: Optional[str] = None) -> int:
+                  repeat: Optional[int] = None, rt=None, second_judge: Optional[str] = None, final: bool = False) -> int:
     """`assay calibrate`: the judge over the golden set, compared with the last calibration that passed.
     0 as good as before, 1 worse, 2 nothing to run."""
     from assay import calibrate
@@ -2628,7 +2651,13 @@ def calibrate_cmd(root: Path, baseline: Optional[str] = None, fmt: str = "text",
         if repeat:
             ccfg["repeat"] = repeat
         spec = judge_spec or ccfg["judge"]
-        items = calibrate.load_golden(root / ccfg["golden"])
+        every = calibrate.load_golden(root / ccfg["golden"])
+        split = "test" if final else ccfg.get("split") or ("dev" if any(x.get("split") for x in every) else None)
+        items = calibrate.select_split(every, split)
+        if not items:
+            raise calibrate.CalibrationError(f"No items in the {split} split: `assay golden split` assigns them.")
+        from assay_sdk import golden as _golden
+        _golden.reset()  # the leak check sees only what this judge asked for
         judge = calibrate.load_judge(spec, root)
         second_spec = second_judge or ccfg.get("second_judge")
         second_fn = calibrate.load_judge(second_spec, root) if second_spec else None
@@ -2637,6 +2666,9 @@ def calibrate_cmd(root: Path, baseline: Optional[str] = None, fmt: str = "text",
         return 2
     results, report = calibrate.run_judge(judge, items, ccfg, rt)
     a = calibrate.analyze(items, results, ccfg)
+    a["split"] = split if split and any(x.get("split") for x in every) else None
+    a["split_sizes"] = calibrate.coverage(every, (0, 1)).get("splits")
+    a["leaks"] = calibrate.leaks(judge, items, a["split"])
     a["judge"] = {"spec": spec, "source": calibrate.fingerprint(judge), "models": a["models"]}
     a["field"] = ccfg.get("field")
     second = None
@@ -2656,10 +2688,12 @@ def calibrate_cmd(root: Path, baseline: Optional[str] = None, fmt: str = "text",
             print(f"No calibration {baseline}.", file=sys.stderr)
             return 2
         before = row and row.result["calibration"]
+    if before and before.get("split") != a.get("split"):
+        before = None  # another split is other items: nothing to compare
     cmp = calibrate.compare(a, before, ccfg) if before else None
     run_id = calibrate.new_id()
     stored = calibrate.as_json(a, cmp)
-    passed = not (cmp and cmp["regressed"])
+    passed = not (cmp and cmp["regressed"]) and not a["leaks"]
     with engine.begin() as conn:
         conn.execute(store.calibrations.insert().values(tenant=TENANT, run_id=run_id, created_at=datetime.utcnow(),
                                                         judge=spec, golden=calibrate.digest(items), passed=passed,

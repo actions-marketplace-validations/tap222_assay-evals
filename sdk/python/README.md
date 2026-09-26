@@ -142,6 +142,11 @@ is: `evaluate(judge, prompt, schema=VERDICT, judge_kwargs={"schema": VERDICT})`.
 `judge_kwargs` is how arguments reach your judge when their names are also `evaluate()`'s own
 (`schema`, `field`, `run`, ...); `evaluate()` warns when one looks misrouted.
 
+A judge's few-shot examples come from the golden set's train split, never the items it's
+measured on: `golden_examples(split="train", k=8)` returns them with their labels and critiques,
+and `assay calibrate` fails a judge that read dev or test (see
+[calibration](../../docs/calibration.md)).
+
 `assay.instrument()` records Anthropic, OpenAI, Gemini, Ollama and LiteLLM calls through the
 same reading, with the tool calls asked for and why each call stopped.
 

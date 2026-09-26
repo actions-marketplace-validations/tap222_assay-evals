@@ -128,6 +128,12 @@ def main(argv=None) -> int:
     ga.add_argument("--input", dest="input_", help="The input, if it wasn't recorded")
     ga.add_argument("--output", help="The output, if it wasn't recorded")
     ga.add_argument("--note")
+    ga.add_argument("--critique", help="Why this score: what a judge should learn from it")
+    gp = gs.add_parser("split", help="Assign train, dev and test, stratified by label, so a judge isn't measured "
+                                     "on what it learned from")
+    gp.add_argument("--train", type=float, default=0.2)
+    gp.add_argument("--dev", type=float, default=0.4)
+    gp.add_argument("--seed", type=int, default=0)
     gs.add_parser("stats", help="Labels per score, labelers, and how much people agree")
     gg = gs.add_parser("suggest", help="Recorded outputs to label next, spread over the judge's scores")
     gg.add_argument("-n", type=int, default=10)
@@ -143,6 +149,7 @@ def main(argv=None) -> int:
     cb.add_argument("--second-judge", help="Another judge over the same items, to see where they disagree "
                                            "(default: [calibrate] second_judge)")
     cb.add_argument("--format", choices=["text", "json"], default="text")
+    cb.add_argument("--final", action="store_true", help="Report on the held-out test split (default: dev)")
     rp = sub.add_parser("report", help="What the evaluation found this week: issues caught before users saw them, "
                                        "failure modes, fixes, the log")
     rp.add_argument("--days", type=float, default=7)
@@ -202,13 +209,15 @@ def main(argv=None) -> int:
             return local.log_add(root, args.text, args.by)
         if args.cmd == "calibrate":
             return local.calibrate_cmd(root, args.baseline, args.format, args.judge, args.repeat,
-                                       second_judge=args.second_judge)
+                                       second_judge=args.second_judge, final=args.final)
         if args.cmd == "golden":
             try:
                 if args.golden_cmd == "add":
                     return local.golden_add(root, args.case, args.score, args.by,
                                             [t.strip() for t in args.tags.split(",") if t.strip()], args.run,
-                                            args.input_, args.output, args.note)
+                                            args.input_, args.output, args.note, args.critique)
+                if args.golden_cmd == "split":
+                    return local.golden_split(root, args.train, args.dev, args.seed)
                 if args.golden_cmd == "stats":
                     return local.golden_stats(root)
                 return local.golden_suggest(root, args.n, args.field, args.vs, args.disagree)

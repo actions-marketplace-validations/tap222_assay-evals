@@ -25,7 +25,14 @@ golden.jsonl, one item a line:
   {"id": "q18", "input": "...", "output": "...", "labels": [{"by": "sam", "score": 2}, {"by": "ana", "score": 3}]}
 
 An item's label is the median of its labels. Items two people labeled say how much people agree:
-the ceiling for any judge.
+the ceiling for any judge. A label can carry a critique: why the person scored it so, the raw
+material a judge is built from (its few-shot examples, its rubric).
+
+Splits keep a judge from being measured on what it memorized (assay golden split): train is what a
+judge may learn from (assay_sdk.golden_examples), dev what calibration reports on while the judge
+is being worked on, test held out for a final check (assay calibrate --final). A judge whose source
+contains an item of the split it's measured on, or that read that split's examples, has leaked:
+the calibration fails, since its numbers would say nothing about unseen data.
 
 Three more things say whether a judge can be trusted:
 
@@ -61,7 +68,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 BOOTSTRAP, SEED = 1000, 0
 MIN_TAG_ITEMS = 8  # fewer can't say whether a tag got worse
 DEFAULTS = {"golden": "golden.jsonl", "judge": None, "repeat": 5, "score_range": [1, 5], "label_range": None,
-            "threshold": None, "concurrency": 8, "min_drop": 0.05, "field": None, "second_judge": None}
+            "threshold": None, "concurrency": 8, "min_drop": 0.05, "field": None, "second_judge": None,
+            "split": None}
+SPLITS = ("train", "dev", "test")
 EXPECTS = ("same", "lower", "higher")
 
 
@@ -87,7 +96,8 @@ def load_golden(path: Path) -> List[dict]:
             raise CalibrationError(f"{path.name}, line {n}: needs at least output, and a score or labels.")
         labels = list(x.get("labels") or [])
         if x.get("score") is not None:
-            labels.insert(0, {"by": x.get("by") or "unknown", "score": x["score"]})
+            labels.insert(0, {"by": x.get("by") or "unknown", "score": x["score"],
+                              **({"critique": x["critique"]} if x.get("critique") else {})})
         labels = [lab for lab in labels if isinstance(lab, dict) and isinstance(lab.get("score"), (int, float))
                   and not isinstance(lab.get("score"), bool)]
         if not labels:
@@ -104,6 +114,9 @@ def load_golden(path: Path) -> List[dict]:
             raise CalibrationError(f"{path.name}, line {n}: each variant needs output, and expect: same, lower or "
                                    f"higher (what should happen to the score).")
         x["variants"] = vs
+        if x.get("split") is not None and x["split"] not in SPLITS:
+            raise CalibrationError(f"{path.name}, line {n}: split is train, dev or test, not {x['split']!r}.")
+        x["critiques"] = [lab["critique"] for lab in labels if lab.get("critique")]
         items.append(x)
     if not items:
         raise CalibrationError(f"{path.name} is empty.")
@@ -113,15 +126,67 @@ def load_golden(path: Path) -> List[dict]:
 def save_golden(path: Path, items: List[dict]) -> None:
     out = []
     for x in items:
-        x = {k: v for k, v in x.items() if k != "label"}
+        x = {k: v for k, v in x.items() if k not in ("label", "critiques")}
         labs = x.pop("labels", [])
-        x.pop("score", None), x.pop("by", None)
-        if len(labs) == 1:
+        x.pop("score", None), x.pop("by", None), x.pop("critique", None)
+        if len(labs) == 1 and set(labs[0]) <= {"score", "by", "critique"}:
             x["score"], x["by"] = labs[0]["score"], labs[0].get("by")
+            if labs[0].get("critique"):
+                x["critique"] = labs[0]["critique"]
         else:
             x["labels"] = labs
         out.append(json.dumps(x, ensure_ascii=False, default=str))
     path.write_text("\n".join(out) + "\n")
+
+
+def assign_splits(items: List[dict], train: float = 0.2, dev: float = 0.4, seed: int = 0) -> Dict[str, int]:
+    """Give every item without a split one: train, dev or test, stratified by label so each split
+    spans poor to great. Items that have one keep it. {split: items}."""
+    rnd = random.Random(seed)
+    by: Dict[int, List[dict]] = defaultdict(list)
+    for x in items:
+        if not x.get("split"):
+            by[int(round(x["label"]))].append(x)
+    for level, xs in sorted(by.items()):
+        rnd.shuffle(xs)
+        n = len(xs)
+        a, b = round(n * train), round(n * (train + dev))
+        for i, x in enumerate(xs):
+            x["split"] = "train" if i < a else "dev" if i < b else "test"
+    return dict(Counter(x.get("split") or "none" for x in items))
+
+
+def select_split(items: List[dict], split: Optional[str]) -> List[dict]:
+    """The items calibration reports on: a split, or all of them when none are split."""
+    if not split or split == "all" or not any(x.get("split") for x in items):
+        return items
+    return [x for x in items if x.get("split") == split]
+
+
+def leaks(judge: Callable, items: List[dict], split: Optional[str]) -> List[str]:
+    """How a judge could have seen the items it's measured on: their text in its source, or its
+    reading that split's examples (assay_sdk.golden_examples)."""
+    import inspect
+    from assay_sdk import golden
+    out = []
+    if split and split in golden.requested():
+        out.append(f"the judge read the {split} split's examples (golden_examples(split={split!r}))")
+    try:
+        src = _norm_text(Path(inspect.getsourcefile(judge)).read_text())
+    except (TypeError, OSError):
+        return out
+    for x in items:
+        t = _norm_text(x.get("output"))
+        if len(t) >= 30 and t in src:
+            out.append(f"item {x['id']}'s output is in the judge's source")
+            if len(out) >= 5:
+                break
+    return out
+
+
+def _norm_text(v) -> str:
+    import re as _re
+    return _re.sub(r"\s+", " ", str(v or "")).strip().lower()
 
 
 def digest(items: List[dict]) -> str:
@@ -142,9 +207,11 @@ def coverage(items: List[dict], label_range: Tuple[float, float]) -> dict:
                  "spearman": spearman([a for a, _ in pairs], [b for _, b in pairs]) if len(pairs) >= 3 else None}
     tags = Counter(t for x in items for t in x["tags"])
     variants = Counter(v["expect"] for x in items for v in x.get("variants") or [])
+    splits = Counter(x.get("split") for x in items if x.get("split"))
     return {"items": len(items), "levels": {lv: per.get(lv, 0) for lv in levels},
             "missing": [lv for lv in levels if not per.get(lv)], "labelers": dict(by.most_common()),
-            "labeler_agreement": agree, "tags": dict(tags.most_common()), "variants": dict(variants)}
+            "labeler_agreement": agree, "tags": dict(tags.most_common()), "variants": dict(variants),
+            "splits": dict(splits), "critiques": sum(1 for x in items if x.get("critiques"))}
 
 
 # ---------- statistics ----------
@@ -536,7 +603,15 @@ def text(run_id: str, spec: str, a: dict, cfg: dict, cmp: Optional[dict], baseli
          runtime_line: Optional[str], paint=lambda s, c: s, second: Optional[dict] = None) -> str:
     cov = a["coverage"]
     out = [paint("Judge calibration", "bold") + f"  {run_id}", "─" * 44,
-           f"{spec} · {a['n']} items · {cfg['repeat']} judgements each", ""]
+           f"{spec} · {a['n']} items · {cfg['repeat']} judgements each"
+           + (f" · the {a['split']} split" + (" (held out)" if a["split"] == "test" else "") if a.get("split") else ""),
+           ""]
+    if a.get("leaks"):
+        out += [paint("Leak: the judge has seen what it's measured on, so these numbers say nothing about unseen "
+                      "data:", "red")] + [paint(f"  {x}", "red") for x in a["leaks"]] + [""]
+    elif not a.get("split"):
+        out += [paint("Not split: if the judge learned from these items, this measures memory. `assay golden split` "
+                      "assigns train, dev and test.", "dim"), ""]
     labelers = ", ".join(f"{k} ({v})" for k, v in cov["labelers"].items())
     out.append(f"Golden set   {cov['items']} items, labeled by {labelers}")
     out.append("             " + "  ".join(f"{lv}: {n}" for lv, n in cov["levels"].items()))
@@ -624,7 +699,8 @@ def text(run_id: str, spec: str, a: dict, cfg: dict, cmp: Optional[dict], baseli
         out += ["", paint(runtime_line, "dim")]
     out.append("")
     if cmp is None:
-        out.append("No earlier calibration to compare with: this one is the baseline.")
+        out.append(paint("Failed: a leak.", "red") if a.get("leaks") else
+                   "No earlier calibration to compare with: this one is the baseline.")
         return "\n".join(out)
     out.append(f"Compared with {baseline} ({cmp['items']} items in both)")
     rows = [("overall", cmp["overall"])] + list(cmp["tags"].items())
@@ -657,6 +733,8 @@ def text(run_id: str, spec: str, a: dict, cfg: dict, cmp: Optional[dict], baseli
     if cmp.get("cause"):
         out.append(paint(f"Why: {cmp['cause']}.", "yellow" if cmp.get("drift") else "dim"))
     out += ["", paint("Regressed.", "red") if cmp["regressed"] else paint("Calibrated as before.", "green")]
+    if a.get("leaks"):
+        out.append(paint("Failed: a leak.", "red"))
     return "\n".join(out)
 
 
