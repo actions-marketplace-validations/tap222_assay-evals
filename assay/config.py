@@ -23,6 +23,19 @@ class Settings:
     # Platform admin key from the environment: every tenant, every scope. Use it
     # to create the first real keys, then keep it for break-glass use.
     admin_key: Optional[str] = None
+    # SSO (assay/sso.py): people sign in with the company's identity provider (OpenID Connect)
+    oidc_issuer: Optional[str] = None
+    oidc_client_id: Optional[str] = None
+    oidc_client_secret: Optional[str] = None
+    oidc_redirect_url: Optional[str] = None  # default: ASSAY_PUBLIC_URL/auth/callback
+    oidc_admins: List[str] = field(default_factory=list)  # groups or emails that are admins
+    oidc_managers: List[str] = field(default_factory=list)  # ... managers; everyone else reads
+    oidc_role_claim: str = "groups"
+    oidc_allowed_domains: List[str] = field(default_factory=list)
+    oidc_tenant: str = "default"  # the tenant people who sign in belong to
+    oidc_tenant_claim: Optional[str] = None  # or a claim that says which
+    session_secret: Optional[str] = None
+    session_hours: float = 12.0
     auth_mode: str = "auto"  # auto (on once any key exists) | required | off
     rate_limit_per_min: int = 1200  # per key, per instance; 0 = no limit
     cors_origins: List[str] = field(default_factory=list)
@@ -68,6 +81,13 @@ class Settings:
             downstream_url=e("ASSAY_DOWNSTREAM_URL"),
             downstream_hash_sql=e("ASSAY_DOWNSTREAM_HASH_SQL"),
             admin_key=e("ASSAY_ADMIN_KEY") or e("ASSAY_API_KEY"),
+            oidc_issuer=e("ASSAY_OIDC_ISSUER"), oidc_client_id=e("ASSAY_OIDC_CLIENT_ID"),
+            oidc_client_secret=e("ASSAY_OIDC_CLIENT_SECRET"), oidc_redirect_url=e("ASSAY_OIDC_REDIRECT_URL"),
+            oidc_admins=_list(e("ASSAY_OIDC_ADMINS")), oidc_managers=_list(e("ASSAY_OIDC_MANAGERS")),
+            oidc_role_claim=e("ASSAY_OIDC_ROLE_CLAIM", "groups"),
+            oidc_allowed_domains=_list(e("ASSAY_OIDC_ALLOWED_DOMAINS")), oidc_tenant=e("ASSAY_OIDC_TENANT", "default"),
+            oidc_tenant_claim=e("ASSAY_OIDC_TENANT_CLAIM"), session_secret=e("ASSAY_SESSION_SECRET"),
+            session_hours=float(e("ASSAY_SESSION_HOURS", "12")),
             auth_mode=e("ASSAY_AUTH", "auto"),
             rate_limit_per_min=int(e("ASSAY_RATE_LIMIT_PER_MIN", "1200")),
             cors_origins=_list(e("ASSAY_CORS_ORIGINS")),

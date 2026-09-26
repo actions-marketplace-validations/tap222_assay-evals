@@ -53,7 +53,8 @@ class Principal:
     scopes: FrozenSet[str]
     key_id: Optional[int] = None
     name: str = ""
-    mode: str = "key"  # key | admin_key | open
+    mode: str = "key"  # key | admin_key | open | sso
+    user_id: Optional[str] = None  # sso: the person (assay/sso.py)
 
     @property
     def platform(self) -> bool:
@@ -75,7 +76,7 @@ class Principal:
 
     def public(self) -> dict:
         return {"tenant": self.tenant, "scopes": sorted(self.scopes), "key_id": self.key_id,
-                "name": self.name, "mode": self.mode}
+                "name": self.name, "mode": self.mode, **({"user_id": self.user_id} if self.user_id else {})}
 
 
 OPEN = Principal("*", frozenset({"ingest", "read", "manage"}), name="open mode", mode="open")
@@ -118,10 +119,13 @@ def any_keys(engine: Engine) -> bool:
 class Authenticator:
     def __init__(self, engine: Engine, admin_key: Optional[str], mode: str = "auto"):
         self.engine, self.admin_key, self.mode = engine, admin_key, mode
+        self.sso = None  # an assay.sso.Config when people sign in with SSO
         self._keys_exist_until = 0.0
         self._keys_exist = False
 
     def required(self) -> bool:
+        if self.sso:  # people sign in: never open
+            return True
         if self.mode == "off":
             return False
         if self.mode == "required" or self.admin_key:
@@ -148,6 +152,18 @@ class Authenticator:
             with self.engine.begin() as conn:  # throttled, so it isn't a write per request
                 conn.execute(t.update().where(t.c.id == row.id).values(last_used_at=now))
         return Principal(row.tenant, expand(row.scopes.split(",")), row.id, row.name)
+
+
+    def session(self, cookie: Optional[str]) -> Optional[Principal]:
+        """The person a session cookie belongs to, while it's valid and they're not disabled."""
+        if self.sso is None or not cookie:
+            return None
+        from assay import sso
+        v = sso.unsign(self.sso.session_secret, cookie)
+        u = sso.get_user(self.engine, v["uid"]) if v else None
+        if u is None or u["disabled"]:
+            return None
+        return Principal(u["tenant"], expand([u["role"]]), name=u["email"] or u["id"], mode="sso", user_id=u["id"])
 
 
 class RateLimiter:

@@ -128,6 +128,8 @@ svg.chart text{fill:var(--muted);font:11px var(--mono)}
 .facts dd{margin:2px 0 0;font-weight:500;overflow-wrap:anywhere}
 svg.timeline text{fill:var(--ink-2);font:11px var(--mono)}
 .keybox{display:flex;gap:8px;align-items:center}
+.keybox a.button{background:var(--accent);color:#fff;padding:6px 12px;border-radius:6px;text-decoration:none;margin-right:12px}
+button.linkish{background:none;border:none;padding:0;color:var(--accent-ink);text-decoration:underline}
 svg.workflow{width:100%;height:auto;display:block}
 svg.workflow .wnode{cursor:pointer}
 svg.workflow .wnode:hover rect:first-child,svg.workflow .wnode:focus rect:first-child{filter:drop-shadow(0 2px 6px rgba(0,0,0,.18))}
@@ -270,6 +272,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
     <a href="#connect" data-tab="connect">Connect</a>
   </nav>
   <div id="keybox" class="panel keybox" hidden>
+    <a id="ssologin" class="button" href="/auth/login" hidden>Sign in with SSO</a>
     <label for="apikey">This server requires an API key:</label>
     <input id="apikey" type="password" autocomplete="off">
     <button id="savekey" type="button">Use key</button>
@@ -295,12 +298,17 @@ const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
 const S={catalog:{},groups:{},overview:null,latest:null,measure:null,dim:"",val:"",trace:{view:"slowest",segment:"",doc:null}};
 
+const cookie=n=>(document.cookie.split("; ").find(c=>c.startsWith(n+"="))||"").slice(n.length+1);
 async function api(path,opts={}){
   const key=store.get("assay-key");
   const headers={...(opts.headers||{}),...(key?{"Authorization":"Bearer "+key}:{})};
   if(opts.body)headers["Content-Type"]="application/json";
-  const r=await fetch(path,{...opts,headers});
-  if(r.status===401){$("#keybox").hidden=false;throw new Error("This server needs an API key with the read scope.")}
+  if(!key&&cookie("assay_csrf"))headers["X-CSRF-Token"]=decodeURIComponent(cookie("assay_csrf"));  // a signed-in change
+  const r=await fetch(path,{...opts,headers,credentials:"same-origin"});
+  if(r.status===401){
+    const c=await fetch("/auth/config").then(x=>x.json()).catch(()=>({}));
+    if(c.sso){const a=$("#ssologin");a.hidden=false;a.href="/auth/login?next="+encodeURIComponent(location.pathname+location.search)}
+    $("#keybox").hidden=false;throw new Error(c.sso?"Sign in to see this server.":"This server needs an API key with the read scope.")}
   if(r.status===429)throw new Error("Rate limit reached; wait a moment and try again.");
   if(!r.ok){const b=await r.json().catch(()=>({}));throw new Error(typeof b.detail==="string"?b.detail:r.statusText)}
   return r.json();
@@ -1901,7 +1909,9 @@ async function boot(){
   try{
     S.me=await api("/v1/whoami").catch(()=>null);
     if(S.me)$("#me").innerHTML=S.me.mode==="open"?`<span class="chip warn" title="No authentication: anyone who can reach this server can read and write">open mode</span>`
+      :S.me.mode==="sso"?`<span class="chip neutral" title="${esc(S.me.tenant)} · ${esc(S.me.scopes.join(", "))}">${esc(S.me.name)}</span> <button id="signout" type="button" class="linkish">Sign out</button>`
       :`<span class="chip neutral" title="${esc(S.me.name)}">${esc(S.me.tenant==="*"?"platform":S.me.tenant)} · ${esc(S.me.scopes.join(", "))}</span>`;
+    const so=$("#signout");if(so)so.onclick=async()=>{await fetch("/auth/logout",{method:"POST",credentials:"same-origin"});location.reload()};
     const ms=await api("/v1/measures");ms.forEach(m=>S.catalog[m.id]=m);
     S.groups={};ms.forEach(m=>(S.groups[m.group||"Other"]??=[]).push(m.id));
     await loadSources();await refresh();

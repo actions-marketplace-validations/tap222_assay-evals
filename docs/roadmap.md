@@ -8,8 +8,8 @@
   measures don't read them yet.
 - **Naming causes:** cause names come from templates. An LLM could write better one-line names
   (only names, never kinds).
-- **Users and SSO:** keys are the only identity. There are no user accounts, SSO or audit log
-  of who changed what.
+- **SAML and SCIM:** SSO is OpenID Connect, which every major provider offers. There's no SAML,
+  and no SCIM provisioning: people appear when they first sign in, and leave through their groups.
 - **Shared rate limits:** limits are per instance, in memory. Use a shared store (such as
   Redis) when running several replicas.
 - **Alert routing:** there is no per-team routing, silencing, acknowledgement or on-call

@@ -25,6 +25,9 @@ them, as with any test suite. What Assay adds:
   maintainer accepts the change with the `assay-policy-change` label (add `labeled` to the
   workflow's `pull_request` types, so labelling re-runs it). Outside the action, set
   `ASSAY_POLICY` to the trusted `assay.toml` and `ASSAY_POLICY_CHANGE=accepted` to accept.
+- **Who did what.** With SSO, people sign in with the company's identity provider and get a role
+  from their groups; every change, sign-in and refusal is in the audit log
+  ([API and authentication](api.md#single-sign-on-people-and-roles)).
 - **No code in the config.** `assay.toml` is TOML, and contracts are rules, not code: no
   inline scripts, no expressions, no regular expressions.
 - **A fork's PR gets nothing to steal.** The action runs on `pull_request`, where a fork's PR

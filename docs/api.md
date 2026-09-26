@@ -41,6 +41,50 @@ for local use and demos. `/v1/whoami` and the dashboard header say so. Open mode
 `admin`, so nobody can mint keys over the API on an open server. Set `ASSAY_AUTH=required`
 to refuse to run open.
 
+## Single sign-on, people and roles
+
+People sign in to the dashboard with the company's identity provider instead of pasting a key:
+Okta, Microsoft Entra ID, Google Workspace, Auth0, Keycloak, or anything that speaks OpenID
+Connect. Keys keep working alongside, for pipelines and CI.
+
+```bash
+pip install "assay-server[sso]"
+ASSAY_OIDC_ISSUER=https://acme.okta.com          # the provider's issuer URL
+ASSAY_OIDC_CLIENT_ID=0oa1...  ASSAY_OIDC_CLIENT_SECRET=...
+ASSAY_PUBLIC_URL=https://assay.acme.internal     # the provider sends people back to /auth/callback here
+ASSAY_SESSION_SECRET=$(openssl rand -hex 32)     # signs sessions; keep it secret, and the same on every replica
+ASSAY_OIDC_ADMINS=assay-admins                   # groups (or emails) that are admins
+ASSAY_OIDC_MANAGERS=ml-team,platform             # ... managers; everyone else who may sign in reads
+ASSAY_OIDC_ALLOWED_DOMAINS=acme.com              # optional: who may sign in, by email domain
+```
+
+Register Assay with the provider as a web application, with the redirect URI
+`https://assay.acme.internal/auth/callback`, and have the ID token carry the groups claim
+(`ASSAY_OIDC_ROLE_CLAIM` if yours is named otherwise). People belong to `ASSAY_OIDC_TENANT`
+(`default`), or to the tenant a claim names (`ASSAY_OIDC_TENANT_CLAIM`).
+
+- **Verification:** the authorization code flow with PKCE, a state and a nonce. The ID token's
+  signature is checked against the provider's published keys (rotated keys are refetched), and so
+  are its issuer, audience, expiry and nonce. Unsigned or HMAC-signed tokens are refused.
+- **Roles** are the scopes above: `read`, `manage`, `admin`. They come from the groups claim at
+  every sign-in, so removing someone from a group takes effect at their next one. An admin can
+  set a person's role over their claims, or disable them (`GET /v1/users`, `PUT /v1/users/{id}`
+  with `{"role": "manage"}`, `{"role": null}` to go back to the claims, or `{"disabled": true}`,
+  which ends their sessions at once). Nobody can take away their own admin role.
+- **Sessions** are signed, HttpOnly cookies, `Secure` over HTTPS, and expire after
+  `ASSAY_SESSION_HOURS` (12). A change made with a session also needs the `X-CSRF-Token` header
+  to match the `assay_csrf` cookie, so another site can't make one on a signed-in person's
+  behalf. The dashboard sends it.
+- **With SSO on, the server is never in open mode:** every request needs a session or a key.
+
+## The audit log
+
+Every change is recorded: who (a person, `key:<id> (<name>)`, or `ASSAY_ADMIN_KEY`), what
+(method and path), when, and the result, refusals included. So are sign-ins, refused sign-ins
+and why, and sign-outs. `GET /v1/audit` (admin) lists them, newest first, for your tenant;
+`?actor=ana@acme.com` narrows it. Event ingestion is left out: it's volume, not a change of
+anything.
+
 ## Sending data
 
 **New integrations should use the event schema.** [`docs/event-schema.md`](event-schema.md)

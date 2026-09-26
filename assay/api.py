@@ -6,6 +6,7 @@ See assay/auth.py for scopes and tenant isolation.
 # No `from __future__ import annotations` here: the per-record-type ingest
 # endpoints are built in a loop, and FastAPI needs their body types as real
 # objects rather than strings to resolve later.
+import logging
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -14,12 +15,14 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, delete, desc, or_, select
 
 from assay import (agents, alerts, audit, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, lifecycle, prompts, rootcause, runner, store, trace, workflow)
+
+log = logging.getLogger("assay.api")
 from assay.auth import Principal
 from assay.config import Settings
 from assay.ingest import (CallEvent, DocumentEvent, ErrorEvent, EvalResultEvent, EventBatch, ExtractionEvent,
@@ -174,6 +177,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     scheduler = Scheduler(engine, settings)
     authn = auth.Authenticator(engine, settings.admin_key, settings.auth_mode)
     limiter = auth.RateLimiter(settings.rate_limit_per_min)
+    from assay import sso
+    sso_cfg = sso.from_settings(settings)  # raises on a half-set-up SSO: better at start than at sign-in
+    authn.sso = sso_cfg
+    provider = sso.Provider(sso_cfg) if sso_cfg else None
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -221,7 +228,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def principal(request: Request, cred: Optional[HTTPAuthorizationCredentials] = Security(bearer),
                   key: Optional[str] = Security(header_key)) -> Principal:
         token = cred.credentials if cred else key
-        p = authn.authenticate(token)
+        p = None if token else authn.session(request.cookies.get(sso.SESSION))
+        request.state.principal = p  # a refusal below is still theirs, in the audit log
+        if p is not None and request.method not in ("GET", "HEAD", "OPTIONS"):
+            # A change made with a session needs its CSRF token too: another site can send the cookie,
+            # but can't read it to set the header.
+            v = sso.unsign(sso_cfg.session_secret, request.cookies.get(sso.SESSION)) or {}
+            if not v.get("csrf") or request.headers.get("X-CSRF-Token") != v["csrf"]:
+                raise HTTPException(403, "A change made while signed in needs the X-CSRF-Token header "
+                                         "(the assay_csrf cookie's value).")
+        if p is None:
+            p = authn.authenticate(token)
+        request.state.principal = p
         if p is None:
             raise HTTPException(401, "Missing, invalid, revoked or expired API key. Send it as "
                                      "'Authorization: Bearer <key>'.", headers={"WWW-Authenticate": "Bearer"})
@@ -273,6 +291,105 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.get("/", include_in_schema=False)
     def dashboard():
         return FileResponse(STATIC / "index.html")
+
+    # ---------- single sign-on, people, and the audit log ----------
+
+    @app.middleware("http")
+    async def audit_changes(request: Request, call_next):
+        response = await call_next(request)
+        if sso.audited(request.method, request.url.path):
+            p = getattr(request.state, "principal", None)
+            try:
+                sso.audit(engine, sso.actor_of(p), f"{request.method} {request.url.path}",
+                          tenant=p.tenant if p else None, status=response.status_code,
+                          detail={"query": dict(request.query_params)} if request.query_params else None)
+            except Exception:  # the audit log must never break the change it records
+                log.exception("couldn't write the audit log")
+        return response
+
+    @app.get("/auth/config", include_in_schema=False)
+    def auth_config():
+        return {"sso": sso_cfg is not None, "login": "/auth/login" if sso_cfg else None}
+
+    @app.get("/auth/login", include_in_schema=False)
+    def sso_login(next: str = "/"):
+        if provider is None:
+            raise HTTPException(404, "SSO isn't set up on this server (ASSAY_OIDC_ISSUER).")
+        try:
+            cookie, flow = sso.new_flow(sso_cfg, next)
+            url = provider.login_url(flow["state"], flow["nonce"], flow["verifier"])
+        except sso.SSOError as exc:
+            raise HTTPException(502, str(exc))
+        r = RedirectResponse(url, status_code=302)
+        r.set_cookie(sso.FLOW, cookie, max_age=sso.FLOW_SECONDS, httponly=True, secure=sso_cfg.secure,
+                     samesite="lax", path="/auth")
+        return r
+
+    @app.get("/auth/callback", include_in_schema=False)
+    def sso_callback(request: Request, code: Optional[str] = None, state: Optional[str] = None,
+                     error: Optional[str] = None, error_description: Optional[str] = None):
+        if provider is None:
+            raise HTTPException(404, "SSO isn't set up on this server.")
+
+        def refuse(why: str, who: Optional[str] = None):
+            sso.audit(engine, f"user:{who}" if who else "anonymous", "sign-in refused", tenant=sso_cfg.tenant,
+                      status=403, detail={"why": why})  # the tenant they tried to sign in to
+            raise HTTPException(403, f"Sign-in refused: {why}")
+        flow = sso.unsign(sso_cfg.session_secret, request.cookies.get(sso.FLOW))
+        if error:
+            refuse(f"the provider said {error}" + (f": {error_description}" if error_description else ""))
+        if not flow or not code or not state or state != flow["state"]:
+            refuse("this sign-in wasn't started here, or it took longer than 10 minutes. Start again.")
+        try:
+            claims = provider.verify(provider.exchange(code, flow["verifier"]), flow["nonce"])
+        except sso.SSOError as exc:
+            refuse(str(exc))
+        why = sso.admitted(sso_cfg, claims)
+        if why:
+            refuse(why, claims.get("email"))
+        user = sso.upsert_user(engine, sso_cfg, claims)
+        if user["disabled"]:
+            refuse("this account is disabled here", user["email"])
+        cookie, csrf = sso.new_session(sso_cfg, user)
+        sso.audit(engine, f"user:{user['email'] or user['id']}", "sign-in", tenant=user["tenant"], status=200,
+                  detail={"role": user["role"]})
+        r = RedirectResponse(flow["next"], status_code=302)
+        age = int(sso_cfg.session_hours * 3600)
+        r.set_cookie(sso.SESSION, cookie, max_age=age, httponly=True, secure=sso_cfg.secure, samesite="lax")
+        r.set_cookie(sso.CSRF, csrf, max_age=age, httponly=False, secure=sso_cfg.secure, samesite="lax")
+        r.delete_cookie(sso.FLOW, path="/auth")
+        return r
+
+    @app.post("/auth/logout", include_in_schema=False)
+    def sso_logout():
+        r = JSONResponse({"signed_out": True})
+        r.delete_cookie(sso.SESSION)
+        r.delete_cookie(sso.CSRF)
+        return r
+
+    class UserIn(BaseModel):
+        role: Optional[str] = Field("", description="read | manage | admin; null goes back to the provider's claims")
+        disabled: Optional[bool] = None
+
+    @app.get("/v1/users", tags=["admin"], summary="People who have signed in with SSO, and their roles")
+    def users(p: Principal = Depends(require("admin"))):
+        return sso.list_users(engine, p.tenant)
+
+    @app.put("/v1/users/{user_id}", tags=["admin"], summary="Set a person's role over their claims, or disable them")
+    def set_user(user_id: str, body: UserIn, p: Principal = Depends(require("admin"))):
+        if p.user_id == user_id and (body.disabled or (body.role not in ("", None, "admin"))):
+            raise HTTPException(400, "You can't take away your own admin role or disable yourself.")
+        try:
+            u = sso.set_user(engine, user_id, body.role, body.disabled, p.tenant)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        if u is None:
+            raise HTTPException(404, "No such person here.")
+        return u
+
+    @app.get("/v1/audit", tags=["admin"], summary="Who changed what, and when: every change, sign-in and refusal")
+    def audit_log(actor: Optional[str] = None, limit: int = 200, p: Principal = Depends(require("admin"))):
+        return sso.read_audit(engine, p.tenant, actor, limit)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz():

@@ -298,6 +298,33 @@ agent_steps = Table(
     Column("tokens_reasoning", Integer),
 )
 
+# People who sign in with SSO (assay/sso.py), and every change anyone made.
+users = Table(
+    "users", metadata,
+    Column("id", String(32), primary_key=True),  # a digest of issuer and subject
+    Column("issuer", String(512), nullable=False),
+    Column("subject", String(256), nullable=False),
+    Column("tenant", String(64), nullable=False),
+    Column("email", String(320)),
+    Column("name", String(256)),
+    Column("claims_role", String(16)),  # read | manage | admin, from the provider's claims at sign-in
+    Column("role", String(16)),  # set by an admin; holds over the claims while it's set
+    Column("disabled", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime, nullable=False),
+    Column("last_login_at", DateTime),
+)
+
+audit_log = Table(
+    "audit_log", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("ts", DateTime, nullable=False, index=True),
+    Column("tenant", String(64), index=True),
+    Column("actor", String(256), nullable=False),  # user:<email> | key:<id> (<name>) | ASSAY_ADMIN_KEY | open mode
+    Column("action", String(512), nullable=False),  # "POST /v1/contracts", "sign-in", "sign-in refused"
+    Column("status", Integer),
+    Column("detail", JSON),
+)
+
 # Judge calibrations (assay/calibrate.py): a judge run over a golden set, and how it tracked the labels.
 calibrations = Table(
     "calibrations", metadata,
