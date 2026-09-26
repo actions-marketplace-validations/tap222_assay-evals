@@ -173,7 +173,7 @@ def test(engine: Engine, source: str, kind: str) -> str:
     if cfg is None:
         raise ValueError(f"{KINDS[kind]['label']} isn't set up.")
     if kind == "slack":
-        slack_send(cfg, "✅ Assay is connected to this channel. Alerts will appear here.")
+        slack_send(cfg, "Assay is connected to this channel. Alerts will appear here.")
         return "Sent a test message to the channel."
     if kind == "jira":
         req = urllib.request.Request(f"{cfg['site'].rstrip('/')}/rest/api/3/project/{cfg['project']}", headers={
