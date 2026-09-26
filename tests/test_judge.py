@@ -169,7 +169,7 @@ with assay.run("support", test="refund") as r:
     out = capsys.readouterr().out
     assert "Consistency" in out and "2/5: Says refunded" in out
     assert "Judged 1 run with claude-opus-5 (plan quality, consistency)." in out
-    assert "1 LLM call, 0 retries, 0 tokens in, 0 out, cost unknown (set [judge.prices], or ASSAY_PRICES)." in out
+    assert "1 LLM call, 0 retries, 0 tokens in, 0 out, cost unknown (set [prices], or ASSAY_PRICES)." in out
 
 
 def test_personal_data_is_redacted_before_it_reaches_the_judge():

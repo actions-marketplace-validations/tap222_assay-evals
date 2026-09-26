@@ -125,6 +125,21 @@ def _prices(given: Optional[dict]) -> Dict[str, tuple]:
     return out
 
 
+_env_prices: Tuple[Optional[str], Dict[str, tuple]] = (None, {})
+
+
+def env_prices() -> Dict[str, tuple]:
+    """ASSAY_PRICES, read once per value; {} when unset or unreadable (recording never fails on it)."""
+    global _env_prices
+    raw = os.environ.get("ASSAY_PRICES")
+    if raw != _env_prices[0]:
+        try:
+            _env_prices = (raw, _prices(None))
+        except ValueError:
+            _env_prices = (raw, {})
+    return _env_prices[1]
+
+
 def price_of(prices: Dict[str, tuple], model: Optional[str]) -> Optional[tuple]:
     """The price for a model: its own, or the longest model prefix that has one."""
     if not model:

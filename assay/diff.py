@@ -213,7 +213,10 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
             "regressions": regressions, "new_failures": [entry(c) for c in b["new failure"]],
             "changed": changed, "flaky": flaky, "improved": [local._short(c) for c in sorted(improved)],
             "not_judged": [{"name": local._short(x["case_id"]), "field": x["field"], "reason": x["reason"]}
-                           for x in result["not_judged"]]}
+                           for x in result["not_judged"]],
+            "totals": [{**x, "most": [{**m, "name": local._short(m["case_id"])} for m in x["most"]]}
+                       for x in result.get("behavior_suite") or []] if cfg["behavior"]["fail"] else [],
+            "totals_info": [] if cfg["behavior"]["fail"] else result.get("behavior_suite") or []}
 
 
 # ---------- showing it ----------
@@ -255,6 +258,14 @@ def text(d: dict) -> str:
             for i, e in enumerate(items, 1):
                 out += _entry_lines(i, e, paint) + [""]
             out.pop()
+    totals = d.get("totals") or d.get("totals_info") or []
+    if totals:
+        out += ["", paint("WHOLE-RUN TOTALS" + ("" if d.get("totals") else " (not failing: [behavior] fail = false)"),
+                          "bold"), ""]
+        for x in totals:
+            out.append(f"- {x['text']}")
+            if x.get("most"):
+                out.append(paint("  grew most: " + ", ".join(m.get("name") or m["case_id"] for m in x["most"]), "dim"))
     if d["flaky"]:
         out += ["", paint("FLAKY", "bold"), ""] + [f"- {x['name']}: {x['detail']}, the way it did before"
                                                    for x in d["flaky"]]
@@ -291,6 +302,10 @@ def markdown(d: dict) -> str:
                 out += [f"   - Expected: {_code(' → '.join(e['expected']) or '(no calls)', 300)}",
                         f"   - Actual: {_code(' → '.join(e['actual']) or '(no calls)', 300)}"]
             out += [f"   - {_md(r)}" for r in e["reasons"][:2]]
+    if d.get("totals"):
+        out += ["", "### Whole-run totals", ""]
+        out += [f"- {_md(x['text'])}" + (f" (grew most: {', '.join(_code(m['name']) for m in x['most'])})"
+                                          if x.get("most") else "") for x in d["totals"]]
     return "\n".join(out) + "\n"
 
 
@@ -299,7 +314,7 @@ def as_json(d: dict) -> str:
 
 
 def regressed(d: dict) -> bool:
-    return bool(d.get("regressions") or d.get("new_failures"))
+    return bool(d.get("regressions") or d.get("new_failures") or d.get("totals"))
 
 
 # ---------- the command ----------

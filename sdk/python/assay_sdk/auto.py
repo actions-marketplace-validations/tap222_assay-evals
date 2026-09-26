@@ -224,7 +224,12 @@ def _reading(provider: str):
         for t in kwargs.get("tools") or []:
             if isinstance(t, dict):
                 offered.append(t.get("name") or (t.get("function") or {}).get("name"))
-        return {"model": r.model or kwargs.get("model"), "tokens_in": r.usage.get("input"),
+        from assay_sdk.runtime import cost_of, env_prices
+        if r.model is None and kwargs.get("model"):
+            r.model = kwargs["model"]
+        prices = env_prices()
+        return {"model": r.model, "tokens_in": r.usage.get("input"),
+                "cost_usd": cost_of(r, prices) if (prices or r.cost is not None) else None,
                 "tokens_out": r.usage.get("output"), "tokens_cached": r.usage.get("cached"),
                 "tokens_reasoning": r.usage.get("reasoning"), "text": (r.text or "")[:MAX_TEXT] or None,
                 "tools": [t for t in offered if t] or None, "finish_reason": r.finish_reason,
@@ -313,13 +318,79 @@ TARGETS = [  # (module, class or None for a module function, method, provider)
 ]
 
 
+# ---------- retrievers ----------
+
+RETRIEVERS = [  # (module, class, method): what a retriever returns is what goes into the prompt
+    ("langchain_core.retrievers", "BaseRetriever", "invoke"),
+    ("langchain_core.retrievers", "BaseRetriever", "ainvoke"),
+    ("llama_index.core.base.base_retriever", "BaseRetriever", "retrieve"),
+    ("llama_index.core.base.base_retriever", "BaseRetriever", "aretrieve"),
+]
+_retrieving: "contextvars.ContextVar[bool]" = contextvars.ContextVar("assay_retrieving", default=False)
+
+
+def _record_retrieval(owner: Any, args: tuple, kwargs: dict, out: Any, started: datetime) -> None:
+    run = _sdk().current()
+    if run is None:
+        return
+    try:
+        q = args[0] if args else kwargs.get("input", kwargs.get("str_or_query_bundle", kwargs.get("query")))
+        q = getattr(q, "query_str", q)
+        name = getattr(owner, "name", None) or type(owner).__name__
+        run.retrieve(q, list(out or []), name=str(name), started=started, ended=datetime.now(timezone.utc))
+    except Exception:  # recording must never break the retrieval
+        log.debug("Assay couldn't record a retrieval", exc_info=True)
+
+
+def _wrap_retriever(original: Callable) -> Callable:
+    """Record a retriever's call: the outermost only, so an ensemble or a compressor around other
+    retrievers is one retrieval, with what it finally returned."""
+    if inspect.iscoroutinefunction(original):
+        @functools.wraps(original)
+        async def patched(self, *args, **kwargs):
+            if _retrieving.get():
+                return await original(self, *args, **kwargs)
+            token, started = _retrieving.set(True), datetime.now(timezone.utc)
+            try:
+                out = await original(self, *args, **kwargs)
+            finally:
+                _retrieving.reset(token)
+            _record_retrieval(self, args, kwargs, out, started)
+            return out
+    else:
+        @functools.wraps(original)
+        def patched(self, *args, **kwargs):
+            if _retrieving.get():
+                return original(self, *args, **kwargs)
+            token, started = _retrieving.set(True), datetime.now(timezone.utc)
+            try:
+                out = original(self, *args, **kwargs)
+            finally:
+                _retrieving.reset(token)
+            _record_retrieval(self, args, kwargs, out, started)
+            return out
+    patched._assay = True
+    return patched
+
+
 def instrument() -> List[str]:
     """Record the model calls the installed SDKs make: Anthropic, OpenAI (chat and responses),
     Gemini (google-genai), Ollama and LiteLLM. Each is recorded the same way (assay_sdk/llm.py):
-    text, usage, the tool calls the model asked for, and why it stopped. Returns what was
-    instrumented (e.g. ["anthropic Messages.create"]); calling it twice changes nothing."""
+    text, usage, the tool calls the model asked for, and why it stopped. LangChain and LlamaIndex
+    retrievers are recorded too (run.retrieve()): the fragments each query returned, with their
+    tokens. Returns what was instrumented (e.g. ["anthropic Messages.create"]); calling it twice
+    changes nothing."""
     import importlib
     done = []
+    for module, cls_name, method in RETRIEVERS:
+        try:
+            owner = getattr(importlib.import_module(module), cls_name, None)
+        except ImportError:
+            continue
+        original = getattr(owner, method, None) if owner is not None else None
+        if original is not None and not getattr(original, "_assay", False):
+            setattr(owner, method, _wrap_retriever(original))
+            done.append(f"{module.split('.')[0]} {cls_name}.{method}")
     for module, cls_name, method, provider in TARGETS:
         try:
             mod = importlib.import_module(module)

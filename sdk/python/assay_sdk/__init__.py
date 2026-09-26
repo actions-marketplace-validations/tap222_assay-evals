@@ -309,7 +309,13 @@ class Run:
             tokens_reasoning: Optional[int] = None) -> None:
         """A model call. prompt is "id@version"; text is the output (or a summary of it); tools are the
         tools the model was offered (names, or the tool definitions you passed the model). name: the
-        step it belongs to, for a pipeline (the calls of a step are its cost and its models)."""
+        step it belongs to, for a pipeline (the calls of a step are its cost and its models). Without
+        cost_usd, the cost comes from ASSAY_PRICES ([prices] in assay.toml) when the model has one."""
+        if cost_usd is None and model and (tokens_in or tokens_out):
+            from assay_sdk.runtime import env_prices, price_of
+            p = price_of(env_prices(), model)
+            if p:
+                cost_usd = round(((tokens_in or 0) * p[0] + (tokens_out or 0) * p[1]) / 1e6, 8)
         self._step("llm", started, name=name, finish_reason=finish_reason, tool_calls=self._c.clean(tool_calls),
                    tokens_cached=tokens_cached, tokens_reasoning=tokens_reasoning, model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
                    prompt=prompt, text=self._c.clean(text), ended_at=_ts(ended),
@@ -338,6 +344,21 @@ class Run:
         Its contents count as what the agent retrieved, for checking a judge's context."""
         self._step("resource", started, uri=uri, result=self._c.clean(contents), server=server,
                    ended_at=_ts(ended), status="error" if error else "ok", error=error)
+
+    def retrieve(self, query: Any, fragments: Any, used: Any = None, name: str = "retrieve",
+                 server: Optional[str] = None, error: Optional[str] = None,
+                 started: Optional[datetime] = None, ended: Optional[datetime] = None) -> None:
+        """What a retrieval found and put into the prompt, e.g. retrieve(question, docs, used=4) for
+        the top 4 after re-ranking. fragments: text, dicts (text, id, tokens, score, source),
+        LangChain Documents or LlamaIndex nodes. used: which went into the prompt (None: all; an
+        int: the first n; a list: ids or positions). Fragments per query, their tokens and their
+        share of the prompt are compared with the baseline, and [behavior] limits apply to them."""
+        from assay_sdk.retrieval import fragments as _fragments
+        frags = [{**f, "text": self._c.clean(f["text"])} if f.get("text") else f
+                 for f in _fragments(fragments, used)]
+        self._step("retrieval", started, name=name[:128], query=self._c.clean(query if isinstance(query, str) else
+                                                                          str(query))[:32768] if query is not None else None,
+                   fragments=frags, server=server, ended_at=_ts(ended), status="error" if error else "ok", error=error)
 
     def plan(self, steps: List[Any], text: Optional[str] = None) -> None:
         """What the agent means to do, before doing it: the tools it will call, in order, each a name

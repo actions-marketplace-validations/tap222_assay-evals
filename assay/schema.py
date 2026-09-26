@@ -74,7 +74,8 @@ class Step(_E):
     type: Literal["step"]
     run_id: str = Field(..., max_length=128)
     seq: int = Field(..., ge=0)
-    kind: Literal["llm", "tool", "state", "answer", "stage", "approval", "resource", "mcp_prompt", "plan"]
+    kind: Literal["llm", "tool", "state", "answer", "stage", "approval", "resource", "mcp_prompt", "plan",
+                  "retrieval"]
     name: Optional[str] = Field(None, max_length=128)
     parent_seq: Optional[int] = Field(None, ge=0)
     ended_at: Optional[datetime] = None
@@ -103,6 +104,10 @@ class Step(_E):
     # plan: the tools the agent means to call, in order; text is the plan as it said it
     plan: Optional[List[Union[str, Dict[str, Any]]]] = Field(
         None, max_length=100, description='plan: ["search_customer", {"tool": "refund", "args": {"id": "O-17"}}]')
+    # retrieval: what was searched for, and the fragments found (which went into the prompt: used)
+    query: Optional[str] = Field(None, max_length=32768)
+    fragments: Optional[List[Dict[str, Any]]] = Field(
+        None, max_length=1000, description='retrieval: [{"id", "tokens", "used", "score", "source", "text"}]')
     # state
     op: Optional[Literal["create", "update", "delete"]] = None
     value: Optional[Any] = None
@@ -120,6 +125,17 @@ class Step(_E):
         from assay_sdk.llm import normalize_args
         return None if v is None else normalize_args(v)
 
+    @field_validator("fragments", mode="before")
+    @classmethod
+    def _fragments(cls, v):
+        """Fragments sent as text or partial dicts: made whole, with tokens estimated where missing."""
+        if v is None:
+            return None
+        from assay_sdk.retrieval import fragments
+        if all(isinstance(f, dict) and "position" in f and "tokens" in f and "used" in f for f in v):
+            return v
+        return fragments(v, [i for i, f in enumerate(v) if not isinstance(f, dict) or f.get("used", True)])
+
     @field_validator("tool_calls", mode="before")
     @classmethod
     def _calls(cls, v):
@@ -134,10 +150,10 @@ class Step(_E):
                    "tool": {"args", "result", "server"}, "state": {"op", "value"}, "answer": {"text"},
                    "stage": {"outputs", "did_work", "prompt"}, "approval": {"decision", "by", "text"},
                    "resource": {"uri", "result", "server"}, "mcp_prompt": {"args", "result", "server"},
-                   "plan": {"plan", "text"}}[self.kind]
+                   "plan": {"plan", "text"}, "retrieval": {"query", "fragments", "server"}}[self.kind]
         specific = {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "args", "result", "op",
                     "value", "outputs", "did_work", "tools", "decision", "by", "server", "uri", "plan",
-                    "finish_reason", "tool_calls", "tokens_cached", "tokens_reasoning"}
+                    "finish_reason", "tool_calls", "tokens_cached", "tokens_reasoning", "query", "fragments"}
         wrong = [f for f in specific - allowed if getattr(self, f) is not None]
         if wrong:
             raise ValueError(f"a {self.kind} step doesn't take {', '.join(sorted(wrong))}")
@@ -148,9 +164,17 @@ class Step(_E):
         if self.kind == "plan" and (not self.plan or not all(
                 isinstance(x, str) or (isinstance(x, dict) and isinstance(x.get("tool"), str)) for x in self.plan)):
             raise ValueError('a plan step needs plan: tool names, or {"tool": name, "args": {...}}')
+        if self.kind == "retrieval" and self.fragments is None:
+            raise ValueError("a retrieval step needs its fragments (an empty list if it found none)")
         if self.kind == "approval" and not self.decision:
             raise ValueError("an approval step needs a decision: approved, rejected or pending")
         return self
+
+
+def retrieval_args(query: Optional[str], fragments: Optional[list]) -> dict:
+    """A retrieval step as stored: args are the query and its counts, result the fragments."""
+    from assay_sdk.retrieval import summary
+    return {"query": query, **summary(fragments)}
 
 
 class RunEnd(_E):
@@ -327,11 +351,12 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                         "args": {"op": e.op or "update"} if e.kind == "state" else
                         {"decision": e.decision, "by": e.by} if e.kind == "approval" else
                         {"uri": e.uri} if e.kind == "resource" else
-                        {"steps": e.plan} if e.kind == "plan" else e.args, "server": e.server,
+                        {"steps": e.plan} if e.kind == "plan" else
+                        retrieval_args(e.query, e.fragments) if e.kind == "retrieval" else e.args, "server": e.server,
                         "tokens_in": e.tokens_in, "tokens_out": e.tokens_out, "prompt": e.prompt, "tools": e.tools,
                         "finish_reason": e.finish_reason, "tool_calls": e.tool_calls, "tokens_cached": e.tokens_cached,
                         "tokens_reasoning": e.tokens_reasoning,
-                        "result": e.value if e.kind == "state" else e.result,
+                        "result": e.value if e.kind == "state" else e.fragments if e.kind == "retrieval" else e.result,
                         "error": e.error if e.status == "error" else None, "text": e.text, "model": e.model,
                         "tokens": tokens or None, "cost_usd": e.cost_usd, "started_at": e.ts,
                         "finished_at": e.ended_at, "parent_seq": e.parent_seq})

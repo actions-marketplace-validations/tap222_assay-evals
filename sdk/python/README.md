@@ -269,6 +269,13 @@ The run failed Assay's checks:
 .must_get_approval_before("refund").max_cost(0.05).max_latency(8).max_tools_exposed(10)
 .max_context_tokens(8000).must_resolve()`.
 
+What retrieval put into the prompt is recorded with `run.retrieve(query, docs, used=4)`: the
+fragments (text, dicts, LangChain Documents, LlamaIndex nodes), their tokens, and which went into
+the prompt. `assay.instrument()` records LangChain and LlamaIndex retrievers on its own.
+Fragments and retrieved tokens per query are compared with the baseline, the whole run's
+totals are too, and `[behavior] max_fragments` and `max_retrieved_tokens` are limits
+([Retrieved context](../../docs/agents.md#retrieved-context-what-rag-puts-in-the-prompt-and-what-it-costs)).
+
 For the test body, `assay_sdk.testing` has `assert_called(run, tool, **args)`,
 `assert_not_called`, `assert_called_before(run, first, then)`, `assert_max_steps(run, n)`,
 `assert_answer_contains` and `assert_no_pii`. Each fails with what the run actually did.

@@ -28,7 +28,8 @@ def test_measure_and_what_counts_as_worse():
     before = behavior.measure(traj([llm(1200, 0.004, 8), {"kind": "approval", "name": "refund",
                                                           "args": {"decision": "approved"}}]))
     assert before == {"cost_usd": 0.004, "seconds": 2.0, "steps": 2, "context_tokens": 1200, "tools_exposed": 8,
-                      "outcome": "resolved", "approvals": {"refund": "approved"}}
+                      "outcome": "resolved", "approvals": {"refund": "approved"}, "input_tokens": 1200,
+                      "fragments": None, "retrieved_tokens": None, "context_share": None, "retriever": None}
     same = behavior.measure(traj([llm(1300, 0.0045, 9), {"kind": "approval", "name": "refund",
                                                          "args": {"decision": "approved"}}], seconds=2.4))
     assert behavior.compare(same, before) == []  # small moves aren't news
@@ -40,7 +41,7 @@ def test_measure_and_what_counts_as_worse():
                      "Context: 1,200 tokens → 9,000 tokens (7.5×)", "Tools exposed: 8 tools → 30 tools (3.8×)",
                      "Outcome: resolved → escalated", "Approval for refund: approved → rejected"]
     assert [c["metric"] for c in behavior.compare(worse, before, {"cost_usd": 0, "seconds": 5})] == [
-        "context_tokens", "tools_exposed", "outcome", "approvals"]  # 0 turns cost off; latency needs 5×
+        "context_tokens", "tools_exposed", "outcome", "approvals"]  # one call: input tokens is the context  # 0 turns cost off; latency needs 5×
     assert behavior.combine([{"cost_usd": 1, "outcome": "resolved"}, {"cost_usd": 3, "outcome": "resolved"},
                              {"cost_usd": 2, "outcome": "unresolved"}])["cost_usd"] == 2
 

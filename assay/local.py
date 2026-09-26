@@ -47,7 +47,8 @@ TENANT = "local"
 EXAMPLE = "tests/ai/test_support.py"
 CHECK_NAMES = {"plan_quality": "Plan quality", "consistency": "Consistency", "completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state",
                "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts",
-               "plan": "Plan adherence", "injection": "Prompt injection"}
+               "plan": "Plan adherence", "injection": "Prompt injection", "max_fragments": "Fragments per query",
+               "max_retrieved_tokens": "Retrieved tokens per query", "max_context_tokens": "Prompt size"}
 PII_EVALUATOR = "assay.pii@1"
 
 CONFIG_TEMPLATE = '''\
@@ -85,15 +86,26 @@ allow_in_answer = []
 checks = true
 
 # Behavior compared with each test's last passing run: a case fails when it costs, takes, grows
-# its context or offers tools this many times over its baseline (0 turns one off), when it stops
-# resolving, or when an approval decision changes. fail = false only reports it.
+# its context, retrieves or offers tools this many times over its baseline (0 turns one off),
+# when it stops resolving, or when an approval decision changes. fail = false only reports it.
 [behavior]
 fail = true
 cost_usd = 1.5
 seconds = 1.5
 context_tokens = 1.5
+input_tokens = 1.5
+fragments = 1.5          # retrieved fragments one query puts into the prompt (run.retrieve())
+retrieved_tokens = 1.5
 tools_exposed = 1.5
 steps = 1.5
+suite = 1.25             # the whole run's totals: every query a little bigger adds up
+# max_fragments = 8          # limits, whatever the baseline: fragments per query,
+# max_retrieved_tokens = 3000  # tokens of fragments per query,
+# max_context_tokens = 8000    # and input per model call
+
+# Dollars per million tokens (input, output[, cached]): recorded model calls get their cost.
+# [prices]
+# "claude-opus-5" = [5, 25]
 
 # An LLM judge for what rules can't check: whether each run's plan was a good one, and whether
 # its reasoning, tool results and answer agree. A model call per run, so off unless asked
@@ -210,8 +222,25 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
             "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()},
                     "answers": bool(pii.get("answers", True)), "answer_allow": set(answer_allow)},
             "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
-            "behavior": _behavior_config(cfg.get("behavior") or {}), "judge": _judge_config(cfg.get("judge") or {})}
+            "behavior": _behavior_config(cfg.get("behavior") or {}), "judge": _judge_config(cfg.get("judge") or {}),
+            "prices": _prices_config(cfg.get("prices"))}
+    if out["prices"] and "prices" not in out["judge"]:
+        out["judge"]["prices"] = out["prices"]
+
     return with_trusted_policy(out) if policy else out
+
+
+def _prices_config(p) -> Optional[dict]:
+    """[prices]: model = [input, output(, cached)], dollars per million tokens."""
+    if p is None:
+        return None
+    from assay_sdk.runtime import _prices
+    try:
+        _prices(p if isinstance(p, dict) else {"": p})
+    except (TypeError, ValueError):
+        raise SetupError(f'{CONFIG}, [prices]: "model" = [input, output] dollars per million tokens, e.g. '
+                         f'"claude-opus-5" = [5, 25].')
+    return p
 
 
 # ---------- trusted policy: a pull request can't loosen the checks that judge it ----------
@@ -278,6 +307,21 @@ def policy_changes(base: dict, pr: dict) -> List[dict]:
             add(f"turns the {what.lower()} regression check off" if b == 0 else
                 f"lets {what.lower()} grow {b:g}x over the baseline, not {a:g}x" if a else
                 f"checks {what.lower()} against the baseline ({b:g}x)", _looser_ratio(a, b))
+    a, b = base["behavior"].get("suite", behavior.SUITE_RATIO), pr["behavior"].get("suite", behavior.SUITE_RATIO)
+    if a != b:
+        add("turns the whole-run totals check off" if b == 0 else
+            f"lets the whole run's totals grow {b:g}x over the baseline, not {a:g}x" if a else
+            f"checks the whole run's totals against the baseline ({b:g}x)", _looser_ratio(a, b))
+    bl, pl = base["behavior"].get("limits") or {}, pr["behavior"].get("limits") or {}
+    for k in behavior.LIMITS:
+        a, b = bl.get(k), pl.get(k)
+        if a == b:
+            continue
+        what = CHECK_NAMES[k].lower()
+        add(f"removes the limit on {what} ({a:g})" if b is None else f"sets a limit on {what} ({b:g})" if a is None
+            else f"{'raises' if b > a else 'lowers'} the limit on {what} from {a:g} to {b:g}",
+            b is None or (a is not None and b > a))
+
     if pr["tolerance"] != base["tolerance"]:
         add(f"raises the tolerated pass-rate drop from {base['tolerance']:g} to {pr['tolerance']:g}"
             if pr["tolerance"] > base["tolerance"] else
@@ -297,7 +341,16 @@ def strictest(base: dict, pr: dict) -> dict:
     ratios = {k: _stricter_ratio(_ratio(base, k), _ratio(pr, k)) for k in behavior.NUMBERS}
     return {**pr, "contracts": rules, "pii": pii, "tolerance": min(base["tolerance"], pr["tolerance"]),
             "pytest": {**pr["pytest"], "checks": base["pytest"]["checks"] or pr["pytest"]["checks"]},
-            "behavior": {"fail": base["behavior"]["fail"] or pr["behavior"]["fail"], "ratios": ratios}}
+            "behavior": {"fail": base["behavior"]["fail"] or pr["behavior"]["fail"], "ratios": ratios,
+                         "suite": _stricter_ratio(base["behavior"].get("suite", behavior.SUITE_RATIO),
+                                                  pr["behavior"].get("suite", behavior.SUITE_RATIO)),
+                         "limits": _stricter_limits(base["behavior"].get("limits") or {},
+                                                    pr["behavior"].get("limits") or {})}}
+
+
+def _stricter_limits(a: dict, b: dict) -> dict:
+    return {k: min(v for v in (a.get(k), b.get(k)) if v is not None) for k in behavior.LIMITS
+            if a.get(k) is not None or b.get(k) is not None}
 
 
 def with_trusted_policy(cfg: dict) -> dict:
@@ -335,7 +388,7 @@ def judge_cost(judged: dict) -> str:
     s = judged["summary"]
     t = s["tokens"]
     cost = f"estimated ${s['cost_usd']:,.2f}" if s["cost_usd"] is not None else \
-        "cost unknown (set [judge.prices], or ASSAY_PRICES)"
+        "cost unknown (set [prices], or ASSAY_PRICES)"
     line = (f"{_n(s['llm_calls'], 'LLM call')}, {_n(s['retries'], 'retry').replace('retrys', 'retries')}, "
             f"{t['input']:,} tokens in, {t['output']:,} out, {cost}")
     if s["unpriced_calls"] and s["cost_usd"] is not None:
@@ -370,16 +423,23 @@ def _judge_config(j: dict) -> dict:
 
 
 def _behavior_config(b: dict) -> dict:
-    unknown = set(b) - set(behavior.NUMBERS) - {"fail"}
+    unknown = set(b) - set(behavior.NUMBERS) - {"fail", "suite"} - set(behavior.LIMITS)
     if unknown:
-        raise SetupError(f"{CONFIG}, [behavior]: unknown {', '.join(sorted(unknown))}. Use fail, and ratios for "
-                         f"{', '.join(behavior.NUMBERS)} (0 turns one off).")
-    return {"fail": bool(b.get("fail", True)), "ratios": {k: float(v) for k, v in b.items() if k != "fail"}}
+        raise SetupError(f"{CONFIG}, [behavior]: unknown {', '.join(sorted(unknown))}. Use fail; ratios for "
+                         f"{', '.join(behavior.NUMBERS)} (0 turns one off); suite, the ratio for the whole "
+                         f"run's totals; and limits: {', '.join(behavior.LIMITS)}.")
+    for k in [*behavior.NUMBERS, "suite", *behavior.LIMITS]:
+        if k in b and (isinstance(b[k], bool) or not isinstance(b[k], (int, float)) or b[k] < 0):
+            raise SetupError(f"{CONFIG}, [behavior] {k}: a number, not {b[k]!r}.")
+    return {"fail": bool(b.get("fail", True)), "ratios": {k: float(v) for k, v in b.items() if k in behavior.NUMBERS},
+            "suite": float(b.get("suite", behavior.SUITE_RATIO)),
+            "limits": {k: float(b[k]) for k in behavior.LIMITS if k in b}}
 
 
 DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
                   "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True},
-                  "behavior": {"fail": True, "ratios": {}}, "judge": {"enabled": False, "model": "claude-opus-5", "redact": True, "provider": "anthropic"}}
+                  "prices": None, "behavior": {"fail": True, "ratios": {}, "suite": behavior.SUITE_RATIO, "limits": {}},
+                  "judge": {"enabled": False, "model": "claude-opus-5", "redact": True, "provider": "anthropic"}}
 
 
 def find_config(start: Path) -> dict:
@@ -402,9 +462,11 @@ def as_trajectory(steps: List[dict], answer: Optional[str]) -> dict:
                     "args": {"op": s.get("op") or "update"} if state else
                     {"decision": s.get("decision"), "by": s.get("by")} if kind == "approval" else
                     {"uri": s.get("uri")} if resource else
-                    {"steps": s.get("plan")} if kind == "plan" else s.get("args"),
+                    {"steps": s.get("plan")} if kind == "plan" else
+                    schema.retrieval_args(s.get("query"), s.get("fragments")) if kind == "retrieval" else s.get("args"),
                     "tokens_in": s.get("tokens_in"), "tools": s.get("tools"),
-                    "result": s.get("value") if state else s.get("result"), "error": s.get("error"),
+                    "result": s.get("value") if state else s.get("fragments") if kind == "retrieval" else
+                    s.get("result"), "error": s.get("error"),
                     "text": s.get("text"), "model": s.get("model"),
                     "tokens": (s.get("tokens_in") or 0) + (s.get("tokens_out") or 0) or None,
                     "cost_usd": s.get("cost_usd"), "started_at": None, "finished_at": None})
@@ -431,6 +493,9 @@ def check_run(steps: List[dict], expected: Optional[dict], answer: Optional[str]
         found = pii_findings(traj, cfg["pii"]["allow"], request, cfg["pii"]["answers"], cfg["pii"]["answer_allow"])
         if found:
             by_reason[f"Personal data leaked: {'; '.join(found)}"] = ["PII"]
+    for r in behavior.limits(traj, (cfg.get("behavior") or {}).get("limits") or {}):
+        if r["status"] == "fail":
+            by_reason.setdefault(r["reason"], []).append(CHECK_NAMES[r["field"]])
     return [f"{', '.join(checks)}: {why}" for why, checks in by_reason.items()]
 
 
@@ -496,12 +561,14 @@ TIMED_OUT = 124  # the exit code `timeout` uses
 
 
 def run_command(command: str, events: Path, run_id: str, repeat: int, timeout: Optional[float] = None,
-                rerun_failed: bool = False) -> List[int]:
+                rerun_failed: bool = False, prices: Optional[dict] = None) -> List[int]:
     """Run the command once per attempt, with the SDK recording to `events`. Returns the exit codes;
     TIMED_OUT for an attempt stopped at `timeout` seconds (with everything it started)."""
     import signal
     env = {k: v for k, v in os.environ.items() if k != "ASSAY_URL"}  # record locally, never to a server
     env.update(ASSAY_PATH=str(events), ASSAY_TEST_RUN=run_id)
+    if prices and not env.get("ASSAY_PRICES"):  # [prices]: model calls are recorded with their cost
+        env["ASSAY_PRICES"] = json.dumps(prices)
     if rerun_failed:
         env["ASSAY_RERUN"] = "failed"  # the pytest plugin runs only what didn't pass last time
     codes = []
@@ -608,6 +675,25 @@ def check_pii(engine, source, run_id: str, pii: dict) -> None:
     ingest.upsert(engine, store.eval_results, rows, "result_id")
 
 
+def check_limits(engine, source, run_id: str, limits: dict) -> None:
+    """The [behavior] limits, one result per agent run and limit, stored like the trajectory checks."""
+    heads = agents.run_trajectories(engine, TENANT, run_id)
+    trajs = source.trajectories([h["trajectory_id"] for h in heads])
+    rows = []
+    for h in heads:
+        traj = trajs.get(h["trajectory_id"])
+        if traj is None:
+            continue
+        case = h["case_id"] or h["trajectory_id"]
+        for r in behavior.limits(traj, limits):
+            rows.append({"tenant": TENANT, "run_id": run_id, "case_id": case, "document_id": h["trajectory_id"],
+                         "result_id": ingest._derive(run_id, case, r["field"], behavior.LIMIT_EVALUATOR, h["attempt"]),
+                         "evaluator": behavior.LIMIT_EVALUATOR, "attempt": h["attempt"], "ts": h["started_at"],
+                         "lineage": h["lineage"], "score": None, "field": r["field"], "status": r["status"],
+                         "expected": r["expected"], "actual": r["actual"], "reason": r["reason"]})
+    ingest.upsert(engine, store.eval_results, rows, "result_id")
+
+
 def case_behavior(engine, run_id: str, tenant: str = TENANT) -> Dict[str, dict]:
     """Per case: its behavior over its attempts (assay/behavior.py)."""
     m = store.run_metrics
@@ -635,6 +721,8 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
                            abandoned_why=abandoned_why or "the command exited first")
         if pii and pii["check"]:
             check_pii(engine, source, run_id, pii)
+        if (behavior_cfg or {}).get("limits"):
+            check_limits(engine, source, run_id, behavior_cfg["limits"])
     out = compare(engine, run_id, baseline, tolerance, behavior_cfg)
     return out and {**out, "left_open": left_open}
 
@@ -669,13 +757,15 @@ def _behavior_changes(engine, run_id: str, baseline: Optional[str], ran: set, cf
     """{"behavior": cases whose behavior got worse than their baseline's, [{"case_id", "changes"}],
     "behavior_compared": the cases that could be compared}."""
     if not baseline:
-        return {"behavior": [], "behavior_compared": []}
+        return {"behavior": [], "behavior_compared": [], "behavior_suite": []}
     ratios = (cfg or {}).get("ratios") or {}
     now, before = case_behavior(engine, run_id, tenant), case_behavior(engine, baseline, tenant)
     compared = sorted(ran & set(now) & set(before))
     worse = [{"case_id": case, "changes": ch} for case in compared
              if (ch := behavior.compare(now[case], before[case], ratios))]
-    return {"behavior": worse, "behavior_compared": compared}
+    ratio = (cfg or {}).get("suite", behavior.SUITE_RATIO)
+    suite = behavior.suite_totals(now, before, compared, ratio)
+    return {"behavior": worse, "behavior_compared": compared, "behavior_suite": suite}
 
 
 def _rows(engine, run_id: str, tenant: str = TENANT) -> list:
@@ -751,7 +841,7 @@ def verdict(result: dict, has_baseline: bool) -> Tuple[bool, dict]:
     a pass rate that dropped beyond chance across flaky checks still does."""
     c = classify(result, has_baseline)
     dropped = has_baseline and result["stability"]["outcome"] == "rollback"
-    worse = result.get("behavior") if result.get("behavior_fails", True) else []
+    worse = (result.get("behavior") or result.get("behavior_suite")) if result.get("behavior_fails", True) else []
     return not c["problems"] and not dropped and not worse, c
 
 
@@ -904,12 +994,17 @@ CATEGORIES = [  # (name, which checks): the first that matches a check's field t
      or f.startswith(("expect.must_resolve", "expect.max_steps", "expect.must_answer"))),
     ("Planning", lambda f: f in ("plan", "plan_quality")),
     ("Reasoning", lambda f: f == "consistency"),
-    ("Behavior", lambda f: f.startswith(("expect.max_cost", "expect.max_latency", "expect.max_tools",
-                                         "expect.max_context"))),
+    ("Behavior", lambda f: f in behavior.LIMITS or f.startswith(("expect.max_cost", "expect.max_latency",
+                                                                  "expect.max_tools", "expect.max_context"))),
     ("Output quality", lambda f: True),  # the answer, the end state, your asserts, your own fields
 ]
 BUCKETS = [("regressed", "✗", "red"), ("new failure", "✗", "red"), ("couldn't be judged", "?", "yellow"),
            ("flaky", "⚠", "yellow"), ("known failure", "·", "dim"), ("passed", "✓", "green")]
+
+
+def _grew(metric: str, m: dict) -> str:
+    d = m["now"] - m["before"]
+    return f"${d:,.2f}" if metric == "cost_usd" else f"{d:,.0f}"
 
 
 def summarize(result: dict, c: dict, baseline: Optional[str]) -> dict:
@@ -994,7 +1089,9 @@ def _code(text, n: int = 120) -> str:
 
 # What a reviewer should read first: safety, then what the agent decided, then what it did, then cost.
 RANK = ("Safety", "Prompt injection", "PII", "expect.must_get_approval", "Approval for", "Outcome", "expect.must_resolve", "Finished",
-        "Tool usage", "Plan adherence", "Consistency", "Plan quality", "expect.must_call", "expect.must_not_call", "End state", "Answer", "Your asserts")
+        "Tool usage", "Plan adherence", "Consistency", "Plan quality", "expect.must_call", "expect.must_not_call", "End state", "Answer", "Your asserts",
+        "Retrieved context", "Fragments per query", "Retrieved tokens per query", "Prompt size", "Cost", "Context",
+        "Input tokens")
 
 
 def _rank(line: str) -> int:
@@ -1041,6 +1138,9 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
             was, now = paths[case]
             changes += [f"  - Expected: {_code(' → '.join(was) or '(no calls)', 300)}",
                         f"  - Actual: {_code(' → '.join(now) or '(no calls)', 300)}"]
+    for x in result.get("behavior_suite") or []:
+        changes.append(f"- {_md(x['text'])}" + (f" (most: {', '.join(_code(_short(m['case_id'])) for m in x['most'])})"
+                                                if x["most"] else ""))
     for f in result["fields"]:  # your own fields whose accuracy dropped, e.g. extraction
         if f["field"] not in CHECK_NAMES and not f["field"].startswith("expect.") and f["base_total"] and \
                 f["passed"] / f["total"] < f["base_passed"] / f["base_total"]:
@@ -1116,6 +1216,17 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
         for b in worse[:20]:
             out.append(f"  {b['case_id']}")
             out += [_paint(f"    {ch['text']}", "dim") for ch in b["changes"]]
+        out.append("")
+    suite = result.get("behavior_suite") or []
+    if suite:
+        fails_ = result.get("behavior_fails", True)
+        out.append(_paint(f"{'⚠' if fails_ else '~'} The whole run grew against its baseline"
+                          + ("" if fails_ else " (not failing: [behavior] fail = false)"), "yellow"))
+        for x in suite:
+            out.append(f"  {x['text']}")
+            if x["most"]:
+                out.append(_paint("    most: " + ", ".join(f"{m['case_id']} (+{_grew(x['metric'], m)})"
+                                                         for m in x["most"]), "dim"))
         out.append("")
     nj = result["not_judged"]
     if nj:
@@ -1229,7 +1340,7 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
         if "pytest" not in command:
             print("--failed reruns through the pytest plugin; this command isn't pytest, so it runs whole.",
                   file=sys.stderr)
-    codes = run_command(command, events, run_id, repeat, timeout, failed)
+    codes = run_command(command, events, run_id, repeat, timeout, failed, cfg.get("prices"))
     if not events.exists():
         print(f"\n`{command}` recorded nothing. Does it call assay.init() and record runs with "
               "assay.run(..., test=\"<case>\")?", file=sys.stderr)

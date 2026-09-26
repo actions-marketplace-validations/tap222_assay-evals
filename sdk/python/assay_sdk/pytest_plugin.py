@@ -137,6 +137,13 @@ def pytest_configure(config):
     os.environ.update(ASSAY_PATH=str(home / "runs" / f"{run_id}.jsonl"), ASSAY_TEST_RUN=run_id,
                       ASSAY_PYTEST_SESSION="1")
     os.environ.pop("ASSAY_URL", None)  # record locally; --assay-upload sends it afterwards
+    try:
+        prices = (_config(config) or {}).get("prices")
+    except Exception:  # a broken assay.toml is reported where it's read for the checks
+        prices = None
+    if prices and not os.environ.get("ASSAY_PRICES"):  # [prices]: model calls are recorded with their cost
+        import json
+        os.environ["ASSAY_PRICES"] = json.dumps(prices)
     if assay._client is not None:  # init() already ran, e.g. in a conftest: record to the session's file
         assay.init()
     config._assay_session = {"run_id": run_id, "other_failures": 0, "report": None, "done": threading.Event(),

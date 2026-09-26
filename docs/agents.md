@@ -175,8 +175,8 @@ budget_usd = 5      # dollars for all the judging
 
 There's one retry layer: the provider SDK's own retries are off while judging, so every
 request is counted once, with its tokens. When `max_time` or `budget_usd` is reached, the runs
-left aren't judged, and they aren't failures. The cost is an estimate from `[judge.prices]` (or
-`ASSAY_PRICES`, as JSON); with no price it says so rather than guessing. On the server,
+left aren't judged, and they aren't failures. The cost is an estimate from `[judge.prices]`
+(else `[prices]`, or `ASSAY_PRICES` as JSON); with no price it says so rather than guessing. On the server,
 `ASSAY_JUDGE_CONCURRENCY`, `ASSAY_JUDGE_RATE_LIMIT`, `ASSAY_JUDGE_MAX_TIME` and
 `ASSAY_JUDGE_BUDGET_USD` do the same, and the endpoint's answer has the same `summary`. This is
 `assay_sdk.EvalRuntime`, which you can run your own evaluators with too
@@ -254,3 +254,57 @@ stops resolving, and an approval when its decision changes. `[behavior]` in `ass
 the ratios (0 turns one off), and `fail = false` only reports it. With repeats, a case's number
 is the median of its attempts. The `requires_approval` contract puts an approval rule in
 `assay.toml` instead of in every test.
+
+### Retrieved context: what RAG puts in the prompt, and what it costs
+
+Adding retrieval to an app often multiplies its bill. Every fragment retrieved is added to the
+prompt, and each query is only a few hundred tokens bigger. Nothing looks wrong on its own until
+the invoice arrives. Assay records what retrieval put into the prompt and checks it three ways.
+
+```python
+run.retrieve(question, docs, used=4)   # the fragments found; the top 4 went into the prompt
+```
+
+`fragments` are text, dicts (`text`, `id`, `tokens`, `score`, `source`), LangChain Documents or
+LlamaIndex nodes. `used` says which went into the prompt: all of them (the default), the first n,
+or ids. A fragment without `tokens` is estimated at four characters a token. With
+`assay.instrument()` on, LangChain and LlamaIndex retrievers are recorded without this call
+(what the outermost retriever returned).
+
+**Per query, against the baseline.** A case whose queries put more fragments or more tokens into
+the prompt (1.5× and at least 2 fragments or 200 tokens) behaved worse. The line names the
+retriever and the share of the prompt it took:
+
+```
+  tests/test_support.py::test_refund_policy
+    Retrieved context (kb_search): 3 fragments, 420 tokens → 12 fragments, 2,900 tokens (68% of the prompt)
+    Context: 1,300 tokens → 4,260 tokens (3.3×)
+```
+
+**The whole run, against the baseline.** Each case can stay under its own ratio while the
+whole run triples. So the run's totals over the cases both runs have (input tokens, cost,
+retrieved tokens) are compared too, at `suite = 1.25` (and at least 1,000 tokens, or a cent):
+
+```
+⚠ The whole run grew against its baseline
+  Input tokens for the whole run: 41,000 → 118,000 (2.9×), over the 40 cases in both runs
+    most: test_refund_policy (+6,100), test_warranty (+5,800), test_returns (+5,200)
+```
+
+**Limits, whatever the baseline.** A query over a limit fails its case, from the first run:
+
+```toml
+[behavior]
+max_fragments = 8           # fragments one query puts into the prompt
+max_retrieved_tokens = 3000 # tokens of fragments one query puts into the prompt
+max_context_tokens = 8000   # input one model call gets
+suite = 1.25                # the whole run's totals (0 turns it off)
+
+[prices]                    # dollars per million tokens: recorded calls get their cost
+"claude-opus-5" = [5, 25]
+```
+
+With `[prices]` (or `ASSAY_PRICES`), model calls recorded without a cost get one from their
+tokens, so the cost checks have numbers to compare. On a pull request, the limits and `suite`
+are held to the base branch's, like every other check: raising a limit is reported as
+loosening it.

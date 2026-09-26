@@ -79,7 +79,7 @@ three things:
 | Field | Type | Meaning |
 |---|---|---|
 | `run_id`, `seq` | string, int ≥ 0 | **required.** Which run, and the step's position in it |
-| `kind` | `llm` \| `tool` \| `state` \| `answer` \| `stage` \| `approval` \| `resource` \| `mcp_prompt` \| `plan` | **required** |
+| `kind` | `llm` \| `tool` \| `state` \| `answer` \| `stage` \| `approval` \| `resource` \| `mcp_prompt` \| `plan` \| `retrieval` | **required** |
 | `name` | string | tool name, stage name, MCP prompt name, the action approved, or the object a state change touched (`order:17`) |
 | `parent_seq` | int | a step nested inside another (a tool called from inside a stage) |
 | `ended_at` | time | when it finished (`ts` is when it started) |
@@ -94,6 +94,7 @@ Fields for each kind:
 | `llm` (also) | `tools` (the tools the model was offered), `tool_calls` (the calls it asked for: `[{"name", "arguments", "id"}]`), `finish_reason` (`stop` \| `length` \| `tool_call` \| `refusal` \| `content_filter` \| `error`), `tokens_cached`, `tokens_reasoning` |
 | `tool` | `args` (an object; a JSON string is parsed, and anything else is kept as `{"_raw": …}`), `result` (JSON), `server` (the MCP server, for an MCP tool) |
 | `resource` | `uri` (**required**), `result` (its contents), `server`: an MCP resource the agent read. Its contents count as retrieved context when a judge's inputs are checked |
+| `retrieval` | `fragments` (**required**: `[{"id", "text", "tokens", "score", "source", "used"}]`, an empty list if nothing was found), `query`, `name` (the retriever), `server`: what a retrieval found, and which fragments went into the prompt (`used`, true by default). A fragment without `tokens` is estimated from its text |
 | `mcp_prompt` | `args` (the prompt's arguments), `result` (the messages it returned), `server`: an MCP prompt the agent fetched |
 | `approval` | `decision` (`approved` \| `rejected` \| `pending`), `by`, `text` (the reason) |
 | `plan` | `plan` (**required**: the tools the agent means to call, in order, each a name or `{"tool", "args"}`), `text` (the plan as the agent said it). The run is checked against it; a later plan step replaces the rest of the one before |
