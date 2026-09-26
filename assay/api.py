@@ -1020,6 +1020,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                              rt=review.runtime_for(settings), redact=settings.judge_redact,
                              consented_only=settings.review_consented_only)
 
+    @app.post("/v1/review/categories/{cid}/triage", tags=["operate"],
+              summary="What to do about a failure mode: fix the prompt, a code check, or a judge (a model call)")
+    def review_triage(cid: int, source: str, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        from assay import triage
+        out = triage.triage(engine, _tenant(source), reviewer(), cid)
+        if out is None:
+            raise HTTPException(404, f"No category {cid}.")
+        if out.get("error"):
+            raise HTTPException(502, out["error"])
+        return out
+
     @app.get("/v1/review/saturation", tags=["results"],
              summary="Whether new reviews still find new failure modes")
     def review_saturation(source: str, window: int = 20, p: Principal = Depends(require("read"))):

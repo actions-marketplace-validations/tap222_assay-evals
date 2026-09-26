@@ -145,6 +145,20 @@ def main(argv=None) -> int:
     gg.add_argument("--vs", help="Another judge's check: pick the runs the two scored furthest apart")
     gg.add_argument("--disagree", action="store_true",
                     help="Pick runs the judge passed but a deterministic check failed")
+    tg = sub.add_parser("triage", help="For each failure category: fix the prompt, a code check, or (if it persists) "
+                                       "a judge; drafts the code checks")
+    tg.add_argument("--url")
+    tg.add_argument("--source", default="events:default")
+    tg.add_argument("--category", type=int)
+    tg.add_argument("--run", action="store_true", help="Triage now (a model call per category)")
+    tg.add_argument("--apply", action="store_true", help="Write the drafted code checks")
+    tg.add_argument("--folder", default="tests/ai")
+    ev = sub.add_parser("evals", help="The evaluators themselves")
+    evs = ev.add_subparsers(dest="evals_cmd", required=True)
+    ea = evs.add_parser("audit", help="What each evaluator costs to keep: code checks and judges apart")
+    ea.add_argument("--days", type=float, default=30)
+    ea.add_argument("--format", choices=["text", "json"], default="text")
+
     rd = sub.add_parser("redact", help="Check redaction: personal data that got through, and whether edited traces "
                                        "still behave like the real ones")
     rs = rd.add_subparsers(dest="redact_cmd", required=True)
@@ -236,6 +250,14 @@ def main(argv=None) -> int:
         from pathlib import Path
         from assay import diff
         return diff.main(Path.cwd(), args.baseline, args.current, args.format)
+    if args.cmd == "triage":
+        from pathlib import Path
+        from assay import triage
+        return triage.cli(Path.cwd(), args)
+    if args.cmd == "evals":
+        from pathlib import Path
+        from assay import upkeep
+        return upkeep.cli(Path.cwd(), args.days, args.format)
     if args.cmd == "redact":
         from pathlib import Path
         from assay import redaction

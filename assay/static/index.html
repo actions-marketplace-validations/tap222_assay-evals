@@ -1432,6 +1432,18 @@ function saturationLine(t){
   return`<span>${bar} <b>${t.reviewed}</b> of a ${t.pool}-conversation pool read. `+(t.saturated?`The last ${t.window} found no new failure mode: <b>saturated</b>.`
     :t.window<t.of?`Saturation is checked over the last ${t.of}.`
     :`The last ${t.window}: ${t.new_modes} new failure mode${t.new_modes===1?"":"s"}, ${t.changed} changed, ${t.ungrouped} not grouped yet. Keep reading.`)+`</span>`}
+async function reviewCategories(el){
+  const C=await api(`/v1/review/categories?${q({source:src()})}`).catch(()=>[]);
+  const open=C.filter(c=>c.status==="open"||c.status==="confirmed");
+  const label={fix_prompt:"Fix the prompt",code_check:"A code check",judge:"A judge",none:"Nothing to build"};
+  el.innerHTML=open.length?`<h2>Failure categories</h2><p class="sub">What to do about each: fix the prompt first, a code check where a rule catches it, a judge only for what persists after a prompt change.</p>`+open.map(c=>{const t=c.triage;
+    return`<div class="stack" style="border-top:1px solid var(--line);padding-top:8px"><div><b>${esc(c.name)}</b> <span class="note">${c.notes} note${c.notes===1?"":"s"}${c.share!=null?` · ${pct(c.share,0)} of conversations`:""}${c.only_synthetic?" · synthetic runs only":""}</span></div>
+      ${t&&t.recommend?`<p><b>${label[t.recommend]||esc(t.recommend)}.</b> <span class="note">${esc(t.why||"")}</span></p>`:`<p class="note">Not triaged yet.</p>`}
+      <div><button data-triage="${c.id}">${t?"Triage again":"Triage"}</button>${t&&t.draft?` <span class="note">A drafted check: <span class="mono">assay triage --apply</span> writes it.</span>`:""}</div></div>`}).join("")
+    :`<p class="note">No failure categories yet: notes are grouped into them.</p>`;
+  el.querySelectorAll("[data-triage]").forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent="Triaging…";
+    try{await api(`/v1/review/categories/${b.dataset.triage}/triage?${q({source:src()})}`,{method:"POST"});reviewCategories(el)}catch(e){b.textContent=e.message}});
+}
 async function renderReview(){
   const box=$("#tab-review");
   if(!S.rq){box.innerHTML=`<div class="panel"><p class="note">Loading conversations…</p></div>`;
@@ -1470,8 +1482,9 @@ async function renderReview(){
     <input id="rv-hint" maxlength="80" placeholder="A short label, if one comes to mind (optional)">
     <div id="rv-also" class="stack"></div>
     <div><button id="rv-add" title="Another failure, independent of the first">Another failure</button></div>
-    <div><button id="rv-wrong">Went wrong</button> <button id="rv-fine">Nothing wrong</button> <button id="rv-skip">Skip</button> <span class="note" id="rv-msg"></span></div></div>`;
-  wire();
+    <div><button id="rv-wrong">Went wrong</button> <button id="rv-fine">Nothing wrong</button> <button id="rv-skip">Skip</button> <span class="note" id="rv-msg"></span></div></div>
+  <div class="panel stack" id="rv-cats"></div>`;
+  wire();reviewCategories($("#rv-cats"));
   const first=()=>{const r=box.querySelector("input[name=first]:checked");if(!r)return null;const x=c.turns[+r.value];return{trace_id:x.trace_id,seq:x.seq}};
   $("#rv-add").onclick=()=>{const d=document.createElement("div");d.className="also";
     d.innerHTML=`<textarea rows="2" maxlength="500" placeholder="Another failure, independent of the first" style="width:100%"></textarea>

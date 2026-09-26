@@ -145,6 +145,9 @@ a few hundred conversations a week. So Assay reads them, and a person reviews ca
    many notes aren't grouped yet. When all three are zero, new reviews have stopped revealing
    anything: saturated. The tab shows it against a pool of about 100 conversations, and so does
    `assay report`. Come back to it when the product changes.
+
+   **Then triage each category** ([triage](triage.md)): fix the prompt, a code check, or a judge
+   only for what persists after the prompt is fixed.
 4. **The loop.** A category becomes candidate test cases, drafted as a pattern's are, with the note
    as their provenance. It also becomes simulated-user personas built from its real conversations,
    for `assay_sdk.simulate`, so a failure nobody wrote a test for becomes one.

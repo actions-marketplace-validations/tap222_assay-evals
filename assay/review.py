@@ -334,6 +334,7 @@ def categories(engine: Engine, tenant: str, now: Optional[datetime] = None, exam
                     "merged_into": cat["merged_into"], "notes": len(mine),
                     "by_people": sum(1 for n in mine if not str(n.get("by") or "model:").startswith("model:")),
                     "synthetic": len(mine) - len(real), "only_synthetic": bool(mine) and not real,
+                    "triage": cat.get("triage"),
                     "share": a / read_now if read_now else None, "share_before": b / read_before if read_before else None,
                     "examples": [{"conversation": n["conversation"], "trace_ids": n["trace_ids"], "note": n["note"],
                                   "quotes": n["quotes"], "day": n["day"], "synthetic": n["synthetic"]}

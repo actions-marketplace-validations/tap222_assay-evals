@@ -375,6 +375,7 @@ review_categories = Table(
     Column("created_at", DateTime, nullable=False),
     Column("updated_at", DateTime, nullable=False),
     Column("changed_at", DateTime),  # renamed, merged or dismissed: the taxonomy changed
+    Column("triage", JSON),  # what to do about it: fix the prompt, a code check, or a judge (assay/triage.py)
 )
 
 review_runs = Table(
