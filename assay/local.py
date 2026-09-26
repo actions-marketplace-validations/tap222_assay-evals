@@ -805,6 +805,7 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     out["trust"] = trust(engine, tenant, rows)
     out["surface"] = surface_shift(engine, tenant, rows, base_rows) if baseline else []
     out["kinds"] = failure_kinds(rows, base_rows)
+    out["setup"] = setup_changes(engine, tenant, rows, base_rows) if baseline else {}
     return out
 
 
@@ -903,6 +904,132 @@ def scores(engine, tenant: str, run_id: str, rows: list, base_rows: list, skip: 
 
 def _floor(f: dict) -> str:
     return f"{f['min']:g}–{f['max']:g}" if f["min"] != f["max"] else f"{f['min']:g}"
+
+
+# ---------- what changed around a case: its prompts, models and tools ----------
+
+def _setups(engine, tenant: str, docs: List[str]) -> Dict[str, dict]:
+    """Per run: the prompt versions its model calls used, the models, and the tools they were offered."""
+    st = store.agent_steps
+    out: Dict[str, dict] = defaultdict(lambda: {"prompts": set(), "models": set(), "tools": set()})
+    ids = sorted({d for d in docs if d})
+    with engine.connect() as conn:
+        for i in range(0, len(ids), 500):
+            for r in conn.execute(select(st.c.trajectory_id, st.c.prompt, st.c.model, st.c.tools).where(
+                    (st.c.tenant == tenant) & st.c.trajectory_id.in_(ids[i:i + 500]) & (st.c.kind == "reason"))):
+                s = out[r.trajectory_id]
+                if r.prompt:
+                    s["prompts"].add(r.prompt)
+                if r.model:
+                    s["models"].add(r.model)
+                s["tools"] |= set(r.tools or [])
+    return out
+
+
+def _versions(prompts: set) -> Dict[str, set]:
+    by: Dict[str, set] = defaultdict(set)
+    for p in prompts:
+        pid, _, ver = p.partition("@")
+        by[pid].add(ver or "(unversioned)")
+    return by
+
+
+def setup_changes(engine, tenant: str, rows: list, base_rows: list) -> dict:
+    """{"cases": {case: [change]}, "everywhere": [change], "now": {case: setup}}: each case's prompt
+    versions, models and offered tools against its baseline run's. A change every compared case
+    shares is said once, in "everywhere"."""
+    docs_now, docs_before = defaultdict(set), defaultdict(set)
+    for r in rows:
+        docs_now[r.case_id].add(r.document_id)
+    for r in base_rows:
+        docs_before[r.case_id].add(r.document_id)
+    setups = _setups(engine, tenant, [d for ds in [*docs_now.values(), *docs_before.values()] for d in ds])
+
+    def union(ds):
+        u = {"prompts": set(), "models": set(), "tools": set()}
+        for d in ds:
+            for k in u:
+                u[k] |= setups[d][k] if d in setups else set()
+        return u
+    now = {c: union(ds) for c, ds in docs_now.items()}
+    before = {c: union(ds) for c, ds in docs_before.items()}
+    cases: Dict[str, List[dict]] = {}
+    for c in now.keys() & before.keys():
+        a, b = before[c], now[c]
+        if not any(a.values()) or not any(b.values()):
+            continue
+        ch = []
+        va, vb = _versions(a["prompts"]), _versions(b["prompts"])
+        for pid in sorted(va.keys() | vb.keys()):
+            if va.get(pid) != vb.get(pid):
+                ch.append({"what": "prompt", "id": pid, "before": sorted(va.get(pid, [])), "now": sorted(vb.get(pid, []))})
+        if a["models"] != b["models"] and a["models"] and b["models"]:
+            ch.append({"what": "model", "before": sorted(a["models"]), "now": sorted(b["models"])})
+        if a["tools"] != b["tools"]:
+            ch.append({"what": "tools", "added": sorted(b["tools"] - a["tools"]), "removed": sorted(a["tools"] - b["tools"])})
+        if ch:
+            cases[c] = ch
+    compared = [c for c in now.keys() & before.keys() if any(now[c].values()) and any(before[c].values())]
+    key = lambda x: json.dumps(x, sort_keys=True)
+    counts = Counter(key(x) for chs in cases.values() for x in chs)
+    everywhere = [json.loads(k) for k, n in counts.items() if n == len(compared) and n >= 2]
+    shared = {key(x) for x in everywhere}
+    cases = {c: [x for x in chs if key(x) not in shared] for c, chs in cases.items()}
+    for x in [*everywhere, *(x for chs in cases.values() for x in chs)]:
+        if x["what"] == "prompt" and len(x["before"]) == 1 and len(x["now"]) == 1 and "diff" not in x:
+            x["diff"] = _prompt_diff(engine, tenant, x["id"], x["before"][0], x["now"][0])
+    return {"cases": {c: chs for c, chs in cases.items() if chs}, "everywhere": everywhere,
+            "now": {c: {k: sorted(v) for k, v in s.items()} for c, s in now.items()}}
+
+
+def _prompt_diff(engine, tenant: str, pid: str, a: str, b: str) -> Optional[dict]:
+    from assay import prompts
+    d = prompts.diff(engine, tenant, pid, a, b)
+    if not d or not d.get("available"):
+        return None
+    lines = [x for x in d["diff"] if x[:1] in "+-" and not x.startswith(("+++", "---"))]
+    added = [x[1:].strip() for x in lines if x.startswith("+")]
+    return {"added": len(added), "removed": sum(1 for x in lines if x.startswith("-")),
+            "first": next((x for x in added if x), None), "note": d.get("note")}
+
+
+def change_text(x: dict) -> str:
+    """prompt   support_agent@12 → support_agent@13 (+2 lines, −1: "Refund right away …")"""
+    if x["what"] == "prompt":
+        was = ", ".join(f"{x['id']}@{v}" for v in x["before"]) or "(not used)"
+        now = ", ".join(f"{x['id']}@{v}" for v in x["now"]) or "(not used)"
+        d = x.get("diff")
+        tail = ""
+        if d:
+            tail = f" (+{d['added']} line{'s' * (d['added'] != 1)}, −{d['removed']}" + \
+                   (f": “{d['first'][:70]}{'…' if len(d['first']) > 70 else ''}”" if d.get("first") else "") + ")"
+            if d.get("note"):
+                tail += f" — {d['note']}"
+        return f"prompt  {was} → {now}{tail}"
+    if x["what"] == "model":
+        return f"model   {', '.join(x['before'])} → {', '.join(x['now'])}"
+    parts = ([f"+{t}" for t in x["added"]] + [f"−{t}" for t in x["removed"]])
+    return f"tools   offered {' '.join(parts)}"
+
+
+def blame(setup: dict, regressed: List[str]) -> List[str]:
+    """When the regressions line up with a prompt version: which, and how the others did."""
+    now = setup.get("now") or {}
+    if not regressed or not now:
+        return []
+    bad = set(regressed)
+    out = []
+    changed = {(x["id"], v) for chs in [setup.get("everywhere") or [], *(setup.get("cases") or {}).values()]
+               for x in chs if x["what"] == "prompt" for v in x["now"]}
+    for pid, ver in sorted(changed):
+        on = {c for c, s in now.items() if f"{pid}@{ver}" in s["prompts"] or (ver == "(unversioned)" and pid in s["prompts"])}
+        off = {c for c, s in now.items() if any(p.startswith(f"{pid}@") for p in s["prompts"])} - on
+        hit = bad & on
+        if hit and len(hit) == len(bad & (on | off)) and on != set(now):
+            rest = f"; the {_n(len(off), 'case')} still on another version {'all pass' if not (bad & off) else 'pass'}" \
+                if off else ""
+            out.append(f"{len(hit)} of {len(bad & (on | off))} regressions use {pid}@{ver}{rest}")
+    return out
 
 
 # ---------- what kinds of failure ----------
@@ -1648,6 +1775,8 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         lines = sorted(dict.fromkeys(_tidy(x) for x in reasons[case]), key=_rank)
         changes.append(f"- {_code(_short(case))} → " + "; ".join(_md(x) for x in lines[:2])
                        + (f" (+{len(lines) - 2} more)" if len(lines) > 2 else ""))
+        for x in ((result.get("setup") or {}).get("cases") or {}).get(case, []):
+            changes.append(f"  - Changed: {_md(change_text(x))}")
         if case in paths:
             was, now = paths[case]
             changes += [f"  - Expected: {_code(' → '.join(was) or '(no calls)', 300)}",
@@ -1683,6 +1812,11 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         out += [f"> {_md(x['text'])}", ""]
     if result.get("kinds"):
         out += [f"**Failures by kind:** {_md(kinds_text(result['kinds']))}", ""]
+    setup = result.get("setup") or {}
+    if setup.get("everywhere"):
+        out += ["**Changed in every case:** " + "; ".join(_md(change_text(x)) for x in setup["everywhere"]), ""]
+    for line in blame(setup, list(b.get("regressed") or [])):
+        out += [f"**{_md(line)}**", ""]
     if result.get("unchanged"):
         u = result["unchanged"]
         out += [f"**Nothing on your side changed** since the baseline (commit `{u['commit']}`, no uncommitted "
@@ -1731,6 +1865,9 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     out += [f"{_n(cases, 'case')} · {_n(repeat, 'attempt')} each · {against}", ""]
     result["summary"] = summarize(result, c, baseline)
     out += summary_block(result["summary"])
+    everywhere = (result.get("setup") or {}).get("everywhere") or []
+    if everywhere:
+        out += [_paint("Changed in every case", "bold")] + [f"  {change_text(x)}" for x in everywhere] + [""]
     if result.get("models"):  # several models served: how each did
         w = max(len(m) for m in result["models"])
         out += [_paint("By model", "bold")] + [f"  {m:<{w}}  {ok}/{n} cases" for m, (ok, n) in result["models"].items()] + [""]
@@ -1753,9 +1890,16 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
         what = "regressed" if baseline and all(p["kind"] == "regression" for p in problems) else "failing"
         n_cases = len({p["case_id"] for p in problems})
         out.append(_paint(f"⚠ {_n(n_cases, 'case')} {what} ({_n(len(problems), 'check')})", "yellow"))
+        setup = result.get("setup") or {}
+        for line in blame(setup, sorted({p["case_id"] for p in problems})):
+            out.append(_paint(f"  {line}", "yellow"))
         for i, (title, ps) in enumerate(_groups(problems)[:20], 1):
             out.append(f"\n{i}. {title}")
             out += [f"   {line}" for line in _explain(ps, fails, repeat, result.get("routing"))]
+            mine = {p["case_id"] for p in ps}
+            if len(mine) == 1 and (setup.get("cases") or {}).get(next(iter(mine))):
+                out.append(_paint("   Changed around it:", "dim"))
+                out += [_paint(f"     {change_text(x)}", "dim") for x in setup["cases"][next(iter(mine))]]
         if len(_groups(problems)) > 20:
             out.append(f"\n… and {len(_groups(problems)) - 20} more")
         out.append("")

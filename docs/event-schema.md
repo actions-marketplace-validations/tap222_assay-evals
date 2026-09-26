@@ -140,6 +140,10 @@ Send passes too: they're what failures are compared against.
 `run_id`, `field` (required; dotted paths like `line_items.0.total`), `expected`,
 `observed`, `kind` (`wrong` \| `missing` \| `extra`), `reporter`.
 
+### `prompt`: a prompt version and its text
+`prompt_id`, `version` (required), `template`, `note` (what changed). Registers the version, so a
+regression can show the text's diff next to it. `assay.prompt()` sends it.
+
 ### `expect`: what a test case should do
 `case` (required), `calls` (`[{"tool", "args", "optional", "any_order"}]`),
 `allow_extra` (tools), `answer`, `answer_match` (`contains` \| `equals`),

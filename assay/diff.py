@@ -185,6 +185,7 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
                 "trace_before": before[case]["trace"] if case in before else None,
                 "trace_now": now[case]["trace"] if case in now else None,
                 "reasons": reasons, "checks": fields,
+                "setup": [local.change_text(x) for x in ((result.get("setup") or {}).get("cases") or {}).get(case, [])],
                 "severity": _severity(fields, ch, behavior_only=not fields and case in worse)}
 
     regressions = [entry(case) for case in b["regressed"]]
@@ -228,6 +229,8 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
                                "now": p["now"]} for p in c.get("judge_changed") or []],
             "models": result.get("models") or {}, "surface": result.get("surface") or [],
             "kinds": result.get("kinds") or {},
+            "everywhere": [local.change_text(x) for x in (result.get("setup") or {}).get("everywhere") or []],
+            "blame": local.blame(result.get("setup") or {}, list(b["regressed"])),
             "totals": [{**x, "most": [{**m, "name": local._short(m["case_id"])} for m in x["most"]]}
                        for x in result.get("behavior_suite") or []] if cfg["behavior"]["fail"] else [],
             "totals_info": [] if cfg["behavior"]["fail"] else result.get("behavior_suite") or []}
@@ -247,6 +250,9 @@ def _entry_lines(i: int, e: dict, paint) -> List[str]:
         out.append(f"   {r}")
     if len(e["reasons"]) > 2:
         out.append(paint(f"   (+{len(e['reasons']) - 2} more)", "dim"))
+    if e.get("setup"):
+        out.append(paint("   Changed around it:", "dim"))
+        out += [paint(f"     {x}", "dim") for x in e["setup"]]
     if e.get("severity"):
         color = {"HIGH": "red", "MEDIUM": "yellow", "LOW": "dim"}[e["severity"]]
         out.append(f"   Severity: {paint(e['severity'], color)}")
@@ -272,10 +278,14 @@ def text(d: dict) -> str:
                                  (k.get("judge_changed", 0), "?", "judged by a new judge, not compared", "yellow")):
         if n or word in ("unchanged", "regressed"):
             out.append(f"{paint(mark, color)} {n} {word}")
+    if d.get("everywhere"):
+        out += ["", paint("CHANGED IN EVERY CASE", "bold"), ""] + [f"  {x}" for x in d["everywhere"]]
     for title, items in (("REGRESSIONS", d["regressions"]), ("NEW FAILING", d["new_failures"]),
                          ("CHANGED, STILL PASSING", d["changed"])):
         if items:
             out += ["", paint(title, "bold"), ""]
+            if title == "REGRESSIONS" and d.get("blame"):
+                out += [paint(x, "yellow") for x in d["blame"]] + [""]
             for i, e in enumerate(items, 1):
                 out += _entry_lines(i, e, paint) + [""]
             out.pop()
@@ -334,6 +344,7 @@ def markdown(d: dict) -> str:
                 out += [f"   - Expected: {_code(' → '.join(e['expected']) or '(no calls)', 300)}",
                         f"   - Actual: {_code(' → '.join(e['actual']) or '(no calls)', 300)}"]
             out += [f"   - {_md(r)}" for r in e["reasons"][:2]]
+            out += [f"   - Changed: {_md(x)}" for x in e.get("setup") or []]
     if d.get("totals"):
         out += ["", "### Whole-run totals", ""]
         out += [f"- {_md(x['text'])}" + (f" (grew most: {', '.join(_code(m['name']) for m in x['most'])})"

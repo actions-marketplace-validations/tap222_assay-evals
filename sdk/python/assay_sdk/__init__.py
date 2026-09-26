@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-__all__ = ["init", "run", "feedback", "check", "correction", "expect", "flush", "shutdown", "Run"]
+__all__ = ["init", "run", "feedback", "check", "correction", "expect", "prompt", "flush", "shutdown", "Run"]
 __version__ = "0.2.0"
 
 log = logging.getLogger("assay_sdk")
@@ -481,6 +481,13 @@ _current: "contextvars.ContextVar[Optional[Run]]" = contextvars.ContextVar("assa
 def current() -> Optional[Run]:
     """The run being recorded here (this thread or task), or None."""
     return _current.get()
+
+
+def prompt(prompt_id: str, version: str, template: Optional[str] = None, note: Optional[str] = None) -> str:
+    """Register a prompt version and its text; returns "id@version" for run.llm(prompt=...). With the
+    text recorded, a regression shows what changed in the prompt next to it (assay test, assay diff)."""
+    _c().emit({"type": "prompt", "prompt_id": prompt_id, "version": str(version), "template": template, "note": note})
+    return f"{prompt_id}@{version}"
 
 
 def feedback(run_id: str, kind: str, note: Optional[str] = None) -> None:

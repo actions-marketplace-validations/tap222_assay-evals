@@ -15,7 +15,9 @@ assay.register_prompt("extract_fields", template=text, version="v13", note="Acce
 
 The same fields work as OpenTelemetry attributes (`assay.prompt_id`, `assay.prompt_version` on
 a model-call span or its stage span) and in the SQL mapping (`calls.prompt_id`,
-`calls.prompt_version`). `POST /v1/prompts` registers a version over HTTP.
+`calls.prompt_version`). `POST /v1/prompts` registers a version over HTTP. In tests, with the
+SDK's runs: `run.llm(prompt=assay.prompt("support", "13", template=text, note="..."))`, and a
+regression shows what changed in the prompt next to it ([assay diff](diff.md)).
 
 **Registry.** Every version seen in traffic is recorded with when it first and last served;
 registering from CI adds the template, note and author. Nothing needs registering up front.

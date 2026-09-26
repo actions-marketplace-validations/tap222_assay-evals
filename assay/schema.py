@@ -253,7 +253,17 @@ class Expect(_E):
     max_steps: Optional[int] = Field(None, ge=1)
 
 
-Event = Annotated[Union[RunStart, Step, RunEnd, Feedback, Check, Correction, Expect], Field(discriminator="type")]
+class PromptVersion(_E):
+    """A prompt version and its text, so a regression can show what changed in it (assay diff)."""
+    type: Literal["prompt"]
+    prompt_id: str = Field(..., max_length=128)
+    version: str = Field(..., max_length=64)
+    template: Optional[str] = Field(None, max_length=65536)
+    note: Optional[str] = Field(None, max_length=1024, description="What changed")
+
+
+Event = Annotated[Union[RunStart, Step, RunEnd, Feedback, Check, Correction, Expect, PromptVersion],
+                  Field(discriminator="type")]
 EVENTS = TypeAdapter(List[Event])
 
 
@@ -396,6 +406,8 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                 rows["errors"].append({"tenant": tenant, "error_id": e.id, "document_id": e.run_id, "field": e.field,
                                        "reported_at": e.ts, "expected": e.expected, "observed": e.observed,
                                        "kind": e.kind, "reporter": e.reporter, "source": "correction"})
+            elif isinstance(e, PromptVersion):
+                rows.setdefault("prompts", []).append(e)
             elif isinstance(e, Expect):
                 rows["refs"].append({"tenant": tenant, "case_id": e.case, "calls": e.calls,
                                      "allow_extra": e.allow_extra, "answer": e.answer, "answer_match": e.answer_match,
@@ -425,6 +437,11 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
         for rid, text in answered.items():
             conn.execute(heads.update().where(and_(heads.c.tenant == tenant, heads.c.trajectory_id == rid,
                                                    heads.c.answer.is_(None))).values(answer=text))
+    if rows.get("prompts"):
+        from types import SimpleNamespace
+        from assay.ingest import register_prompts
+        register_prompts(engine, [SimpleNamespace(prompt_id=p.prompt_id, version=p.version, template=p.template,
+                                                  note=p.note, author=None) for p in rows["prompts"]], tenant)
     prompts = [{"prompt_id": s["prompt_id"], "prompt_version": s["prompt_version"], "started_at": s["started_at"]}
                for s in rows["stages"] if s["prompt_id"]]
     if prompts:

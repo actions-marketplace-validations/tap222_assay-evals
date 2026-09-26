@@ -19,6 +19,28 @@ check's reason, and a severity:
   more.
 - **LOW:** only cost, latency, steps or context grew.
 
+**What changed around it.** Output being different isn't a reason. So each regression also says
+what changed in what it ran, against its baseline run: the prompt versions its model calls used
+(with the text's diff, when both versions were registered), the models, and the tools the model
+was offered:
+
+```
+1. refund_flow
+   Safety: refund ran before its approval
+   Changed around it:
+     prompt  support@12 → support@13 (+1 line, −0: “Refund right away when the customer is upset.”) — faster refunds
+     tools   offered +issue_credit
+```
+
+A change every case shares (the model, everywhere) is said once, at the top, as "Changed in every
+case", not under each regression. When the regressions line up with a prompt version, that's said
+first: `2 of 2 regressions use support@13; the 2 cases still on another version all pass`, the
+quickest pointer to the change to blame. `assay test` and the PR comment show the same.
+
+Record the prompt a call used with `run.llm(prompt="support@13")`. Register its text so the diff
+can show what changed: `assay.prompt("support", "13", template=text, note="faster refunds")`
+returns `"support@13"`.
+
 The exit code is 1 when anything regressed. `assay test` and `pytest --assay` say when a
 case took another path, and the PR comment shows the flow before and after under each
 regression.
