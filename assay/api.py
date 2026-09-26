@@ -1410,7 +1410,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.post("/v1/otlp/v1/traces", tags=["ingest"],
               summary="OpenTelemetry traces (OTLP/HTTP, JSON). Point a collector's otlphttp exporter at /v1/otlp",
-              description=ingest.OTEL_MAPPING)
+              description=ingest.OTEL_MAPPING + "\n" + ingest.OPENINFERENCE)
     async def otlp_traces(request: Request, x_tenant: Optional[str] = Header(None),
                           p: Principal = Depends(require("ingest"))):
         if "json" not in (request.headers.get("content-type") or ""):

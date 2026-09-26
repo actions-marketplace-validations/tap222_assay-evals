@@ -124,6 +124,22 @@ served model, latency, and error status. Their stage comes from `assay.stage` on
 its parent. Other spans with `assay.stage` become stage runs. `service.version` becomes the
 code revision.
 
+**OpenInference spans** are read too, so traces from Arize Phoenix and other instrumentors that
+follow OpenInference need no change: send the same spans to Assay (a second exporter in the
+collector) and use it as the regression gate on top of the tracing you already have. By
+`openinference.span.kind`:
+
+| Span | Becomes |
+|---|---|
+| `LLM` | a model call: `llm.model_name`, `llm.token_count.prompt` / `completion`, `llm.cost.total`, `llm.prompt_template.version`, and `llm.input_messages` for the input by part (system prompt, history, user) |
+| `TOOL` | a tool call: `tool.name`, with `input.value` its arguments and `output.value` its result |
+| `RETRIEVER` | a retrieval step: `retrieval.documents.N.document.{id, content, score}`, the query from `input.value` |
+| `AGENT` or `CHAIN` at the root | the run: `input.value` what it was asked, `output.value` its answer, its name the task |
+
+`session.id` is the conversation and `user.id` the user. A trace with a tool or retriever span, or
+an `AGENT` or `CHAIN` root, becomes an agent run, checked like any other. A span's own `gen_ai.*`
+or `assay.*` attributes always win over what's read from its OpenInference ones.
+
 ```yaml
 exporters:
   otlphttp/assay:

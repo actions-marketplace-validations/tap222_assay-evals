@@ -135,7 +135,7 @@ class EvalResultEvent(Event):
 
 
 class StepEvent(Event):
-    kind: str = Field(..., pattern="^(reason|tool|state|answer|resource|mcp_prompt|plan)$",
+    kind: str = Field(..., pattern="^(reason|tool|state|answer|resource|mcp_prompt|plan|retrieval|user)$",
                       description="reason (model thinking or planning), tool (a call and its result), state "
                                   "(a change to the world), answer (the final reply), resource (an MCP resource "
                                   "read: args {\"uri\"}, result its contents), mcp_prompt (an MCP prompt fetched: "
@@ -157,7 +157,11 @@ class StepEvent(Event):
     text: Optional[str] = Field(None, max_length=16384, description="reason / answer: the text")
     model: Optional[str] = Field(None, max_length=128)
     tokens: Optional[int] = Field(None, ge=0)
+    tokens_in: Optional[int] = Field(None, ge=0)
+    tokens_out: Optional[int] = Field(None, ge=0)
     cost_usd: Optional[float] = Field(None, ge=0)
+    prompt: Optional[str] = Field(None, max_length=192, description="reason: the prompt it ran, id@version")
+    context: Optional[Dict[str, int]] = Field(None, description="reason: its input by part, in tokens")
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
 
@@ -179,6 +183,7 @@ class TrajectoryEvent(Event):
     input: Optional[Any] = Field(None, description="What the agent was asked, so a failure can become a test case")
     conversation_id: Optional[str] = Field(None, max_length=128, description="The conversation this run is a turn of")
     turn: Optional[int] = Field(None, ge=0, description="This run's place in the conversation, from 0")
+    user: Optional[str] = Field(None, max_length=128, description="Who asked, as a pseudonymous id")
     steps: List[StepEvent] = Field(..., max_length=500)
 
     @model_validator(mode="after")
@@ -407,11 +412,11 @@ def write_trajectories(engine: Engine, events: List["TrajectoryEvent"], tenant: 
         head = {"tenant": tenant, "trajectory_id": e.trajectory_id, "run_id": e.run_id, "case_id": e.case_id,
                 "attempt": e.attempt, "task": e.task, "started_at": e.started_at, "finished_at": e.finished_at,
                 "answer": e.answer, "status": e.status, "lineage": e.lineage, "updated_at": now,
-                "conversation_id": e.conversation_id, "turn": e.turn}
+                "conversation_id": e.conversation_id, "turn": e.turn, "user_id": e.user}
         new = [s.model_dump() for s in e.steps]
         old = before.get(e.trajectory_id)
         if old:
-            for k in ("run_id", "case_id", "attempt", "task", "lineage", "conversation_id", "turn"):
+            for k in ("run_id", "case_id", "attempt", "task", "lineage", "conversation_id", "turn", "user_id"):
                 head[k] = head[k] if head[k] is not None else old[k]
             head["started_at"] = min(head["started_at"], old["started_at"])
             if e.status == "running" and old["status"] != "running":  # a late span: still ended
@@ -538,6 +543,80 @@ Agents     a trace with any tool span (gen_ai.operation.name = execute_tool, or 
 """
 
 
+OPENINFERENCE = """\
+OpenInference spans (Arize Phoenix, OpenLLMetry-style and other instrumentors that follow it) are read
+too: openinference.span.kind LLM, TOOL, RETRIEVER, AGENT or CHAIN.
+
+LLM        llm.model_name, llm.provider, llm.token_count.prompt / completion, llm.cost.total,
+           llm.prompt_template.version, and llm.input_messages (roles, for the input by part)
+TOOL       tool.name; input.value is its arguments, output.value its result
+RETRIEVER  retrieval.documents.N.document.{id, content, score}: a retrieval step, the query from input.value
+AGENT/CHAIN a root one is the run: input.value what it was asked, output.value its answer, its name the task
+session.id is the conversation, user.id the user. A trace with a tool or retriever span, or an AGENT or
+CHAIN root, is an agent run.
+"""
+
+
+def _indexed(a: Dict[str, Any], prefix: str) -> Dict[int, Dict[str, Any]]:
+    """prefix.N.rest attributes as {N: {rest: value}} (OpenInference flattens lists this way)."""
+    out: Dict[int, Dict[str, Any]] = defaultdict(dict)
+    for k, v in a.items():
+        if k.startswith(prefix + "."):
+            head, _, rest = k[len(prefix) + 1:].partition(".")
+            if head.isdigit():
+                out[int(head)][rest] = v
+    return dict(sorted(out.items()))
+
+
+def openinference(a: Dict[str, Any], root: bool = False, name: Optional[str] = None) -> Dict[str, Any]:
+    """An OpenInference span's attributes with the gen_ai.* and assay.* ones they mean added (never
+    overwriting any the span has), so the rest of the mapping reads it like any other."""
+    kind = str(a.get("openinference.span.kind") or "").upper()
+    if not kind and not any(k.startswith(("llm.", "tool.name", "retrieval.documents")) for k in a):
+        return a
+    out = dict(a)
+    put = lambda k, v: out.setdefault(k, v) if v is not None else None
+    if kind == "LLM" or "llm.model_name" in a:
+        put("gen_ai.request.model", a.get("llm.model_name"))
+        put("gen_ai.response.model", a.get("llm.model_name"))
+        put("gen_ai.system", a.get("llm.provider") or a.get("llm.system"))
+        put("gen_ai.usage.input_tokens", a.get("llm.token_count.prompt"))
+        put("gen_ai.usage.output_tokens", a.get("llm.token_count.completion"))
+        put("gen_ai.operation.name", "chat")
+        put("assay.cost_usd", a.get("llm.cost.total"))
+        if a.get("llm.prompt_template.version"):
+            put("assay.prompt_id", name or "prompt")
+            put("assay.prompt_version", str(a["llm.prompt_template.version"]))
+        msgs = _indexed(a, "llm.input_messages")
+        if msgs:
+            from assay_sdk.inputs import tokens
+            roles = [(m.get("message.role"), m.get("message.content")) for m in msgs.values()]
+            last = max((i for i, (r, _) in enumerate(roles) if r == "user"), default=None)
+            ctx = {"system": 0, "history": 0, "user": 0}
+            for i, (r, c) in enumerate(roles):
+                ctx["system" if r in ("system", "developer") else "user" if i == last else "history"] += tokens(c)
+            out["assay._context"] = {k: v for k, v in ctx.items() if v}
+        text = next((m.get("message.content") for m in _indexed(a, "llm.output_messages").values()
+                     if m.get("message.content")), None)
+        put("assay._text", text)
+    if kind == "TOOL" or ("tool.name" in a and kind not in ("LLM",)):
+        put("gen_ai.operation.name", "execute_tool")
+        put("gen_ai.tool.name", a.get("tool.name") or name)
+        put("gen_ai.tool.call.arguments", a.get("input.value"))
+        put("gen_ai.tool.call.result", a.get("output.value"))
+    if kind == "RETRIEVER" or "retrieval.documents.0.document.content" in a:
+        docs = [{"id": d.get("document.id"), "text": d.get("document.content"), "score": d.get("document.score")}
+                for d in _indexed(a, "retrieval.documents").values()]
+        out["assay._retrieval"] = {"query": a.get("input.value"), "fragments": docs}
+    if root and kind in ("AGENT", "CHAIN"):
+        put("assay.answer", a.get("output.value"))
+        put("assay._input", a.get("input.value"))
+        put("assay.task", name)
+        out["assay._agent"] = True
+    put("assay.user", a.get("user.id"))
+    return out
+
+
 def _attr_value(v: Dict[str, Any]):
     for k in ("stringValue", "boolValue", "doubleValue"):
         if k in v:
@@ -567,7 +646,7 @@ def from_otlp(payload: Dict[str, Any]) -> EventBatch:
         res = _attrs((rs.get("resource") or {}).get("attributes"))
         for ss in rs.get("scopeSpans") or rs.get("instrumentationLibrarySpans") or []:
             for sp in ss.get("spans") or []:
-                a = _attrs(sp.get("attributes"))
+                a = openinference(_attrs(sp.get("attributes")), not sp.get("parentSpanId"), sp.get("name"))
                 collected.append((sp, a, res))
                 spans_by_id[sp.get("spanId")] = (sp, a)
                 doc = a.get("assay.document_id") or a.get("document.id")
@@ -625,7 +704,7 @@ def otlp_root_ends(payload: Dict[str, Any]) -> List[dict]:
             for sp in ss.get("spans") or []:
                 if sp.get("parentSpanId"):
                     continue
-                a = _attrs(sp.get("attributes"))
+                a = openinference(_attrs(sp.get("attributes")), True, sp.get("name"))
                 doc = a.get("assay.document_id") or a.get("document.id") or sp.get("traceId")
                 errored = (sp.get("status") or {}).get("code") in (2, "STATUS_CODE_ERROR")
                 out.append({"trajectory_id": str(doc), "finished_at": _ts(sp.get("endTimeUnixNano")),
@@ -679,7 +758,7 @@ def _agent_trajectories(batch: EventBatch, collected, doc_of) -> None:
     agent_docs = set()
     for doc, spans in by_doc.items():
         is_tool = lambda a: a.get("gen_ai.operation.name") == "execute_tool" or "gen_ai.tool.name" in a
-        if not any(is_tool(a) for _, a, _ in spans):
+        if not any(is_tool(a) or a.get("assay._retrieval") or a.get("assay._agent") for _, a, _ in spans):
             continue
         agent_docs.add(doc)
         # Spans are exported as they end, so the root (the whole run) usually comes last, often in a
@@ -696,14 +775,26 @@ def _agent_trajectories(batch: EventBatch, collected, doc_of) -> None:
                                        result=_json(a.get("gen_ai.tool.call.result")),
                                        error=((sp.get("status") or {}).get("message") or "error") if errored else None,
                                        started_at=start, finished_at=end))
+            elif a.get("assay._retrieval"):
+                from assay.schema import retrieval_args
+                from assay_sdk.retrieval import fragments
+                r = a["assay._retrieval"]
+                frags = fragments([d for d in r["fragments"] if d.get("text") or d.get("id")])
+                steps.append(StepEvent(kind="retrieval", name=str(sp.get("name") or "retrieve")[:128],
+                                       args=retrieval_args(_str(r["query"]), frags), result=frags,
+                                       started_at=start, finished_at=end))
             elif a.get("assay.state.object"):
                 steps.append(StepEvent(kind="state", name=str(a["assay.state.object"]),
                                        args={"op": a.get("assay.state.op") or "update"},
                                        result=_json(a.get("assay.state.value")), started_at=start, finished_at=end))
             elif any(k.startswith("gen_ai.") for k in a) and sp.get("parentSpanId"):
                 tokens = (a.get("gen_ai.usage.input_tokens") or 0) + (a.get("gen_ai.usage.output_tokens") or 0)
+                pv = a.get("assay.prompt_version")
                 steps.append(StepEvent(kind="reason", model=a.get("gen_ai.response.model") or a.get("gen_ai.request.model"),
-                                       tokens=tokens or None, cost_usd=a.get("assay.cost_usd"),
+                                       tokens=tokens or None, tokens_in=a.get("gen_ai.usage.input_tokens"),
+                                       tokens_out=a.get("gen_ai.usage.output_tokens"), cost_usd=a.get("assay.cost_usd"),
+                                       prompt=f"{a.get('assay.prompt_id')}@{pv}" if pv else None,
+                                       context=a.get("assay._context"), text=_str(a.get("assay._text")),
                                        started_at=start, finished_at=end))
         rsp, ra = root or (None, {})
         if not root:  # the run's own attributes are on the root; take what a child carries meanwhile
@@ -718,7 +809,9 @@ def _agent_trajectories(batch: EventBatch, collected, doc_of) -> None:
             attempt=ra.get("assay.attempt"), task=_str(ra.get("assay.task") or ra.get("assay.document_type")),
             segment=_str(ra.get("assay.segment")),
             conversation_id=_str(ra.get("assay.conversation_id") or _conversation(spans)),
-            turn=ra.get("assay.turn"),
+            turn=ra.get("assay.turn"), user=_str(ra.get("assay.user") or next(
+                (a.get("assay.user") for _, a, _ in spans if a.get("assay.user")), None)),
+            input=_json(ra.get("assay._input")) if ra.get("assay._input") is not None else None,
             started_at=_ts(rsp.get("startTimeUnixNano") if root else first) or datetime.utcnow(),
             finished_at=_ts(rsp.get("endTimeUnixNano")) if root else None,
             answer=_str(ra.get("assay.answer")) if root else None,
