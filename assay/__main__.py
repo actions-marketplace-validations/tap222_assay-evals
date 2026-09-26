@@ -81,6 +81,11 @@ def main(argv=None) -> int:
     pc.add_argument("--summary", default=".assay/summary.md")
     pc.add_argument("--pr", type=int, help="The PR number (default: from the GitHub Actions event)")
     pc.add_argument("--repo", help="owner/name (default: GITHUB_REPOSITORY)")
+    d = sub.add_parser("diff", help="What behavior changed between two runs: regressions with the flow before "
+                                    "and after, improvements, flaky cases, severity")
+    d.add_argument("baseline", nargs="?", help="A run id or a version (default: each case's last passing run)")
+    d.add_argument("current", nargs="?", help="A run id or a version (default: the latest run)")
+    d.add_argument("--format", choices=["text", "markdown", "json"], default="text")
     a = sub.add_parser("accept", help="Make the latest test run the baseline, known failures and all")
     a.add_argument("run", nargs="?", help="A run id instead of the latest")
     sub.add_parser("schema", help="Print the v1 event schema as JSON Schema")
@@ -108,6 +113,10 @@ def main(argv=None) -> int:
             print(exc, file=sys.stderr)
             return 2
         return 0
+    if args.cmd == "diff":
+        from pathlib import Path
+        from assay import diff
+        return diff.main(Path.cwd(), args.baseline, args.current, args.format)
     if args.cmd in ("init", "test", "accept", "upload"):
         from pathlib import Path
         from assay import local

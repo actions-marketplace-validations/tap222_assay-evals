@@ -1,8 +1,60 @@
 # Assay
 
-Evaluation and observability for AI systems: document-intelligence pipelines (OCR,
-classification, splitting, field extraction) and AI agents (reasoning, tool calls, state
-changes), with or without LLMs.
+**Behavioral regression testing for AI apps.** You changed a prompt, a model or the code:
+Assay tells you exactly what your AI app now does differently, whether the change is real,
+and whether to trust the result.
+
+```
+$ assay diff v1.8.2 v1.9.0
+
+AI BEHAVIOR DIFF
+────────────────────────────────
+
+Baseline: v1.8.2
+Current:  v1.9.0
+
+47 scenarios
+
+✓ 39 unchanged
+↑ 4 improved
+✗ 3 regressed
+⚠ 1 flaky
+
+REGRESSIONS
+
+1. refund_flow
+   Expected: approval(refund) → refund
+   Actual:   refund → approval(refund)
+   An approval moved
+   Safety: Broke “refund runs only once it's approved”
+   Severity: HIGH
+
+2. support_agent
+   Expected: search_order
+   Actual:   search_order → cancel_order
+   New: cancel_order
+   Severity: HIGH
+
+3. invoice_number accuracy
+   98% → 91%
+   Severity: MEDIUM
+```
+
+- **What changed:** each scenario is compared with its own last passing run: its checks, and
+  its flow (the tools it called, its approvals, what it read, in order). A scenario that now
+  takes another path is shown even when nothing failed.
+- **Is it real:** each scenario can run several times. A check that varied the same way before
+  is flaky and doesn't block, and a drop that could be chance says so.
+- **Can you trust it:** a result that couldn't be judged (a judge timed out, refused, or was
+  given the wrong data) is kept apart, never counted as a regression. A pull request can't
+  loosen the checks that judge it.
+
+Your AI tests are pytest tests (`pytest --assay`), and a GitHub Action puts the same diff on
+every pull request. See [Test your AI app locally](#test-your-ai-app-locally-its-pytest-no-server-no-account).
+
+Assay also runs as a service, for evaluation and observability of AI systems in production:
+document-intelligence pipelines (OCR, classification, splitting, field extraction) and AI
+agents (reasoning, tool calls, state changes), with or without LLMs.
 
 Assay answers what a system's own logs can't:
 
@@ -161,6 +213,29 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
   could be chance says so.
 - **Where things live:** everything goes in `.assay/` (recordings, the store, the baseline),
   which ignores itself in git. `assay test -- pytest -q tests/ai` overrides the command.
+
+### What changed: `assay diff`
+
+```bash
+assay diff                      # the latest run against each case's last passing run
+assay diff v1.8.2 v1.9.0        # two versions: runs recorded with version={"version": "v1.9.0"}
+assay diff RUN_A RUN_B          # or two run ids
+assay diff --format markdown    # for a PR or job summary; --format json for tools
+```
+
+It lists what regressed, what failed for the first time, what changed but still passes,
+what's flaky, what couldn't be judged, and what improved. Each regression shows its flow
+before and after, what differs ("an approval moved", "new: cancel_order"), the failing
+check's reason, and a severity:
+- **HIGH:** a security check failed (safety contracts, PII, prompt injection, approvals), an
+  approval moved, or the agent called a tool its baseline never called.
+- **MEDIUM:** another check failed, or accuracy on one of your fields dropped by 5 points or
+  more.
+- **LOW:** only cost, latency, steps or context grew.
+
+The exit code is 1 when anything regressed. `assay test` and `pytest --assay` say when a
+case took another path, and the PR comment shows the flow before and after under each
+regression.
 
 To see the recorded runs in the dashboard:
 `ASSAY_STORE_URL=sqlite:///.assay/assay.db assay serve`, then open source `events:local`.

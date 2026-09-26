@@ -568,11 +568,11 @@ def check_pii(engine, source, run_id: str, pii: dict) -> None:
     ingest.upsert(engine, store.eval_results, rows, "result_id")
 
 
-def case_behavior(engine, run_id: str) -> Dict[str, dict]:
+def case_behavior(engine, run_id: str, tenant: str = TENANT) -> Dict[str, dict]:
     """Per case: its behavior over its attempts (assay/behavior.py)."""
     m = store.run_metrics
     with engine.connect() as conn:
-        rows = conn.execute(select(m.c.case_id, m.c.metrics).where((m.c.tenant == TENANT) & (m.c.run_id == run_id))).all()
+        rows = conn.execute(select(m.c.case_id, m.c.metrics).where((m.c.tenant == tenant) & (m.c.run_id == run_id))).all()
     by = defaultdict(list)
     for r in rows:
         by[r.case_id].append(r.metrics)
@@ -582,7 +582,8 @@ def case_behavior(engine, run_id: str) -> Dict[str, dict]:
 def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
              pii: Optional[dict] = None, behavior_cfg: Optional[dict] = None,
              abandoned_why: Optional[str] = None) -> Optional[dict]:
-    """Check the run and compare it with the baseline. None if the run recorded nothing to check."""
+    """Check the run and compare it with the baseline. None if the run recorded nothing to check.
+    For a run whose command has exited: what it left open is closed and evaluated first."""
     source = EventsSource(engine, TENANT)
     heads = agents.run_trajectories(engine, TENANT, run_id)
     left_open = 0
@@ -594,43 +595,53 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
                            abandoned_why=abandoned_why or "the command exited first")
         if pii and pii["check"]:
             check_pii(engine, source, run_id, pii)
+    out = compare(engine, run_id, baseline, tolerance, behavior_cfg)
+    return out and {**out, "left_open": left_open}
+
+
+def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, behavior_cfg: Optional[dict] = None,
+            tenant: str = TENANT, source=None) -> Optional[dict]:
+    """Compare a run's results with the baseline's, changing nothing: what `assay test`, `assay
+    diff` and the server's diff read. None if the run has no results."""
+    source = source or EventsSource(engine, tenant)
     # "" means no baseline: failures.evaluation would otherwise pick the run before this one.
-    a = failures.evaluation(engine, source, TENANT, run_id, baseline or "", tolerance)
+    a = failures.evaluation(engine, source, tenant, run_id, baseline or "", tolerance)
     if a is None:
         return None
     # Results whose evaluator was given the wrong data (assay/audit.py) say nothing about the AI:
     # they're listed on their own and left out of every count below.
-    rows, base_rows = _rows(engine, run_id), _rows(engine, baseline) if baseline else []
+    rows, base_rows = _rows(engine, run_id, tenant), _rows(engine, baseline, tenant) if baseline else []
     ran = {r.case_id for r in rows}
     base_rows = [r for r in base_rows if r.case_id in ran]  # a subset is compared on its own cases
-    found = audit.audit_rows(engine, TENANT, rows)
+    found = audit.audit_rows(engine, tenant, rows)
     not_judged = [c for c in a["verdicts"]["checks"] if c["verdict"] in verdicts.NOT_JUDGED]
     skip = {(c["case_id"], c["field"] or "", c["evaluator"] or "") for c in not_judged}
     # Listed apart, and out of every count: judged on the wrong data, or not judged at all.
     rows = [r for r in rows if r.result_id not in found and flaky.check_key(r) not in skip]
-    base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, TENANT, base_rows)]
+    base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, tenant, base_rows)]
     return {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
             "attempts": attempts(rows), "base_attempts": attempts(base_rows),
-            "not_judged": not_judged, "left_open": left_open, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg)}
+            "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg, tenant)}
 
 
-def _behavior_changes(engine, run_id: str, baseline: Optional[str], ran: set, cfg: Optional[dict]) -> dict:
+def _behavior_changes(engine, run_id: str, baseline: Optional[str], ran: set, cfg: Optional[dict],
+                      tenant: str = TENANT) -> dict:
     """{"behavior": cases whose behavior got worse than their baseline's, [{"case_id", "changes"}],
     "behavior_compared": the cases that could be compared}."""
     if not baseline:
         return {"behavior": [], "behavior_compared": []}
     ratios = (cfg or {}).get("ratios") or {}
-    now, before = case_behavior(engine, run_id), case_behavior(engine, baseline)
+    now, before = case_behavior(engine, run_id, tenant), case_behavior(engine, baseline, tenant)
     compared = sorted(ran & set(now) & set(before))
     worse = [{"case_id": case, "changes": ch} for case in compared
              if (ch := behavior.compare(now[case], before[case], ratios))]
     return {"behavior": worse, "behavior_compared": compared}
 
 
-def _rows(engine, run_id: str) -> list:
+def _rows(engine, run_id: str, tenant: str = TENANT) -> list:
     t = store.eval_results
     with engine.connect() as conn:
-        return conn.execute(select(t).where((t.c.tenant == TENANT) & (t.c.run_id == run_id))).all()
+        return conn.execute(select(t).where((t.c.tenant == tenant) & (t.c.run_id == run_id))).all()
 
 
 def attempts(rows: list) -> Dict[Tuple[str, str], List[bool]]:
@@ -968,6 +979,10 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
             counts.append(f"{len(b[name])} {name}")
     if s["improved"]:
         counts.append(f"{len(s['improved'])} improved")
+    paths = result.get("flows") or {}  # cases whose flow differs from their baseline's (assay/diff.py)
+    still = [c for c in paths if c in b["passed"] and c not in s["improved"]]
+    if still:
+        counts.append(f"{len(still)} changed, still passing")
     changes = []
     shown = set(b["regressed"]) | set(b["new failure"])
     reasons: Dict[str, List[str]] = defaultdict(list)
@@ -982,6 +997,10 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         lines = sorted(dict.fromkeys(_tidy(x) for x in reasons[case]), key=_rank)
         changes.append(f"- {_code(_short(case))} → " + "; ".join(_md(x) for x in lines[:2])
                        + (f" (+{len(lines) - 2} more)" if len(lines) > 2 else ""))
+        if case in paths:
+            was, now = paths[case]
+            changes += [f"  - Expected: {_code(' → '.join(was) or '(no calls)', 300)}",
+                        f"  - Actual: {_code(' → '.join(now) or '(no calls)', 300)}"]
     for f in result["fields"]:  # your own fields whose accuracy dropped, e.g. extraction
         if f["field"] not in CHECK_NAMES and not f["field"].startswith("expect.") and f["base_total"] and \
                 f["passed"] / f["total"] < f["base_passed"] / f["base_total"]:
@@ -994,10 +1013,12 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     if policy and policy["changes"]:
         out += [f"**{'Policy changes (not applied: add the `assay-policy-change` label to accept them)' if policy['weakened'] else 'Policy changes (accepted)' if policy['accepted'] else 'Policy changes (applied)'}**",
                 "", *(f"- {'loosens' if c['weakens'] else 'tightens'}: {_md(c['text'])}" for c in policy["changes"]), ""]
-    if changes:
-        out += [f"**{_n(len(changes), 'change')} in behavior**", "", *changes[:30], ""]
-        if len(changes) > 30:
-            out += [f"…and {len(changes) - 30} more", ""]
+    if changes:  # a change is its "- " line and the Expected/Actual lines under it
+        starts = [i for i, x in enumerate(changes) if x.startswith("- ")]
+        cut = starts[30] if len(starts) > 30 else len(changes)
+        out += [f"**{_n(len(starts), 'change')} in behavior**", "", *changes[:cut], ""]
+        if len(starts) > 30:
+            out += [f"…and {len(starts) - 30} more", ""]
     if s["categories"]:
         out += ["| Category | Passed |", "|---|---|"] + [f"| {_md(k)} | {ok}/{n} |" for k, (ok, n) in s["categories"].items()]
         out.append("")
@@ -1236,6 +1257,15 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
         if passed:
             state["baseline_cases"] = baseline_before
     result["policy"] = policy
+    if baseline:  # what each case did, next to what its baseline did
+        from assay import diff
+        before, now = diff.flows(engine, TENANT, baseline), diff.flows(engine, TENANT, run_id)
+        result["flows"] = {c: (before[c]["flow"], now[c]["flow"]) for c in before.keys() & now.keys()
+                           if before[c]["flow"] != now[c]["flow"]}
+        moved = len(result["flows"])
+        if moved:
+            text += "\n" + _paint(f"{_n(moved, 'case')} took a different path than {'its' if moved == 1 else 'their'} "
+                                   f"baseline: `assay diff` shows what changed.", "dim")
     # What's left to rerun (`--failed`): everything that didn't simply pass.
     state["rerun"] = sorted(set().union(*(v for k, v in result["summary"]["buckets"].items() if k != "passed")))
     _save_state(home, state)
