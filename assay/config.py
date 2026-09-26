@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 
+def _num(v: Optional[str]) -> Optional[float]:
+    return float(v) if v not in (None, "") else None
+
+
 def _list(v: Optional[str]) -> List[str]:
     return [x.strip() for x in (v or "").split(",") if x.strip()]
 
@@ -44,6 +48,10 @@ class Settings:
     judge_model: str = "claude-opus-5"  # the LLM judge (assay/judge.py), run on request
     judge_redact: bool = True  # personal data is replaced before a trace goes to the model API
     judge_provider: str = "anthropic"  # anthropic, openai, gemini, ollama or openai-compatible (assay_sdk.Judge)
+    judge_concurrency: int = 4  # runs judged at once (assay_sdk.EvalRuntime); prices from ASSAY_PRICES
+    judge_rate_limit: Optional[float] = None  # model calls a minute
+    judge_max_time: Optional[float] = None  # seconds for one request's judging
+    judge_budget_usd: Optional[float] = None  # dollars for one request's judging
 
     # built-in scheduler (0 = off)
     schedule_minutes: int = 0
@@ -75,6 +83,10 @@ class Settings:
             judge_model=e("ASSAY_JUDGE_MODEL", "claude-opus-5"),
             judge_redact=e("ASSAY_JUDGE_REDACT", "true").lower() not in ("0", "false", "no"),
             judge_provider=e("ASSAY_JUDGE_PROVIDER", "anthropic"),
+            judge_concurrency=int(e("ASSAY_JUDGE_CONCURRENCY", "4")),
+            judge_rate_limit=_num(e("ASSAY_JUDGE_RATE_LIMIT")),
+            judge_max_time=_num(e("ASSAY_JUDGE_MAX_TIME")),
+            judge_budget_usd=_num(e("ASSAY_JUDGE_BUDGET_USD")),
             schedule_minutes=int(e("ASSAY_SCHEDULE_MINUTES", "0")),
             schedule_sources=_list(e("ASSAY_SCHEDULE_SOURCES")),
             schedule_window_days=float(e("ASSAY_SCHEDULE_WINDOW_DAYS", "1")),

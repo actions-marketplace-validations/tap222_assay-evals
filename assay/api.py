@@ -567,9 +567,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def judge_run(run_id: str, source: str, limit: Optional[int] = None, p: Principal = Depends(require("manage"))):
         check_source(p, source)
         from assay import judge
+        try:
+            rt = judge.runtime({"concurrency": settings.judge_concurrency, "rate_limit": settings.judge_rate_limit,
+                                "max_time": settings.judge_max_time, "budget_usd": settings.judge_budget_usd})
+        except ValueError as exc:  # ASSAY_PRICES that doesn't read
+            raise HTTPException(500, str(exc))
         out = judge.judge_run(engine, _tenant(source), run_id, settings.judge_model, limit=limit,
-                              redact=settings.judge_redact, provider=settings.judge_provider)
-        if not out["judged"]:
+                              redact=settings.judge_redact, provider=settings.judge_provider, rt=rt)
+        out.pop("report", None)  # the summary is in "summary"
+        if not out["judged"] and not out["not_run"]:
             raise HTTPException(404, f"No ended agent runs in test run '{run_id}' in {source}.")
         return out | {"model": settings.judge_model}
 

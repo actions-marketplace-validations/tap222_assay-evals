@@ -153,6 +153,35 @@ The judge's results are ordinary evaluation results (evaluator `assay.judge@1`).
   `TIMEOUT`, a 5xx or connection error `INFRA_ERROR`, a refusal or a rejected request
   `EVALUATOR_ERROR`. Each result records how many tries it took.
 
+A test run's runs are judged several at once, within limits, and the run says what judging cost:
+
+```
+Judged 40 runs with claude-opus-5 (plan quality, consistency).
+43 LLM calls, 3 retries, 1,204,300 tokens in, 18,120 out, estimated $6.47.
+```
+
+```toml
+[judge]
+concurrency = 4     # runs judged at once
+rate_limit = 50     # model calls a minute, shared by all of them; a 429 pauses them all (Retry-After)
+timeout = 120       # seconds a call may take
+retries = 3         # after a 429, a 5xx, a timeout, or a verdict that isn't valid
+max_time = 600      # seconds for all the judging
+budget_usd = 5      # dollars for all the judging
+
+[judge.prices]      # dollars per million tokens: input, output[, cached]
+"claude-opus-5" = [5, 25]
+```
+
+There's one retry layer: the provider SDK's own retries are off while judging, so every
+request is counted once, with its tokens. When `max_time` or `budget_usd` is reached, the runs
+left aren't judged, and they aren't failures. The cost is an estimate from `[judge.prices]` (or
+`ASSAY_PRICES`, as JSON); with no price it says so rather than guessing. On the server,
+`ASSAY_JUDGE_CONCURRENCY`, `ASSAY_JUDGE_RATE_LIMIT`, `ASSAY_JUDGE_MAX_TIME` and
+`ASSAY_JUDGE_BUDGET_USD` do the same, and the endpoint's answer has the same `summary`. This is
+`assay_sdk.EvalRuntime`, which you can run your own evaluators with too
+([SDK guide](../sdk/python/README.md#many-samples-at-once-evalruntime)).
+
 Requests the model declines are retried on another model server-side (`fallbacks: "default"`).
 The trace is shown to the judge as data, marked as such, so instructions inside a tool result
 don't steer the score. Long tool results are cut, and the cut is marked.

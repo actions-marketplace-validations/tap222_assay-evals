@@ -229,7 +229,19 @@ def _reading(provider: str):
                 "tokens_reasoning": r.usage.get("reasoning"), "text": (r.text or "")[:MAX_TEXT] or None,
                 "tools": [t for t in offered if t] or None, "finish_reason": r.finish_reason,
                 "tool_calls": [{**c, "arguments": c["arguments"]} for c in r.tool_calls] or None}
+    read.provider = provider
     return read
+
+
+def _observe(reading: Callable, kwargs: dict, resp: Any = None, exc: Optional[BaseException] = None) -> None:
+    """Count the call for the sample an EvalRuntime is judging, if it is judging one."""
+    if kwargs.get("stream"):
+        return
+    try:
+        from assay_sdk import runtime
+        runtime.observe(getattr(reading, "provider", None), resp, exc)
+    except Exception:  # counting must never break the call
+        log.debug("Assay couldn't count a model call", exc_info=True)
 
 
 def _record_call(reading: Callable, kwargs: dict, started: datetime, resp: Any = None,
@@ -253,8 +265,10 @@ def _wrap(original: Callable, reading: Callable, bound: bool) -> Callable:
             try:
                 resp = await original(*args, **kwargs)
             except Exception as exc:
+                _observe(reading, kwargs, exc=exc)
                 _record_call(reading, kwargs, started, exc=exc)
                 raise
+            _observe(reading, kwargs, resp)
             _record_call(reading, kwargs, started, resp)
             return resp
     else:
@@ -264,8 +278,10 @@ def _wrap(original: Callable, reading: Callable, bound: bool) -> Callable:
             try:
                 resp = original(*args, **kwargs)
             except Exception as exc:
+                _observe(reading, kwargs, exc=exc)
                 _record_call(reading, kwargs, started, exc=exc)
                 raise
+            _observe(reading, kwargs, resp)
             _record_call(reading, kwargs, started, resp)
             return resp
     patched._assay = True

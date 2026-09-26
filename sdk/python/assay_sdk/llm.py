@@ -19,6 +19,7 @@ Whatever answered, a metric reads the same fields:
   reasoning      {"tokens", "summary"}: what the provider reports about its thinking, if anything
   finish_reason  stop | length | tool_call | refusal | content_filter | error | None
   error          why there's no answer; error_kind: timeout | rate_limited | unavailable | invalid | error
+  cost           dollars, when the provider says (LiteLLM, OpenRouter); None otherwise
   provider, model, raw (the provider's own object)
 
 Judge passes every other parameter straight to the provider (temperature, max_tokens,
@@ -26,6 +27,10 @@ reasoning effort, anything new): nothing is filtered or renamed. Credentials are
 SDK's own: its API-key variables, or a CLI login it supports (the Anthropic SDK reads an
 `ant auth login` profile). Ollama and OpenAI-compatible servers (vLLM, LM Studio, a LiteLLM
 proxy) are called over HTTP with no SDK at all: base_url, and an api_key if the server wants one.
+
+Inside an EvalRuntime (assay_sdk/runtime.py), ask() is the one place a call is retried: the SDK's
+own retries are off, each request waits for the run's rate limit, has the run's timeout, and is
+counted with its tokens and cost; a 429 or 5xx is asked again as the runtime allows (Retry-After).
 """
 from __future__ import annotations
 
@@ -63,6 +68,7 @@ class Response:
     error_kind: Optional[str] = None
     raw: Any = None
     exception: Optional[BaseException] = None  # what the provider raised, when it did
+    cost: Optional[float] = None  # dollars, when the provider reports it
 
     @property
     def ok(self) -> bool:
@@ -239,6 +245,9 @@ def normalize(resp: Any, provider: Optional[str] = None, schema: Optional[dict] 
                          f"Pass provider= one of {', '.join(PROVIDERS)}.")
     r = READERS[provider](resp)
     r.structured = _json(r.text)
+    cost = _get(resp, "_hidden_params", "response_cost") or _get(resp, "usage", "cost")  # LiteLLM, OpenRouter
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        r.cost = float(cost)
     if schema is not None:
         from assay_sdk.evaluation import _check_schema
         problem = "the answer isn't JSON" if r.structured is None else _check_schema(r.structured, schema)
@@ -262,7 +271,7 @@ def _post(url: str, body: dict, headers: dict, timeout: float) -> dict:
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:300]
         err = RuntimeError(f"HTTP {e.code} from {url}: {detail}")
-        err.status_code = e.code
+        err.status_code, err.headers = e.code, e.headers  # the status, and Retry-After, for a retry
         raise err
 
 
@@ -302,10 +311,33 @@ class Judge:
         """prompt: text, or a list of {"role", "content"} messages. schema: the JSON Schema the answer
         must fit (asked of the provider where it supports it, and checked here unless check=False,
         for a caller with checks of its own). Every other parameter goes to the provider as it is."""
-        params = {**self.defaults, **params}
         messages, system = self._messages(prompt, system)
+        from assay_sdk import runtime
+        scope = runtime.current()
+        if scope is None:
+            return self._once(messages, system, schema, check, {**self.defaults, **params}, None)
+        token = runtime._in_judge.set(True)  # what instrument() sees of this call is counted here
         try:
-            raw = getattr(self, f"_ask_{self.provider.replace('-', '_')}")(messages, system, schema, params)
+            i = 0
+            while True:
+                why = scope.gate()  # the run's rate limit
+                if why:
+                    return Response(provider=self.provider, model=self.model, error=why, error_kind="timeout",
+                                    finish_reason="error")
+                r = self._once(messages, system, schema, check, {**self.defaults, **params}, scope.call_timeout())
+                scope.counted(r, judge=True)
+                if r.ok or not scope.retry_call(r, i):
+                    return r
+                i += 1
+        finally:
+            runtime._in_judge.reset(token)
+
+    __call__ = ask
+
+    def _once(self, messages, system, schema, check, params, timeout: Optional[float]) -> Response:
+        """One request. timeout set: inside a runtime, with the SDK's own retries off."""
+        try:
+            raw = getattr(self, f"_ask_{self.provider.replace('-', '_')}")(messages, system, schema, params, timeout)
         except Exception as exc:
             from assay_sdk.evaluation import classify_exception
             kind, text = classify_exception(exc)
@@ -314,25 +346,30 @@ class Judge:
         return normalize(raw, "openai" if self.provider == "openai-compatible" else self.provider,
                          schema if check else None)
 
-    __call__ = ask
+    def _sdk(self, timeout: Optional[float]):
+        """The client; inside a runtime, one that doesn't retry and has the run's timeout."""
+        c = self.client()
+        if timeout is not None and hasattr(c, "with_options"):  # anthropic and openai clients
+            return c.with_options(max_retries=0, timeout=timeout)
+        return c
 
-    def _ask_anthropic(self, messages, system, schema, params):
+    def _ask_anthropic(self, messages, system, schema, params, timeout=None):
         req = {"model": self.model, "max_tokens": params.pop("max_tokens", 16000), "messages": messages, **params}
         if system:
             req.setdefault("system", [{"type": "text", "text": system}])
         if schema:
             req.setdefault("output_config", {"format": {"type": "json_schema", "schema": schema}})
-        return self.client().messages.create(**req)
+        return self._sdk(timeout).messages.create(**req)
 
-    def _ask_openai(self, messages, system, schema, params):
+    def _ask_openai(self, messages, system, schema, params, timeout=None):
         msgs = ([{"role": "system", "content": system}] if system else []) + messages
         req = {"model": self.model, "messages": msgs, **params}
         if schema:
             req.setdefault("response_format", {"type": "json_schema",
                                                "json_schema": {"name": "answer", "schema": schema, "strict": True}})
-        return self.client().chat.completions.create(**req)
+        return self._sdk(timeout).chat.completions.create(**req)
 
-    def _ask_gemini(self, messages, system, schema, params):
+    def _ask_gemini(self, messages, system, schema, params, timeout=None):
         contents = [{"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
                     for m in messages]
         config = dict(params.pop("config", {}) or {})
@@ -341,18 +378,20 @@ class Judge:
         if schema:
             config.setdefault("response_mime_type", "application/json")
             config.setdefault("response_json_schema", schema)
+        if timeout is not None:
+            config.setdefault("http_options", {"timeout": int(timeout * 1000)})  # milliseconds
         return self.client().models.generate_content(model=self.model, contents=contents, config=config or None, **params)
 
-    def _ask_ollama(self, messages, system, schema, params):
+    def _ask_ollama(self, messages, system, schema, params, timeout=None):
         body = {"model": self.model, "stream": False,
                 "messages": ([{"role": "system", "content": system}] if system else []) + messages, **params}
         if schema:
             body.setdefault("format", schema)
         if self._client is not None:
             return self._client.chat(**body)
-        return _post(f"{self.base_url}/api/chat", body, {}, self.timeout)
+        return _post(f"{self.base_url}/api/chat", body, {}, timeout or self.timeout)
 
-    def _ask_openai_compatible(self, messages, system, schema, params):
+    def _ask_openai_compatible(self, messages, system, schema, params, timeout=None):
         if not self.base_url:
             raise ValueError("openai-compatible needs base_url (or OPENAI_BASE_URL), e.g. http://localhost:8000/v1")
         body = {"model": self.model, "messages": ([{"role": "system", "content": system}] if system else []) + messages,
@@ -362,4 +401,4 @@ class Judge:
                                                 "json_schema": {"name": "answer", "schema": schema}})
         key = self.api_key or os.environ.get("OPENAI_API_KEY")
         return _post(f"{self.base_url}/chat/completions", body, {"Authorization": f"Bearer {key}"} if key else {},
-                     self.timeout)
+                     timeout or self.timeout)

@@ -129,8 +129,9 @@ def test_judged_results_are_verdicts_like_any_evaluators(app):
     fake = Fake(verdict(plan=(5, "Sound."), consistency=(5, "Agrees.")),
                 verdict(plan=(4, "Fine."), consistency=(1, "Claims a refund step 2 never made.")),
                 rate_limited)
-    out = judge.judge_run(app.engine, "t", "nightly", client=fake)
-    assert out == {"judged": 3, "results": 6, "errors": 2}
+    out = judge.judge_run(app.engine, "t", "nightly", client=fake, rt=judge.runtime({"concurrency": 1, "retries": 0}))
+    assert (out["judged"], out["results"], out["errors"], out["not_run"]) == (3, 6, 2, 0)
+    assert (out["summary"]["llm_calls"], out["summary"]["retries"]) == (3, 0) and "LLM calls:      3" in out["report"]
     v = app.get("/v1/evals/runs/nightly/verdicts", params=SRC).json()
     by = {(c["case_id"], c["field"]): c for c in v["checks"] if c["evaluator"] == judge.EVALUATOR}
     assert by[("good", "plan_quality")]["verdict"] == "PASS" and by[("bad", "plan_quality")]["verdict"] == "PASS"
@@ -168,6 +169,7 @@ with assay.run("support", test="refund") as r:
     out = capsys.readouterr().out
     assert "Consistency" in out and "2/5: Says refunded" in out
     assert "Judged 1 run with claude-opus-5 (plan quality, consistency)." in out
+    assert "1 LLM call, 0 retries, 0 tokens in, 0 out, cost unknown (set [judge.prices], or ASSAY_PRICES)." in out
 
 
 def test_personal_data_is_redacted_before_it_reaches_the_judge():
@@ -201,3 +203,57 @@ def test_a_verdict_that_doesnt_fit_its_schema_is_invalid_never_a_score():
     assert json.loads(out["raw_output"])["consistency"]["score"] == "high"
     six = Fake({**bad, "consistency": {"applicable": True, "score": 6, "reason": "x"}}, "max_tokens")
     assert judge.judge(no_plan, "x", client=six)["consistency"]["error_kind"] == "invalid"
+
+
+class Throttled(Exception):
+    status_code = 429
+
+    def __init__(self):
+        super().__init__("slow down")
+        self.headers = {"retry-after": "0"}
+
+
+def test_a_test_runs_judging_retries_429s_once_and_counts_what_it_cost(app):
+    for case in ("good", "bad"):
+        _run(app, "nightly", case)
+    fake = Fake(Throttled(), verdict(plan=(5, "Sound."), consistency=(5, "Agrees.")),
+                "max_tokens", verdict(plan=(4, "Fine."), consistency=(4, "Agrees.")))
+    rt = judge.runtime({"concurrency": 1})
+    out = judge.judge_run(app.engine, "t", "nightly", client=fake, rt=rt)
+    assert (out["judged"], out["errors"], out["not_run"]) == (2, 0, 0)
+    s = out["summary"]
+    assert (s["llm_calls"], s["retries"]) == (4, 2)  # a 429 asked again, and a verdict cut off asked again
+    assert out["summary"]["counts"] == {"done": 2}
+
+
+def test_runs_left_at_the_budget_arent_judged_and_arent_failures(app):
+    for case in ("a", "b", "c"):
+        _run(app, "nightly", case)
+
+    class Priced(Fake):
+        def create(self, **kw):
+            r = super().create(**kw)
+            r.model, r.usage = "claude-opus-5", SimpleNamespace(input_tokens=100_000, output_tokens=0,
+                                                              cache_read_input_tokens=0)
+            return r
+    fake = Priced(*[verdict(plan=(5, "ok"), consistency=(5, "ok"))] * 3)
+    rt = judge.runtime({"concurrency": 1, "budget_usd": 0.4, "prices": {"claude-opus-5": (5, 25)}})
+    out = judge.judge_run(app.engine, "t", "nightly", client=fake, rt=rt)
+    assert (out["judged"], out["not_run"], out["errors"]) == (1, 2, 0)  # $0.50 a run: the first spends the budget
+    assert "budget ($0.4)" in out["summary"]["stopped"]
+    from assay.local import judge_cost
+    assert judge_cost(out) == ("1 LLM call, 0 retries, 100,000 tokens in, 0 out, estimated $0.50. 2 runs not judged: "
+                               "the run's budget ($0.4) was reached.")
+
+
+def test_judge_limits_in_assay_toml():
+    from assay.local import SetupError, _judge_config
+    cfg = _judge_config({"concurrency": "8", "rate_limit": 50, "budget_usd": 5, "prices": {"claude-opus-5": [5, 25]}})
+    assert (cfg["concurrency"], cfg["rate_limit"], cfg["budget_usd"]) == (8, 50.0, 5.0)
+    rt = judge.runtime(cfg)
+    assert (rt.concurrency, rt.rate_limit, rt.budget_usd, rt.prices) == (8, 50.0, 5.0, {"claude-opus-5": (5.0, 25.0)})
+    with pytest.raises(SetupError, match="concurrency"):
+        _judge_config({"concurrency": "lots"})
+    with pytest.raises(SetupError, match="prices"):
+        _judge_config({"prices": 5})
+

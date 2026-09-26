@@ -29,6 +29,11 @@ Any provider can judge (assay_sdk.Judge: anthropic, openai, gemini, ollama, open
 It costs a model call per run, so it runs only when asked: `assay test --judge`, `pytest
 --assay --assay-judge`, or POST /v1/agents/runs/{run}/judge. Needs `pip install anthropic`
 and credentials (ANTHROPIC_API_KEY, or an `ant auth login` profile).
+
+A test run's trajectories are judged through assay_sdk.EvalRuntime ([judge] concurrency,
+rate_limit, timeout, retries, max_time, budget_usd, prices): several at once, one retry layer
+(Retry-After honored), and a summary of the calls, retries, tokens and estimated cost. Runs left
+when max_time or the budget is reached aren't judged, and aren't failures.
 """
 from __future__ import annotations
 
@@ -43,6 +48,7 @@ MAX_TRACE = 150_000  # characters of trace the judge is shown
 MAX_VALUE = 2_000  # characters of any one tool result or model text
 FALLBACK_MODELS = ("claude-opus-5", "claude-fable-5-1")  # models server-side fallbacks apply to
 RETRIES = 1  # more asks for a verdict after one that isn't valid
+RUNTIME = {"concurrency": 4, "retries": 3, "timeout": 120.0}  # how a test run is judged, unless configured
 
 RUBRIC = """You judge one run of an AI agent, from its trace. You score two things, each from 1 to 5.
 
@@ -230,6 +236,9 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
     problem = None
     while tries <= RETRIES:
         tries += 1
+        if tries > 1:
+            from assay_sdk.runtime import note_retry
+            note_retry()  # counted in the run's summary
         try:
             resp = asker.ask(trace, system=RUBRIC, schema=SCHEMA, check=False, **extra)
         except ImportError as exc:
@@ -269,17 +278,26 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
     return out
 
 
+def runtime(cfg: Optional[dict] = None):
+    """The EvalRuntime a test run is judged with: RUNTIME, and what [judge] (or settings) says."""
+    from assay_sdk.runtime import EvalRuntime
+    keys = ("concurrency", "retries", "timeout", "rate_limit", "max_time", "budget_usd", "prices")
+    return EvalRuntime(**{**RUNTIME, **{k: v for k, v in (cfg or {}).items() if k in keys and v is not None}})
+
+
 def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
-              limit: Optional[int] = None, redact: bool = True, provider: str = "anthropic") -> dict:
+              limit: Optional[int] = None, redact: bool = True, provider: str = "anthropic", rt=None) -> dict:
     """Judge every ended trajectory of a test run, and store the results with the run's others.
-    {"judged": trajectories, "results": rows written, "errors": rows that couldn't be judged}."""
+    {"judged": trajectories, "results": rows written, "errors": rows that couldn't be judged,
+    "not_run": trajectories left at max_time or the budget, "summary": calls, retries, tokens, cost,
+    "report": the summary as text}. rt: an assay_sdk.EvalRuntime (default: runtime())."""
     from assay import agents, ingest, learn, store
     from assay.sources.events import EventsSource
     heads = [h for h in agents.run_trajectories(engine, tenant, run_id) if h["status"] != "running"]
     heads = heads[:limit] if limit else heads
     trajs = EventsSource(engine, tenant).trajectories([h["trajectory_id"] for h in heads])
     inputs = learn._inputs(engine, tenant, list(trajs))
-    rows = []
+    work = []  # read here: only the model calls run on the runtime's threads
     for h in heads:
         traj = trajs.get(h["trajectory_id"])
         if traj is None:
@@ -289,7 +307,18 @@ def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
             earlier = [learn.snapshot(engine, f"events:{tenant}", t["trajectory_id"], redact, False)
                        for t in agents.conversation_turns(engine, tenant, traj["conversation_id"])
                        if t["trajectory_id"] != h["trajectory_id"] and learn._earlier(t, traj)]
-        found = judge(traj, (inputs.get(h["trajectory_id"]) or {}).get("input"), earlier, model, client, redact, provider)
+        work.append((h, traj, (inputs.get(h["trajectory_id"]) or {}).get("input"), earlier))
+    rt = rt or runtime()
+    report = rt.map(lambda w: judge(w[1], w[2], w[3], model, client, redact, provider), work)
+    rows, not_run = [], 0
+    for (h, traj, _, _), done in zip(work, report.results):
+        if done.status == "NOT_RUN":  # max_time or the budget: not judged, and not a failure
+            not_run += 1
+            continue
+        found = done.value if done.status == "DONE" else {
+            f: {"status": "error", "score": None, "reason": f"the judge failed: {done.error}", "inputs": {},
+                "error_kind": done.error_kind, "tries": done.calls, "raw_output": None}
+            for f in FIELDS if f != "plan_quality" or any(s["kind"] == "plan" for s in traj["steps"])}
         case = h["case_id"] or h["trajectory_id"]
         for field, r in found.items():
             rows.append({"tenant": tenant, "result_id": ingest._derive(run_id, case, field, EVALUATOR, h["attempt"]),
@@ -300,7 +329,8 @@ def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
                          "inputs": r["inputs"], "lineage": h["lineage"], "ts": _now(),
                          "error_kind": r.get("error_kind"), "tries": r.get("tries"), "raw_output": r.get("raw_output")})
     ingest.upsert(engine, store.eval_results, rows, "result_id")
-    return {"judged": len(heads), "results": len(rows), "errors": sum(1 for r in rows if r["status"] == "error")}
+    return {"judged": len(work) - not_run, "results": len(rows), "errors": sum(1 for r in rows if r["status"] == "error"),
+            "not_run": not_run, "summary": report.to_dict(), "report": str(report)}
 
 
 def _now():

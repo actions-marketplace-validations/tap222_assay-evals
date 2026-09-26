@@ -178,6 +178,67 @@ result.reason, result.error, result.attempts, result.raw_judge_output
 The judge may return a bool, a number, a dict (`score`, `passed` or `pass`, `reason`), JSON
 text, or an object with those attributes. `aevaluate()` is the same for an async judge.
 
+## Many samples at once: `EvalRuntime`
+
+Evaluating a dataset is where evaluation tools break down. A 429 cancels the whole run, a
+retry loop never ends, a library retries out of sight and doubles the bill, one bad sample
+crashes the job. `EvalRuntime` runs `evaluate()` over every sample within limits, and says
+what the run cost:
+
+```python
+import assay_sdk as assay
+
+rt = assay.EvalRuntime(concurrency=10, retries=3, timeout=30, rate_limit=50,
+                       retry_on=[429, 500, 502, 503], max_time=600, budget_usd=5,
+                       prices={"claude-opus-5": (5, 25)})      # dollars per million tokens
+judge = assay.Judge("anthropic", "claude-opus-5")
+report = rt.run(judge, prompts, schema=VERDICT, threshold=0.7)   # or: await rt.arun(...)
+print(report)
+```
+
+```
+50 samples in 1m12s
+
+46 judged (41 passed, 5 failed)
+ 2 invalid judge outputs
+ 1 rate limited
+ 1 timed out
+
+LLM calls:      57
+Retries:        7
+Tokens:         68,400 in, 4,560 out
+Estimated cost: $0.46
+```
+
+| | |
+|---|---|
+| `concurrency` | samples judged at once |
+| `rate_limit` | model calls a minute, evenly spaced and shared by every sample. A 429 pauses them all for as long as the provider asked (`Retry-After`) |
+| `timeout` | seconds for one model call (for a judge that isn't a `Judge`, for one attempt) |
+| `retries` | asks again per sample, in all: after a timeout, a dropped connection, an HTTP error whose status is in `retry_on`, or an answer that isn't a verdict (`retry_invalid=True`). A bug in the judge is final at once |
+| `max_time`, `budget_usd` | for the whole run. When one is reached, no more samples start. Those left are reported as not run, never as failures |
+| `prices` | `{model or prefix: (input, output[, cached])}`, dollars per million tokens, or `ASSAY_PRICES` as JSON. The provider's own figure is used when it gives one (LiteLLM, OpenRouter). A model with no price is reported as unpriced, never guessed |
+| `cache=True` | identical samples are judged once |
+
+- **One retry layer, counted.** Through a `Judge`, the provider SDK's own retries are off
+  inside the runtime, so every request is one LLM call in the report, with its tokens. For a
+  judge of your own, an attempt counts as one call unless its calls are seen (through a
+  `Judge`, or with `assay.instrument()` on). An attempt that called the model more than once
+  is reported, because that's where doubled costs hide.
+- **One sample's failure is its own.** An exception, a timeout, even a `CancelledError` that
+  a client raises on a 429, is that sample's result, and the others go on. Cancelling the run
+  itself does stop it: `rt.report` has what was judged so far, and `run()` returns it after
+  Ctrl-C.
+- **Samples:** each is the judge's one argument, and a tuple is spread over its arguments.
+  `assay.Sample(question, answer, id="q7", run=case)` says exactly what goes where, and records
+  the result as a check on that case's run.
+- **Results:** `report.results[i].result` is the `evaluate()` Result, with `calls`,
+  `retries`, `seconds` and `cost_usd` for that sample. `report.to_dict()` has the totals.
+  `rt.map(fn, items)` runs a function of your own per item under the same limits and
+  accounting.
+
+`assay test --judge` judges with this runtime too ([Agents](../../docs/agents.md#an-llm-judge-was-the-plan-a-good-one-and-does-the-run-hang-together)).
+
 ## With pytest
 
 Take the `assay_case` fixture. It's a pytest plugin that comes with this package, so there's

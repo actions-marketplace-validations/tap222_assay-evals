@@ -103,6 +103,12 @@ enabled = false
 provider = "anthropic"   # or openai, gemini, ollama, openai-compatible (then name the model)
 model = "claude-opus-5"
 redact = true     # personal data is replaced before the trace is sent to the model API
+concurrency = 4   # runs judged at once
+# rate_limit = 50   # model calls a minute, shared by all of them (a 429 pauses them all)
+# timeout = 120     # seconds a call may take; retries = 3 (after a 429, a 5xx, a timeout, an invalid verdict)
+# max_time = 600    # seconds for all the judging; budget_usd = 5: runs left then aren't judged, not failed
+# [judge.prices]    # dollars per million tokens, for the estimated cost: input, output[, cached]
+# "claude-opus-5" = [5, 25]
 '''
 
 EXAMPLE_TEMPLATE = '''\
@@ -324,6 +330,21 @@ def policy_lines(policy: Optional[dict]) -> List[str]:
     return [head, *(f"  {'- ' if c['weakens'] else '+ '}{c['text']}" for c in policy["changes"])]
 
 
+def judge_cost(judged: dict) -> str:
+    """One line: what judging cost, and what was left when it stopped."""
+    s = judged["summary"]
+    t = s["tokens"]
+    cost = f"estimated ${s['cost_usd']:,.2f}" if s["cost_usd"] is not None else \
+        "cost unknown (set [judge.prices], or ASSAY_PRICES)"
+    line = (f"{_n(s['llm_calls'], 'LLM call')}, {_n(s['retries'], 'retry').replace('retrys', 'retries')}, "
+            f"{t['input']:,} tokens in, {t['output']:,} out, {cost}")
+    if s["unpriced_calls"] and s["cost_usd"] is not None:
+        line += f" ({_n(s['unpriced_calls'], 'call')} not priced)"
+    if judged.get("not_run"):
+        line += f". {_n(judged['not_run'], 'run')} not judged: {s['stopped']}"
+    return line + "."
+
+
 def _judge_config(j: dict) -> dict:
     from assay import judge
     from assay_sdk.llm import PROVIDERS
@@ -332,8 +353,20 @@ def _judge_config(j: dict) -> dict:
         raise SetupError(f"{CONFIG}, [judge] provider: one of {', '.join(PROVIDERS)}.")
     if provider != "anthropic" and not j.get("model"):
         raise SetupError(f"{CONFIG}, [judge]: name the {provider} model to judge with (model = \"...\").")
+    limits = {}
+    for k, kind in (("concurrency", int), ("retries", int), ("timeout", float), ("rate_limit", float),
+                    ("max_time", float), ("budget_usd", float)):
+        if j.get(k) is not None:
+            try:
+                limits[k] = kind(j[k])
+            except (TypeError, ValueError):
+                raise SetupError(f"{CONFIG}, [judge] {k}: a number, not {j[k]!r}.")
+    if j.get("prices") is not None:
+        if not isinstance(j["prices"], dict):
+            raise SetupError(f'{CONFIG}, [judge.prices]: model = [input, output] dollars per million tokens.')
+        limits["prices"] = j["prices"]
     return {"enabled": bool(j.get("enabled", False)), "model": str(j.get("model") or judge.MODEL),
-            "redact": bool(j.get("redact", True)), "provider": provider}
+            "redact": bool(j.get("redact", True)), "provider": provider, **limits}
 
 
 def _behavior_config(b: dict) -> dict:
@@ -1232,8 +1265,12 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     judged = None
     if (cfg.get("judge") or {}).get("enabled"):  # plan quality and consistency, by an LLM (assay/judge.py)
         from assay import judge
+        try:
+            rt = judge.runtime(cfg["judge"])
+        except ValueError as exc:  # prices that don't read
+            return 2, f"{CONFIG}, [judge]: {exc}"
         judged = judge.judge_run(engine, TENANT, run_id, cfg["judge"]["model"], redact=cfg["judge"]["redact"],
-                                 provider=cfg["judge"].get("provider", "anthropic"))
+                                 provider=cfg["judge"].get("provider", "anthropic"), rt=rt)
     result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"], cfg["behavior"], abandoned_why)
     if result is None:
         return 2, ("Nothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "
@@ -1252,6 +1289,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
         text += _paint(f"\nJudged {_n(judged['judged'], 'run')} with {cfg['judge']['model']} (plan quality, "
                        f"consistency)" + (f"; {judged['errors']} result(s) couldn't be judged" if judged["errors"]
                                           else "") + ".", "dim")
+        text += _paint("\n" + judge_cost(judged), "dim")
     if junit:
         write_junit(junit, run_id, result, verdict(result, bool(baseline))[1])
     state["last"] = run_id
