@@ -71,7 +71,8 @@ def test_no_plan_no_plan_quality_and_what_cant_be_judged():
     assert out["consistency"]["status"] == "error" and "couldn't judge" in out["consistency"]["reason"]
     assert judge.judge(no_plan, "x", client=Fake("refusal"))["consistency"]["reason"] == \
         "the judge declined to judge this run (refusal)"
-    assert "cut off" in judge.judge(no_plan, "x", client=Fake("max_tokens"))["consistency"]["reason"]
+    cut = judge.judge(no_plan, "x", client=Fake("max_tokens", "max_tokens"))["consistency"]  # asked again, then INVALID
+    assert "cut off" in cut["reason"] and (cut["error_kind"], cut["tries"]) == ("invalid", 2)
     assert judge.judge(no_plan, "x", client=Fake(RuntimeError("boom")))["consistency"]["status"] == "error"
 
 
@@ -98,6 +99,8 @@ def test_the_error_types_map_to_infrastructure_or_the_judge():
              (status(anthropic.BadRequestError, 400), False), (status(anthropic.AuthenticationError, 401), False)]
     for exc, infra in cases:
         assert bool(INFRA_REASON.search(judge._error_reason(exc))) is infra, exc
+    kinds = [judge._classify(exc)[0] for exc, _ in cases]
+    assert kinds == ["timeout", "unavailable", "rate_limited", "unavailable", "error", "error"]
 
 
 @pytest.fixture
@@ -133,7 +136,7 @@ def test_judged_results_are_verdicts_like_any_evaluators(app):
     assert by[("good", "plan_quality")]["verdict"] == "PASS" and by[("bad", "plan_quality")]["verdict"] == "PASS"
     assert by[("bad", "consistency")]["verdict"] == "FAIL"
     assert by[("bad", "consistency")]["reason"] == "1/5: Claims a refund step 2 never made."
-    assert by[("throttled", "consistency")]["verdict"] == "INFRA_ERROR"  # not blamed on the agent
+    assert by[("throttled", "consistency")]["verdict"] == "RATE_LIMITED"  # not blamed on the agent
     a = app.get("/v1/evals/runs/nightly/audit", params=SRC).json()
     assert a["audited"] >= 6 and not any(e["evaluator"] == judge.EVALUATOR for e in a["examples"])
 
@@ -183,3 +186,18 @@ def test_personal_data_is_redacted_before_it_reaches_the_judge():
     raw = Fake(verdict(consistency=(5, "ok")))
     judge.judge(traj, "I'm ana@example.com", client=raw, redact=False)
     assert "ana@example.com" in json.dumps(raw.calls[0]["messages"])  # only when asked for
+
+
+def test_a_verdict_that_doesnt_fit_its_schema_is_invalid_never_a_score():
+    no_plan = {**TRAJ, "steps": TRAJ["steps"][1:]}
+    bad = {"consistency": {"applicable": True, "score": "high", "reason": "fine"},
+           "plan_quality": {"applicable": False, "score": 1, "reason": ""}}
+    fake = Fake(bad, verdict(consistency=(4, "Agrees with step 2.")))  # asked again, and fine the second time
+    out = judge.judge(no_plan, "x", client=fake)["consistency"]
+    assert (out["status"], out["score"], out["tries"]) == ("pass", 4, 2)
+    out = judge.judge(no_plan, "x", client=Fake(bad, bad))["consistency"]  # wrong twice: INVALID, with what it said
+    assert (out["status"], out["error_kind"], out["score"], out["tries"]) == ("error", "invalid", None, 2)
+    assert "consistency.score is 'high', not a whole number from 1 to 5" in out["reason"]
+    assert json.loads(out["raw_output"])["consistency"]["score"] == "high"
+    six = Fake({**bad, "consistency": {"applicable": True, "score": 6, "reason": "x"}}, "max_tokens")
+    assert judge.judge(no_plan, "x", client=six)["consistency"]["error_kind"] == "invalid"

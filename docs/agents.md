@@ -145,9 +145,12 @@ The judge's results are ordinary evaluation results (evaluator `assay.judge@1`).
 - a case whose consistency drops from its baseline is a regression, and a judge that disagrees
   with itself across attempts is flaky;
 - what the judge was given is recorded, and checked against the trace like any evaluator's;
-- a judge that couldn't judge isn't a failure. A rate limit, timeout, 5xx or connection error
-  is `INFRA_ERROR`. A refusal, a rejected request, or an answer that isn't the JSON asked for
-  is `EVALUATOR_ERROR`.
+- a judge that couldn't judge isn't a failure, and never a score of 0. Its verdict is checked
+  against its schema. One that isn't a verdict (unparseable, a field missing, a score that
+  isn't a whole number from 1 to 5, an answer cut off) is asked for again, then recorded as
+  `INVALID` with what the judge actually said. A rate limit is `RATE_LIMITED`, a timeout
+  `TIMEOUT`, a 5xx or connection error `INFRA_ERROR`, a refusal or a rejected request
+  `EVALUATOR_ERROR`. Each result records how many tries it took.
 
 Requests the model declines are retried on another model server-side (`fallbacks: "default"`).
 The trace is shown to the judge as data, marked as such, so instructions inside a tool result

@@ -12,9 +12,12 @@ are ordinary evaluation results (evaluator assay.judge@1), so baselines, regress
 and verdicts treat them like any other check. What the judge was given is recorded with each
 result (inputs), so assay/audit.py checks it against the trace like any evaluator's.
 
-A judge that couldn't judge isn't a failure. Rate limits, timeouts, 5xx and connection errors
-are recorded as errors whose reason says so (INFRA_ERROR); a refusal, a rejected request or an
-answer that isn't the JSON asked for is the judge's own problem (EVALUATOR_ERROR).
+A judge that couldn't judge isn't a failure, and never a score of 0. Its verdict is checked
+against SCHEMA; one that isn't (unparseable, a missing field, a score that isn't 1-5, an answer
+cut off) is asked for again, RETRIES times, and then recorded as INVALID, with what it said
+(raw_output). A rate limit is RATE_LIMITED, a timeout TIMEOUT, a 5xx or connection error
+INFRA_ERROR (the SDK has already retried those), a refusal or a rejected request
+EVALUATOR_ERROR. Every result records how many tries it took.
 
 The trace leaves your infrastructure for the model API, so personal data in it (emails, cards,
 IBANs, SSNs, phone numbers) is redacted first, as it is in saved cases: redact=False sends it
@@ -36,6 +39,7 @@ FIELDS = ("plan_quality", "consistency")
 MAX_TRACE = 150_000  # characters of trace the judge is shown
 MAX_VALUE = 2_000  # characters of any one tool result or model text
 FALLBACK_MODELS = ("claude-opus-5", "claude-fable-5-1")  # models server-side fallbacks apply to
+RETRIES = 1  # more asks for a verdict after one that isn't valid
 
 RUBRIC = """You judge one run of an AI agent, from its trace. You score two things, each from 1 to 5.
 
@@ -124,24 +128,49 @@ def _client():
     return anthropic.Anthropic(timeout=120.0, max_retries=2)
 
 
-def _error_reason(exc: Exception) -> str:
-    """Why the judge couldn't judge, worded so assay/failures.py's INFRA_REASON tells
-    infrastructure (rate limit, timeout, 5xx, connection) from the judge's own problems."""
+def _classify(exc: Exception) -> tuple:
+    """(error_kind, reason) for a judge call that raised (schema.ERROR_KINDS)."""
     try:
         import anthropic
-    except ImportError:  # a client passed in without the SDK installed
-        return f"judge call failed: {type(exc).__name__}: {exc}"[:500]
+    except ImportError:  # a client passed in without the SDK installed: tell by type, code and message
+        from assay_sdk.evaluation import classify_exception
+        kind, text = classify_exception(exc)
+        return kind, f"judge call failed: {text}"[:500]
     if isinstance(exc, anthropic.RateLimitError):
-        return "judge call hit a rate limit (429)"
-    if isinstance(exc, anthropic.APITimeoutError):
-        return "judge call timed out"
+        return "rate_limited", "judge call hit a rate limit (429)"
+    if isinstance(exc, anthropic.APITimeoutError):  # before APIConnectionError: it's a subclass
+        return "timeout", "judge call timed out"
     if isinstance(exc, anthropic.APIConnectionError):
-        return f"judge call failed: connection error ({exc})"
+        return "unavailable", f"judge call failed: connection error ({exc})"
     if isinstance(exc, anthropic.APIStatusError):
         if exc.status_code >= 500 or exc.status_code == 529:
-            return f"judge call failed: the API returned {exc.status_code} (overloaded or unavailable)"
-        return f"judge call rejected ({exc.status_code}): {exc.message}"[:500]
-    return f"judge call failed: {type(exc).__name__}: {exc}"[:500]
+            return "unavailable", f"judge call failed: the API returned {exc.status_code} (overloaded or unavailable)"
+        return "error", f"judge call rejected ({exc.status_code}): {exc.message}"[:500]
+    from assay_sdk.evaluation import classify_exception
+    kind, text = classify_exception(exc)
+    return kind, f"judge call failed: {text}"[:500]
+
+
+def _error_reason(exc: Exception) -> str:
+    return _classify(exc)[1]
+
+
+def _problem(verdict: Any, fields: List[str]) -> Optional[str]:
+    """What's wrong with a verdict, against SCHEMA; None if nothing."""
+    if not isinstance(verdict, dict):
+        return "the answer isn't a JSON object"
+    for f in fields:
+        v = verdict.get(f)
+        if not isinstance(v, dict):
+            return f"{f} is missing"
+        if not isinstance(v.get("applicable"), bool):
+            return f"{f}.applicable isn't true or false"
+        if not isinstance(v.get("reason"), str):
+            return f"{f}.reason isn't text"
+        score = v.get("score")
+        if v["applicable"] and (isinstance(score, bool) or not isinstance(score, int) or not 1 <= score <= 5):
+            return f"{f}.score is {score!r}, not a whole number from 1 to 5"
+    return None
 
 
 def _redacted(traj: dict, input_: Any, earlier: Optional[List[dict]]):
@@ -178,35 +207,52 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
     inputs = {k: v for k, v in inputs.items() if v is not None}
     fields = [f for f in FIELDS if f != "plan_quality" or has_plan]
 
-    def all_(status, reason, score=None):
-        return {f: {"status": status, "score": score, "reason": reason, "inputs": inputs} for f in fields}
+    tries, text = 0, None
+
+    def result(status, reason, score=None, kind=None):
+        return {"status": status, "score": score, "reason": reason, "inputs": inputs, "error_kind": kind,
+                "tries": tries, "raw_output": text[:16384] if text else None}
+
+    def all_(status, reason, kind=None):
+        return {f: result(status, reason, kind=kind) for f in fields}
     try:
         client = client or _client()
-        resp = client.messages.create(**request)
     except ImportError:
-        return all_("error", "the judge needs the anthropic package: pip install anthropic")
-    except Exception as exc:  # classified by type: see _error_reason
-        return all_("error", _error_reason(exc))
-    if resp.stop_reason == "refusal":
-        return all_("error", "the judge declined to judge this run (refusal)")
-    if resp.stop_reason == "max_tokens":
-        return all_("error", "the judge's answer was cut off (max_tokens)")
-    text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), None)
-    try:
-        verdict = json.loads(text or "")
-    except ValueError:
-        return all_("error", "the judge's answer wasn't the JSON asked for")
+        return all_("error", "the judge needs the anthropic package: pip install anthropic", "error")
+    problem = None
+    while tries <= RETRIES:
+        tries += 1
+        try:
+            resp = client.messages.create(**request)
+        except Exception as exc:  # the SDK has already retried what's worth retrying
+            kind, reason = _classify(exc)
+            return all_("error", reason, kind)
+        text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), None)
+        if resp.stop_reason == "refusal":
+            return all_("error", "the judge declined to judge this run (refusal)", "error")
+        if resp.stop_reason == "max_tokens":
+            problem = "the judge's answer was cut off (max_tokens)"
+            continue
+        try:
+            verdict = json.loads(text or "")
+        except ValueError:
+            problem = "the judge's answer wasn't the JSON asked for"
+            continue
+        problem = _problem(verdict, fields)
+        if problem is None:
+            break
+        problem = f"the judge's verdict doesn't fit its schema: {problem}"
+    if problem is not None:  # not a verdict: INVALID, never a score
+        return all_("error", f"{problem} ({tries} tries)", "invalid")
     out = {}
     for f in fields:
-        v = verdict.get(f) or {}
-        if not v.get("applicable", False):
+        v = verdict[f]
+        if not v["applicable"]:
             if f == "consistency":  # always applicable: the judge saying otherwise means it couldn't judge
-                out[f] = {"status": "error", "score": None, "reason": f"the judge couldn't judge it: {v.get('reason')}",
-                          "inputs": inputs}
+                out[f] = result("error", f"the judge couldn't judge it: {v['reason']}", kind="error")
             continue
-        score = v.get("score")
-        out[f] = {"status": "pass" if isinstance(score, int) and score >= PASS_SCORE else "fail", "score": score,
-                  "reason": f"{score}/5: {v.get('reason') or ''}".strip(), "inputs": inputs}
+        out[f] = result("pass" if v["score"] >= PASS_SCORE else "fail", f"{v['score']}/5: {v['reason']}".strip(),
+                        v["score"])
     return out
 
 
@@ -238,7 +284,8 @@ def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
                          "document_id": h["trajectory_id"], "field": field, "status": r["status"],
                          "evaluator": EVALUATOR, "score": r["score"], "reason": r["reason"][:2000],
                          "expected": f"≥ {PASS_SCORE}/5", "actual": f"{r['score']}/5" if r["score"] else None,
-                         "inputs": r["inputs"], "lineage": h["lineage"], "ts": _now()})
+                         "inputs": r["inputs"], "lineage": h["lineage"], "ts": _now(),
+                         "error_kind": r.get("error_kind"), "tries": r.get("tries"), "raw_output": r.get("raw_output")})
     ingest.upsert(engine, store.eval_results, rows, "result_id")
     return {"judged": len(heads), "results": len(rows), "errors": sum(1 for r in rows if r["status"] == "error")}
 
