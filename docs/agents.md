@@ -140,7 +140,14 @@ curl -X POST "$ASSAY_URL/v1/agents/runs/nightly-0924/judge?source=events:acme" -
 It costs a model call per run, so it runs only when asked. `[judge] enabled = true` in
 `assay.toml` turns it on for every run. The model is `claude-opus-5` by default. `[judge] provider` and `model` (or `ASSAY_JUDGE_PROVIDER`
 and `ASSAY_JUDGE_MODEL` on the server) judge with OpenAI, Gemini, Ollama or any OpenAI-compatible
-server instead. A score of 3 or more passes.
+server instead.
+
+Each dimension is PASS or FAIL with a critique: what's wrong, naming the steps, detailed enough
+that someone new could act on it. A FAIL names its kind (fabricated, contradicts_source,
+unsupported_inference, contradicts_itself, incomplete, policy_refusal, unworkable, inefficient).
+A binary verdict is one a person can check and agree with; a 1-5 score hides what a 3 means. The
+result reads `expected PASS, actual FAIL` with the critique as its reason. Verdicts recorded with
+an earlier judge's 1-5 scores are still read, a score of 3 or more passing.
 
 The judge's results are ordinary evaluation results (evaluator `assay.judge@1`). So:
 - a case whose consistency drops from its baseline is a regression, and a judge that disagrees

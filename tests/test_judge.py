@@ -267,3 +267,21 @@ def test_the_judge_names_the_kind_of_failure():
     v["consistency"].update(score=4, category="none")
     assert judge.judge(no_plan, "x", client=Fake(v))["consistency"]["category"] is None
     assert "policy_refusal" in judge.SCHEMA["properties"]["consistency"]["properties"]["category"]["enum"]
+
+
+def test_pass_or_fail_with_a_critique_the_score_still_read():
+    no_plan = {"answer": "Refunded O-17.", "status": "completed", "steps": [
+        {"seq": 0, "kind": "tool", "name": "get_order", "args": {}, "result": {"status": "lost"}},
+        {"seq": 1, "kind": "answer", "text": "Refunded O-17."}]}
+    v = {"plan_quality": {"applicable": False, "verdict": "pass", "critique": "no plan recorded"},
+         "consistency": {"applicable": True, "verdict": "fail", "category": "fabricated",
+                         "critique": "Says refunded; step 0 found the order lost and nothing refunded it."}}
+    out = judge.judge(no_plan, "x", client=Fake(v))["consistency"]
+    assert (out["status"], out["score"], out["category"]) == ("fail", None, "fabricated")
+    assert out["reason"].startswith("FAIL: Says refunded") and (out["expected"], out["actual"]) == ("PASS", "FAIL")
+    v["consistency"].update(verdict="pass", critique="Matches step 0's result.")
+    out = judge.judge(no_plan, "x", client=Fake(v))["consistency"]
+    assert (out["status"], out["actual"], out["category"]) == ("pass", "PASS", None)
+    assert judge.SCHEMA["properties"]["consistency"]["properties"]["verdict"]["enum"] == ["pass", "fail"]
+    v["consistency"]["verdict"] = "maybe"  # not a verdict: asked again, then INVALID
+    assert judge.judge(no_plan, "x", client=Fake(v, v))["consistency"]["error_kind"] == "invalid"
