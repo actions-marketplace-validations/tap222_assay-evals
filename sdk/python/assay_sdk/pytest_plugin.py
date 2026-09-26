@@ -304,7 +304,7 @@ def pytest_runtest_call(item):
     cfg = _config(item.config)
     if cfg and cfg["pytest"]["checks"]:
         from assay import local
-        problems += local.check_run(run.steps, run.expected, run.answer_text, cfg)
+        problems += local.check_run(run.steps, run.expected, run.answer_text, cfg, run.request)
     if problems:
         item._assay_checks_failed = True  # the test's own asserts passed: record them as such
         pytest.fail("The run failed Assay's checks:\n  " + "\n  ".join(problems), pytrace=False)

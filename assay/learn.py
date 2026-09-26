@@ -94,8 +94,9 @@ def _luhn(digits: str) -> bool:
     return len(d) >= 13 and s % 10 == 0
 
 
-def pii_scan(value) -> List[dict]:
-    """Personal data an input seems to hold: [{"kind", "sample"}], sample partly masked."""
+def pii_matches(value) -> List[tuple]:
+    """(kind, the value as found) for each piece of personal data in a value. Raw: for comparing,
+    never for showing."""
     text = value if isinstance(value, str) else json.dumps(value, default=str) if value is not None else ""
     out, taken = [], []
     for kind, rx in PII.items():
@@ -108,7 +109,22 @@ def pii_scan(value) -> List[dict]:
             if kind == "phone" and len(re.sub(r"\D", "", v)) < 9:
                 continue
             taken.append((m.start(), m.end()))
-            out.append({"kind": kind, "sample": v[:3] + "…" + v[-2:] if len(v) > 6 else "…"})
+            out.append((kind, v.rstrip(".-") if kind == "email" else v))  # not the sentence's full stop
+    return out
+
+
+def pii_sample(v: str) -> str:
+    return v[:3] + "…" + v[-2:] if len(v) > 6 else "…"
+
+
+def pii_key(kind: str, v: str) -> str:
+    """The same piece of data however it's written: an email in any case, a number in any format."""
+    return v.lower() if kind == "email" else re.sub(r"[^0-9A-Za-z]", "", v).upper()
+
+
+def pii_scan(value) -> List[dict]:
+    """Personal data an input seems to hold: [{"kind", "sample"}], sample partly masked."""
+    out = [{"kind": kind, "sample": pii_sample(v)} for kind, v in pii_matches(value)]
     seen, uniq = set(), []
     for x in out:
         if (x["kind"], x["sample"]) not in seen:

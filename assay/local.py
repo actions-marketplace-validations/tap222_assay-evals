@@ -28,7 +28,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import delete, select
 
@@ -72,10 +72,13 @@ kind = "requires_approval"   # refund only after run.approval("refund", "approve
 step = "refund"
 
 # Personal data (email, card, IBAN, SSN, phone) in a tool's arguments fails the PII check,
-# unless the tool is allowed that kind, e.g. allow = {{ send_receipt = ["email"] }}.
+# unless the tool is allowed that kind, e.g. allow = {{ send_receipt = ["email"] }}. So does
+# personal data in the answer that the request didn't give: someone else's, not the user's own.
 [pii]
 check = true
 allow = {{}}
+answers = true
+allow_in_answer = []
 
 # A test fails when its run fails these checks, not only on its own asserts.
 [pytest]
@@ -186,13 +189,17 @@ def load_config(root: Path) -> dict:
     pii = cfg.get("pii") or {}
     allow = pii.get("allow") or {}
     kinds = set(learn.PII)
+    answer_allow = pii.get("allow_in_answer") or []
+    if not isinstance(answer_allow, list) or set(answer_allow) - kinds:
+        raise SetupError(f"{CONFIG}, [pii] allow_in_answer: a list of kinds from {', '.join(learn.PII)}.")
     for tool, allowed in allow.items():
         if not isinstance(allowed, list) or set(allowed) - kinds:
             raise SetupError(f"{CONFIG}, [pii] allow.{tool}: a list of kinds from {', '.join(learn.PII)}.")
     return {"command": test.get("command"), "repeat": int(test.get("repeat", 1)),
             "timeout": float(test["timeout"]) if test.get("timeout") else None,
             "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
-            "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()}},
+            "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()},
+                    "answers": bool(pii.get("answers", True)), "answer_allow": set(answer_allow)},
             "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
             "behavior": _behavior_config(cfg.get("behavior") or {}), "judge": _judge_config(cfg.get("judge") or {})}
 
@@ -212,7 +219,7 @@ def _behavior_config(b: dict) -> dict:
 
 
 DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
-                  "pii": {"check": True, "allow": {}}, "pytest": {"checks": True},
+                  "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True},
                   "behavior": {"fail": True, "ratios": {}}, "judge": {"enabled": False, "model": "claude-opus-5", "redact": True}}
 
 
@@ -246,7 +253,8 @@ def as_trajectory(steps: List[dict], answer: Optional[str]) -> dict:
             "started_at": None, "finished_at": None}
 
 
-def check_run(steps: List[dict], expected: Optional[dict], answer: Optional[str], cfg: dict) -> List[str]:
+def check_run(steps: List[dict], expected: Optional[dict], answer: Optional[str], cfg: dict,
+              request: Any = None) -> List[str]:
     """The checks `assay test` makes, on one run held in memory: its case's expectations, the
     contracts, PII and loops. What failed, as "Check: why" lines."""
     traj = as_trajectory(steps, answer)
@@ -261,9 +269,9 @@ def check_run(steps: List[dict], expected: Optional[dict], answer: Optional[str]
         if c["status"] == "fail":
             by_reason.setdefault(c["reason"], []).append(CHECK_NAMES.get(c["field"], c["field"]))
     if cfg["pii"]["check"]:
-        found = pii_findings(traj, cfg["pii"]["allow"])
+        found = pii_findings(traj, cfg["pii"]["allow"], request, cfg["pii"]["answers"], cfg["pii"]["answer_allow"])
         if found:
-            by_reason[f"Personal data in tool arguments: {'; '.join(found)}"] = ["PII"]
+            by_reason[f"Personal data leaked: {'; '.join(found)}"] = ["PII"]
     return [f"{', '.join(checks)}: {why}" for why, checks in by_reason.items()]
 
 
@@ -364,8 +372,11 @@ def sync_contracts(engine, rules: List[dict]) -> None:
         contracts.save(engine, source, c)
 
 
-def pii_findings(traj: dict, allow: Dict[str, set]) -> List[str]:
-    """Personal data in the arguments of the run's tool calls, except kinds the tool may receive."""
+def pii_findings(traj: dict, allow: Dict[str, set], request: Any = None, answers: bool = True,
+                 answer_allow: Optional[set] = None) -> List[str]:
+    """Personal data in the arguments of the run's tool calls, except kinds the tool may receive;
+    and, when the request is known, personal data in the answer that the request didn't give
+    (someone else's: the user's own email said back to them is fine)."""
     out = []
     for s in traj["steps"]:
         if s["kind"] != "tool" or not s.get("args"):
@@ -373,6 +384,17 @@ def pii_findings(traj: dict, allow: Dict[str, set]) -> List[str]:
         for hit in learn.pii_scan(s["args"]):
             if hit["kind"] not in allow.get(s["name"], ()):
                 out.append(f"{hit['kind']} ({hit['sample']}) sent to {s['name']} (step {s['seq']})")
+    if answers and request is not None:
+        given = {learn.pii_key(k, v) for k, v in learn.pii_matches(request)}
+        said = [traj.get("answer")] + [s.get("text") for s in traj["steps"] if s["kind"] == "answer"]
+        seen = set()
+        for text in filter(None, said):
+            for kind, v in learn.pii_matches(text):
+                key = learn.pii_key(kind, v)
+                if key in given or key in seen or kind in (answer_allow or set()):
+                    continue
+                seen.add(key)
+                out.append(f"{kind} ({learn.pii_sample(v)}) in the answer, which the request didn't give")
     return out
 
 
@@ -404,24 +426,26 @@ def promote(engine, run_id: str) -> List[str]:
     return cases
 
 
-def check_pii(engine, source, run_id: str, allow: Dict[str, set]) -> None:
+def check_pii(engine, source, run_id: str, pii: dict) -> None:
     """One PII result per agent run, stored like the trajectory checks."""
     heads = agents.run_trajectories(engine, TENANT, run_id)
     trajs = source.trajectories([h["trajectory_id"] for h in heads])
+    requests = learn._inputs(engine, TENANT, [h["trajectory_id"] for h in heads])
     rows = []
     for h in heads:
         traj = trajs.get(h["trajectory_id"])
         if traj is None:
             continue
-        found = pii_findings(traj, allow)
+        found = pii_findings(traj, pii["allow"], (requests.get(h["trajectory_id"]) or {}).get("input"),
+                             pii.get("answers", True), pii.get("answer_allow"))
         case = h["case_id"] or h["trajectory_id"]
         rows.append({"tenant": TENANT, "result_id": ingest._derive(run_id, case, "pii", PII_EVALUATOR, h["attempt"]),
                      "run_id": run_id, "case_id": case, "document_id": h["trajectory_id"],
                      "evaluator": PII_EVALUATOR, "attempt": h["attempt"], "ts": h["started_at"],
                      "lineage": h["lineage"], "score": None, "field": "pii",
-                     "status": "fail" if found else "pass", "expected": "no personal data in tool arguments",
+                     "status": "fail" if found else "pass", "expected": "no personal data in tool arguments or answers",
                      "actual": "; ".join(found)[:300] or "none",
-                     "reason": f"Personal data in tool arguments: {'; '.join(found)}"[:2000] if found else None})
+                     "reason": f"Personal data leaked: {'; '.join(found)}"[:2000] if found else None})
     ingest.upsert(engine, store.eval_results, rows, "result_id")
 
 
@@ -450,7 +474,7 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
         lifecycle.evaluate(engine, lifecycle.pending(engine, TENANT, [h["trajectory_id"] for h in heads]),
                            abandoned_why=abandoned_why or "the command exited first")
         if pii and pii["check"]:
-            check_pii(engine, source, run_id, pii["allow"])
+            check_pii(engine, source, run_id, pii)
     # "" means no baseline: failures.evaluation would otherwise pick the run before this one.
     a = failures.evaluation(engine, source, TENANT, run_id, baseline or "", tolerance)
     if a is None:

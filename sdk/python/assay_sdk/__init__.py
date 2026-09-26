@@ -273,6 +273,7 @@ class Run:
         self.outcome_value: Optional[str] = None  # run.outcome()
         self.started, self.ended = time.monotonic(), None  # for the run's latency
         self.expectations: List[Any] = []  # assay_sdk.testing.expect(run): checked when the test ends
+        self.request: Any = None  # what the run was asked (input=): personal data it gave may be said back
 
     def _case(self) -> Dict[str, Any]:
         if not self.test:
@@ -415,6 +416,7 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
     recorded = c.sample >= 1 or random.random() < c.sample
     r = Run(c, rid, recorded)
     r.test = _test(test)
+    r.request = input
     if recorded:
         c.emit({"type": "run.start", "run_id": rid, "kind": kind, "task": task, "segment": segment,
                 "input": c.clean(input), "input_ref": input_ref, "version": version, "test": r.test,
