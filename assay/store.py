@@ -80,6 +80,9 @@ path_contracts = Table(
     Column("where", JSON),  # conditions on the step's arguments (tool calls): {"confirmed": {"not": true}}
     Column("same", JSON),  # before / only_after: arguments the other step must share, e.g. ["order_id"]
     Column("identical", Boolean),  # max_runs: count only calls with identical arguments
+    Column("claim", String(512)),  # claim: what the answer says, as a regular expression (step is the tool needed)
+    Column("state", JSON),  # claim: the recorded state that must say so {"name", "field", "is"}
+    Column("claim_in", String(16)),  # claim: answer (default) or any (the model's own text too)
     Column("severity", String(16), nullable=False, default="critical"),  # critical | warning
     Column("note", String(512)),
     Column("updated_at", DateTime, nullable=False),

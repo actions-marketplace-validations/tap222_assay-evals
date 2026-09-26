@@ -64,7 +64,8 @@ tolerance = 0.01  # a drop in the pass rate smaller than this doesn't fail the r
 timeout = 900     # seconds per attempt; a command still running then is stopped (0: no limit)
 
 # Safety rules every agent run must keep. Kinds: never, must_include, before, only_after,
-# max_runs, allowed_steps. `where` narrows a rule to calls with certain arguments.
+# max_runs, allowed_steps, requires_approval, claim. `where` narrows a rule to calls with certain
+# arguments. A claim needs its evidence: kind = "claim", claim = "refunded", needs = "refund".
 [[contracts]]
 kind = "never"
 step = "delete_order"

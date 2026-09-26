@@ -98,6 +98,10 @@ class ContractIn(BaseModel):
     same: Optional[List[str]] = Field(None, description="before / only_after: arguments the other step must share, "
                                                         'e.g. ["order_id"]')
     identical: Optional[bool] = Field(None, description="max_runs: count only calls with identical arguments")
+    claim: Optional[str] = Field(None, max_length=512, description="claim: what the answer says, as a regular expression")
+    needs: Optional[str] = Field(None, max_length=64, description="claim: the tool that must have succeeded")
+    state: Optional[Dict[str, Any]] = Field(None, description='claim: {"name": "order:*", "field": "status", "is": "refunded"}')
+    claim_in: Optional[str] = Field(None, description="claim: answer (default) or any (the model's own text too)")
     severity: str = Field("critical", description="critical | warning")
     note: Optional[str] = Field(None, max_length=512)
 

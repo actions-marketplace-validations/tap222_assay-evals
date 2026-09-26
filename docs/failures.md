@@ -133,6 +133,26 @@ them apart, so Assay checks every document's path against rules you agree to:
 | `max_runs` | `field_extraction` runs at most 3 times | allows retries but not loops |
 | `allowed_steps` | nothing outside this list runs | unknown new steps |
 | `requires_approval` | a step runs only once it's approved (`run.approval(step, "approved")`; a later rejection takes it back) | a refund nobody approved |
+| `claim` | an answer that claims "refunded" needs a successful `refund` call, and `order:*` status `refunded` in the recorded state (agent runs) | an agent saying it did what it didn't |
+
+A claim contract makes the run's own record the authority, not a model's opinion of it: the
+model proposes, the recorded tool results and state verify. `claim` is a regular expression
+matched in the answer (`claim_in = "any"` also covers the model's own text, such as a
+self-review). `needs` is the tool that must have succeeded, and `state` is `{name, field, is}`
+on the run's state changes (`run.state("order:17", "update", {"status": "refunded"})`); give
+either or both:
+
+```toml
+[[contracts]]
+kind = "claim"
+claim = "refunded|money is on its way"
+needs = "refund"
+state = { name = "order:*", field = "status", is = "refunded" }
+```
+
+A broken claim reads `claimed “Refunded” in the answer, but refund was called but failed (402
+card declined) and order:17 status is 'delivered', not 'refunded'`. It fails the safety check in
+tests, and in production it's a contract signal, so the trace becomes a candidate case.
 
 Scope a contract with `when` (the document must match every listed attribute) or `unless`
 (a matching document is exempt), over `segment`, `document_type` and `processing_mode`.

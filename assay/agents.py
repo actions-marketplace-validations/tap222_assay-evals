@@ -372,11 +372,12 @@ def safety(traj: dict, rules: List[dict]) -> List[dict]:
     for c in rules:
         if not contracts_mod.applies(c, doc):
             continue
-        b = contracts_mod.breaks(c, path, finished=True)
+        b = contracts_mod.breaks(c, path, finished=True, traj=traj)
         if b:
+            seq = b.get("seq") if "seq" in b else seqs[b["at"]] if b["at"] is not None and b["at"] < len(seqs) else None
             out.append({"contract_id": c.get("id"), "label": c.get("label") or contracts_mod.describe(c),
                         "severity": c.get("severity", "critical"), "detail": b["detail"], "tool": b["stage"],
-                        "seq": seqs[b["at"]] if b["at"] is not None and b["at"] < len(seqs) else None})
+                        "seq": seq})
     return out
 
 

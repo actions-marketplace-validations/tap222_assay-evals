@@ -317,7 +317,7 @@ def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) 
         for c in rules:
             if not contracts_mod.applies(c, f["doc"]):
                 continue
-            b = contracts_mod.breaks(c, path, finished=bool(f["doc"].completed_at))
+            b = contracts_mod.breaks(c, path, finished=bool(f["doc"].completed_at), traj=trajs.get(d_id))
             if b:
                 crit = c.get("severity", "critical") == "critical"
                 sig.append({"type": "contract", "weight": WEIGHTS["contract_critical" if crit else "contract_warning"],

@@ -13,6 +13,12 @@ rules someone agreed to:
 - allowed_steps  steps           nothing outside this list runs
 - requires_approval  step        step runs only once it's approved (an approval step for it
                                  whose decision is "approved"; a later rejection takes it back)
+- claim          claim, needs and/or state
+                                 an agent run whose answer claims something (claim, a regular
+                                 expression) must have the evidence for it: a successful call of
+                                 the tool `needs`, and/or recorded state that says so (state:
+                                 {"name": "order:*", "field": "status", "is": "refunded"}). The
+                                 model proposes; the run's own record verifies. Agent runs only.
 
 A contract can be scoped with `when` (the document must match every listed
 attribute) and `unless` (a document matching any listed attribute is exempt),
@@ -54,6 +60,7 @@ KINDS = {
     "max_runs": (("step", "max_runs"), "{step} runs at most {max_runs}× per document"),
     "allowed_steps": (("steps",), "Only these steps run: {steps}"),
     "requires_approval": (("step",), "{step} runs only once it's approved"),
+    "claim": (("claim",), "Claiming “{claim}” needs {evidence}"),
 }
 APPROVAL = "approval:"  # an approval in a path: approval:<action>, its decision in the args
 SEVERITIES = ("critical", "warning")
@@ -71,6 +78,19 @@ def validate(c: dict) -> Optional[str]:
         return f"A {kind} contract needs {', '.join(missing)}."
     if kind in ("before", "only_after") and c["step"] == c["other"]:
         return "step and other must be different steps."
+    if kind == "claim":
+        import re
+        try:
+            re.compile(c["claim"])
+        except re.error as exc:
+            return f"claim isn't a regular expression: {exc}."
+        st = c.get("state")
+        if not (c.get("needs") or c.get("step")) and not st:
+            return "A claim contract needs the evidence: needs (a tool that must succeed), state, or both."
+        if st is not None and not (isinstance(st, dict) and st.get("name") and st.get("field") and "is" in st):
+            return 'state is {"name": "order:*", "field": "status", "is": "refunded"}.'
+        if (c.get("claim_in") or "answer") not in ("answer", "any"):
+            return "claim_in is answer (the default) or any (the model's own text too, e.g. a self-review)."
     if kind == "max_runs" and int(c["max_runs"]) < 1:
         return "max_runs must be at least 1."
     if c.get("severity", "critical") not in SEVERITIES:
@@ -86,9 +106,20 @@ def validate(c: dict) -> Optional[str]:
     return None
 
 
+def _evidence(c: dict) -> str:
+    parts = []
+    if c.get("needs") or c.get("step"):
+        parts.append(f"a successful {c.get('needs') or c.get('step')}")
+    st = c.get("state")
+    if st:
+        parts.append(f"{st['name']} {st['field']} {st['is']!r}")
+    return " and ".join(parts)
+
+
 def describe(c: dict) -> str:
     text = KINDS[c["kind"]][1].format(step=c.get("step"), other=c.get("other"), max_runs=c.get("max_runs"),
-                                      steps=", ".join(c.get("steps") or []))
+                                      steps=", ".join(c.get("steps") or []), claim=c.get("claim"),
+                                      evidence=_evidence(c) if c["kind"] == "claim" else "")
     scope = lambda s: "; ".join(f"{k} is {' or '.join(map(str, v))}" for k, v in (s or {}).items())
     if c.get("where"):
         conds = [f"{k} is not {v['not']!r}" if isinstance(v, dict) and "not" in v else
@@ -170,8 +201,49 @@ def _args_text(args: dict) -> str:
     return ", ".join(f"{k}={v!r}" for k, v in list(args.items())[:3])
 
 
-def breaks(c: dict, path: List[str], finished: bool = True) -> Optional[dict]:
+def claim_breaks(c: dict, traj: dict) -> Optional[dict]:
+    """How an agent run breaks a claim contract: {"stage", "at", "seq", "detail"}, or None."""
+    import fnmatch
+    import re
+    pat = re.compile(c["claim"], re.I)
+    steps = traj.get("steps") or []
+    said = [(s["seq"], s.get("text")) for s in steps if s["kind"] == "answer" or
+            (c.get("claim_in") == "any" and s["kind"] == "reason")]
+    if traj.get("answer") and not any(t == traj["answer"] for _, t in said):
+        said.append((None, traj["answer"]))
+    hit = next(((seq, m.group(0)) for seq, t in said if t for m in [pat.search(t)] if m), None)
+    if hit is None:
+        return None
+    seq, words = hit
+    tool = c.get("needs") or c.get("step")
+    problems = []
+    if tool:
+        calls = [s for s in steps if s["kind"] == "tool" and fnmatch.fnmatch(s.get("name") or "", tool)]
+        ok = [s for s in calls if not s.get("error")]
+        if not calls:
+            problems.append(f"{tool} was never called")
+        elif not ok:
+            problems.append(f"{calls[-1]['name']} was called but failed ({str(calls[-1]['error'])[:120]})")
+    st = c.get("state")
+    if st:
+        states = [s for s in steps if s["kind"] == "state" and fnmatch.fnmatch(s.get("name") or "", st["name"])]
+        if not states:
+            problems.append(f"no state was recorded for {st['name']}")
+        else:
+            last = states[-1]
+            value = (last.get("result") or {}).get(st["field"]) if isinstance(last.get("result"), dict) else None
+            if value != st["is"]:
+                problems.append(f"{last['name']} {st['field']} is {value!r}, not {st['is']!r}")
+    if not problems:
+        return None
+    return {"stage": tool or st["name"], "at": None, "seq": seq,
+            "detail": f"claimed “{words}” in the {'answer' if seq is None or any(s['seq'] == seq and s['kind'] == 'answer' for s in steps) else 'model text'}, "
+                      f"but {' and '.join(problems)}"}
+
+
+def breaks(c: dict, path: List[str], finished: bool = True, traj: Optional[dict] = None) -> Optional[dict]:
     """How a path breaks a contract: {"stage", "at", "detail"}, or None if it keeps it.
+    A claim contract needs the whole agent run (traj); without it, it can't be judged here.
 
     `at` is the index in the path where it broke (None for a step that never
     ran). must_include is only judged once the document is finished, so a
@@ -180,6 +252,8 @@ def breaks(c: dict, path: List[str], finished: bool = True) -> Optional[dict]:
     `identical` look at.
     """
     kind, step = c["kind"], c.get("step")
+    if kind == "claim":
+        return claim_breaks(c, traj) if traj is not None else None
     first = {}
     for i, s in enumerate(path):
         first.setdefault(s, i)
@@ -288,6 +362,10 @@ def check(source, window: Window, contracts: List[dict], doc_paths=None) -> dict
     report, violating = [], set()
     for c in contracts:
         judged, examples, count, where = 0, [], 0, Counter()
+        if c["kind"] == "claim":  # judged on agent runs (their answer and state), not on paths
+            report.append({**c, "label": c.get("label") or describe(c), "judged": 0, "violations": 0, "rate": None,
+                           "stages": {}, "examples": [], "state": "unjudged"})
+            continue
         for d, path in ps.items():
             scope = applies(c, docs.get(d))
             if not scope:
@@ -498,7 +576,8 @@ def suggest(source, window: Window, existing: Iterable[dict] = (), min_docs: int
 def save(engine: Engine, source: str, body: dict, contract_id: Optional[int] = None) -> dict:
     t = store.path_contracts
     fields = {k: body.get(k) for k in ("kind", "step", "other", "max_runs", "steps", "when", "unless", "note",
-                                       "where", "same", "identical")}
+                                       "where", "same", "identical", "claim", "state", "claim_in")}
+    fields["step"] = body.get("step") or body.get("needs")  # a claim's evidence tool
     fields["severity"] = body.get("severity") or "critical"
     with engine.begin() as conn:
         if contract_id is None:
