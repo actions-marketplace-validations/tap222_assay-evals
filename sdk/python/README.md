@@ -284,6 +284,10 @@ history and user message in tokens, images and video (count, bytes, size), and s
 What retrieval put into the prompt is recorded with `run.retrieve(query, docs, used=4)`: the
 fragments (text, dicts, LangChain Documents, LlamaIndex nodes), their tokens, and which went into
 the prompt. `assay.instrument()` records LangChain and LlamaIndex retrievers on its own.
+`simulate(agent, Persona(goal=..., traits=..., facts=...), user=Judge(...), run=assay_case)` tests a
+whole conversation against a simulated user
+([Simulated users](../../docs/agents.md#simulated-users-the-whole-conversation-not-one-message)).
+
 `faithfulness(judge, question, answer, fragments)` checks the answer claim by claim against
 them, with the judge's quotes checked
 ([Faithfulness](../../docs/agents.md#faithfulness-is-the-answer-backed-by-what-was-retrieved)).

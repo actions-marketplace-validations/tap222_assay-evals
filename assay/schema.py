@@ -77,7 +77,7 @@ class Step(_E):
     run_id: str = Field(..., max_length=128)
     seq: int = Field(..., ge=0)
     kind: Literal["llm", "tool", "state", "answer", "stage", "approval", "resource", "mcp_prompt", "plan",
-                  "retrieval"]
+                  "retrieval", "user"]
     name: Optional[str] = Field(None, max_length=128)
     parent_seq: Optional[int] = Field(None, ge=0)
     ended_at: Optional[datetime] = None
@@ -158,7 +158,8 @@ class Step(_E):
                    "tool": {"args", "result", "server"}, "state": {"op", "value"}, "answer": {"text"},
                    "stage": {"outputs", "did_work", "prompt"}, "approval": {"decision", "by", "text"},
                    "resource": {"uri", "result", "server"}, "mcp_prompt": {"args", "result", "server"},
-                   "plan": {"plan", "text"}, "retrieval": {"query", "fragments", "server"}}[self.kind]
+                   "plan": {"plan", "text"}, "retrieval": {"query", "fragments", "server"},
+                   "user": {"text"}}[self.kind]
         specific = {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "args", "result", "op",
                     "value", "outputs", "did_work", "tools", "decision", "by", "server", "uri", "plan",
                     "finish_reason", "tool_calls", "tokens_cached", "tokens_reasoning", "query", "fragments",

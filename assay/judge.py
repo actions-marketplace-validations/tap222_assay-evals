@@ -151,6 +151,8 @@ def render(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None)
             lines.append(f"step {n} CHANGED {s.get('name')} ({args.get('op') or 'update'}): {_clip(s.get('result'))}")
         elif k == "answer":
             lines.append(f"step {n} ANSWER: {_clip(s.get('text') or '')}")
+        elif k == "user":
+            lines.append(f"step {n} USER: {_clip(s.get('text') or '')}")
     body = "\n".join(lines)
     if len(body) > MAX_TRACE:
         body = body[:MAX_TRACE] + f"\n[... the rest of the trace, {len(body) - MAX_TRACE} characters, not shown]"

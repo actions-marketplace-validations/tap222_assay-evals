@@ -396,6 +396,18 @@ class Run:
         """A change to the world, e.g. state("order:17", "update", {"qty": 3}). op: create, update, delete."""
         self._step("state", name=obj, op=op, value=self._c.clean(value))
 
+    def state_of(self, obj: str) -> Dict[str, Any]:
+        """The last value this run recorded for a state object (run.state), or {}: for success checks."""
+        for s in reversed(self.steps):
+            if s["kind"] == "state" and s.get("name") == obj:
+                v = s.get("value")
+                return v if isinstance(v, dict) else {"value": v}
+        return {}
+
+    def user(self, text: str) -> None:
+        """What the user said next, in a conversation recorded as one run (assay_sdk.simulate does it)."""
+        self._step("user", text=self._c.clean(text))
+
     def answer(self, text: str) -> None:
         self.answer_text = text
         self._step("answer", text=self._c.clean(text))
@@ -577,3 +589,4 @@ from assay_sdk.auto import agent, instrument, pipeline, step, tool  # noqa: E402
 from assay_sdk.llm import Judge, Response, normalize, normalize_args  # noqa: E402
 from assay_sdk.runtime import EvalRuntime, Report, Sample  # noqa: E402
 from assay_sdk.faithfulness import faithfulness  # noqa: E402
+from assay_sdk.simulate import Persona, Simulation, simulate  # noqa: E402

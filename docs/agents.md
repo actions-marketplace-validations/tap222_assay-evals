@@ -208,6 +208,41 @@ Requests the model declines are retried on another model server-side (`fallbacks
 The trace is shown to the judge as data, marked as such, so instructions inside a tool result
 don't steer the score. Long tool results are cut, and the cut is marked.
 
+### Simulated users: the whole conversation, not one message
+
+A single prompt and answer don't show how an agent handles someone who gives the order number
+only when asked, pushes back, or changes their mind. `simulate` plays that user:
+
+```python
+from assay_sdk import Judge, Persona, simulate
+
+upset = Persona(goal="get a refund for order O-17, which arrived broken",
+                traits="impatient; gives the order number only when asked; pushes back once",
+                facts={"order_id": "O-17"})
+
+def test_refund_when_upset(assay_case):
+    sim = simulate(my_agent, upset, user=Judge("anthropic", "claude-opus-5"), run=assay_case,
+                   success=lambda run: run.state_of("order:17").get("status") == "refunded")
+    assert sim.goal_met, sim.reason
+```
+
+- **An LLM plays the user,** in character, with facts it gives only when asked. Each turn it
+  writes what the user would type next, or ends the conversation. It runs at temperature 0, so an
+  unchanged agent gets the same conversation.
+- **One conversation is one run:** each user message is a `user` step, each reply the agent's
+  answer, and every tool call is recorded in the turn it happened in. Contracts and expectations
+  hold over the whole conversation: a refund without approval fails on turn 4 as it would on turn 1.
+- **Whether the goal was met** is decided by your `success` check on the run (its recorded state,
+  its tool calls) when you give one, and only otherwise by the simulated user's own view, which is
+  recorded as an opinion. It's the check `goal`, and the length is `turns`. Past `max_turns` (8)
+  without the goal, it fails.
+- **Scripted personas** (`Persona(script=["hi", "O-17", ...])`) play fixed messages with no model,
+  for tests that must be reproducible to the letter.
+- A simulator answer that isn't the JSON asked for is asked for again, then the result is
+  `INVALID`: the simulator's failure is never counted against the agent.
+
+The agent is `agent(message)` or `agent(message, history)`, sync or async.
+
 ### Conversations and MCP
 
 A chat is several runs, one per turn. `assay.run(..., conversation="chat-1", turn=2)` (or
