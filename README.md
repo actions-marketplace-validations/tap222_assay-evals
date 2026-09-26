@@ -100,6 +100,11 @@ assay diff                        # what behavior changed, scenario by scenario
 Then add [the GitHub Action](docs/ci.md) to get the diff on every pull request. The
 [testing guide](docs/testing.md) covers writing the tests.
 
+To attach Assay to a pipeline that's already running, `assay connect` looks at your project
+and gives the way in that needs the least work: your database (no code changes), your
+tracing, or a few lines of code shown as a diff. `assay connect verify` shows the pipeline it
+found. See [Setup](docs/setup.md#the-quick-way-assay-connect).
+
 ## Quick start (demo data, nothing to connect)
 
 ```bash

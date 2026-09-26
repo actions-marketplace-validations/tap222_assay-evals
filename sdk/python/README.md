@@ -85,6 +85,31 @@ assay serve           # http://127.0.0.1:8400, source events:local
 
 Loading the same file twice changes nothing, because every event has an id.
 
+## Attach with a few lines: `@assay.step`, `@assay.tool`, `assay.instrument()`
+
+```python
+import assay_sdk as assay
+
+assay.init()
+assay.instrument()                     # Anthropic and OpenAI calls are recorded, in the step they're in
+
+@assay.step("classification")          # a step of the pipeline; a dict it returns is its outputs
+def classify(doc): ...
+
+@assay.tool                            # a tool the agent calls: arguments, result or error, timing
+def get_order(order_id): ...
+
+@assay.pipeline("invoice", id_from="document_id")   # one run per call; @assay.agent for an agent
+def handle(document_id, pdf):
+    return graph.invoke({"pdf": pdf})
+```
+
+The steps, tools and model calls made inside `@assay.pipeline`, `@assay.agent` or `with
+assay.run(...)` are recorded into that run. A step called outside any run starts one of its
+own. With no run at all, a tool just runs. `assay.instrument()` never changes what a call
+returns, and recording never breaks your code. Everything works on async functions too.
+`assay connect code` proposes these lines for your code, as a diff.
+
 ## Your own evaluators: results whose validity is explicit
 
 An LLM judge that answers with something that isn't a verdict, or a metric that divides by

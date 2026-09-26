@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import create_engine, text
@@ -111,6 +112,22 @@ TIME_FIELD = {"calls": "ts", "documents": "received_at", "stage_runs": "started_
 RECORD_TYPES = ("documents", "stage_runs", "calls", "indexed", "reviews", "errors")
 
 
+TIMES = ("received_at", "completed_at", "started_at", "finished_at", "ts", "reported_at")
+
+
+def _times(row: dict) -> dict:
+    """Times as datetimes: SQLite (and some drivers) hand them back as text."""
+    for k in TIMES:
+        v = row.get(k)
+        if isinstance(v, str) and v:
+            try:
+                t = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                row[k] = t.astimezone(timezone.utc).replace(tzinfo=None) if t.tzinfo else t
+            except ValueError:
+                pass
+    return row
+
+
 def load_mapping(path: Optional[str] = None) -> Dict:
     """Default mapping with the JSON file at `path` (or ASSAY_SOURCE_MAPPING) layered on top."""
     mapping = copy.deepcopy(DEFAULT_MAPPING)
@@ -164,7 +181,7 @@ class SQLSource:
             if self.engine.dialect.name == "postgresql":
                 # Belt and braces: this service must never write to the pipeline DB.
                 conn.execute(text("SET TRANSACTION READ ONLY"))
-            return [dict(r._mapping) for r in conn.execute(text(sql), params)]
+            return [_times(dict(r._mapping)) for r in conn.execute(text(sql), params)]
 
     @staticmethod
     def _call(r: dict) -> CallRecord:

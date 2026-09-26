@@ -135,7 +135,38 @@ database and never removes data.
 
 ## Connect your pipeline
 
-There are two ways to connect. Both feed the same measures.
+### The quick way: `assay connect`
+
+Run it in your project. It looks at what's there and gives the way in that needs the least
+work, in this order: your database (no code changes), tracing you already have, then a few
+lines of code.
+
+```bash
+$ assay connect                 # what's here, and the ways in
+$ assay connect db              # reads your database's schema, writes the mapping, tests it
+$ assay connect code            # the code change, as a diff (nothing is written)
+$ assay connect code --apply    # write it
+$ assay connect verify          # the pipeline Assay found, and the steps it hasn't seen yet
+```
+
+- **`db`** reads table and column names (with a read-only login: `DATABASE_URL`,
+  `ASSAY_SOURCE_URL` or the URL you give). It picks the likeliest table for documents, steps and
+  model calls, maps each field, and lists every guess for you to check ("stage = step_name").
+  It tests the mapping against the database before writing `mappings/<database>.json`, and
+  leaves out anything that doesn't work. It never overwrites a mapping without `--force`.
+- **`code`** reads your Python and proposes the smallest change: `assay.init()` and
+  `assay.instrument()` once, `@assay.step` on each LangGraph node or function that calls a
+  model, `@assay.tool` on your tools, and `@assay.pipeline` (or `@assay.agent`) on the
+  function where one run begins, such as whatever calls `graph.invoke()`. It shows the diff and
+  saves it to `.assay/connect.patch` (`git apply` works on it). Files change only with
+  `--apply`.
+- **`verify`** reads what was recorded (`.assay/events.jsonl`, or the server at `ASSAY_URL`) and
+  prints the pipeline as Assay sees it, such as `Received → classify → extract → validate →
+  Done`, with the steps your code has that no run has reached yet.
+
+Then open the Workflow page: your pipeline, and where Assay's checks attach to it.
+
+There are two ways to connect by hand. Both feed the same measures.
 
 ### 1. Point Assay at your database (read-only)
 

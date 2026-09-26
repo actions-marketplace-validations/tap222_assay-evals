@@ -30,6 +30,14 @@ def main(argv=None) -> int:
     r.add_argument("--days", type=int, default=7)
 
     sub.add_parser("check-source", help="Test every mapped field against your pipeline database")
+    cn = sub.add_parser("connect", help="Attach Assay to your pipeline: what's here and the least-work way in; "
+                                        "db (read the schema, write the mapping), code (the change, as a diff), "
+                                        "verify (the pipeline Assay found)")
+    cn.add_argument("what", nargs="?", choices=["db", "code", "verify"], help="Leave out for what's here")
+    cn.add_argument("target", nargs="?", help="db: the database URL; code: the folder or file (default: here)")
+    cn.add_argument("--apply", action="store_true", help="code: write the change (it's shown first either way)")
+    cn.add_argument("--out", help="db: where to write the mapping (default: mappings/<database>.json)")
+    cn.add_argument("--force", action="store_true", help="db: overwrite the mapping file")
 
     k = sub.add_parser("keys", help="Create, list and revoke API keys")
     ks = k.add_subparsers(dest="keys_cmd", required=True)
@@ -232,6 +240,18 @@ def main(argv=None) -> int:
         c = rep["counts"]
         print(f"\n{c['live']} live, {c['partial']} partial, {c['blocked']} blocked")
         return 0
+
+    if args.cmd == "connect":
+        from pathlib import Path
+        from assay import attach
+        root = Path.cwd()
+        if args.what == "db":
+            return attach.db(root, args.target, args.out, args.force)
+        if args.what == "code":
+            return attach.code(Path(args.target) if args.target else root, args.apply)
+        if args.what == "verify":
+            return attach.verify(root)
+        return attach.overview(Path(args.target) if args.target else root)
 
     if args.cmd == "check-source":
         if not settings.source_url:
