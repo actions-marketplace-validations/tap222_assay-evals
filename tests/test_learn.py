@@ -292,3 +292,54 @@ def test_a_saved_case_keeps_the_plan(client):
     assert learn.snapshot(client.engine, "events:copy", "pl", redact_pii=False)["steps"] == snap["steps"]
     redacted = learn.snapshot(client.engine, "events:p", "pl")
     assert redacted["steps"][0]["plan"][1]["args"]["email"] == "<email>"
+
+
+# ---------- the quiet failures: what the user did next ----------
+
+def _turn(client, rid, said, *, conv=None, turn=None, user=None, outcome=None, ts=None):
+    ts = (ts or datetime.utcnow() - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _send(client, "q", rid, [{"type": "run.start", "task": "support", "input": said, "conversation_id": conv,
+                              "turn": turn, "user": user, "ts": ts},
+                             {"type": "step", "seq": 0, "kind": "answer", "text": "Done: refunds take 5 days.", "ts": ts},
+                             {"type": "run.end", "outcome": outcome, "ts": ts}])
+
+
+def test_what_the_user_did_next_finds_the_quiet_failures(client):
+    now = datetime.utcnow()
+    # Restated: the next turn asks the same thing again.
+    _turn(client, "r0", "How long does a refund for order 17 take?", conv="c1", turn=0, user="u1")
+    _turn(client, "r1", "How long will the refund for order 17 take, exactly?", conv="c1", turn=1, user="u1")
+    # Asked again: the same user, a new conversation, three hours later.
+    _turn(client, "a0", "Can I change the delivery address on order 22?", conv="c2", turn=0, user="u2",
+          ts=now - timedelta(hours=6))
+    _turn(client, "a1", "Can I change the delivery address on my order 22?", conv="c3", turn=0, user="u2",
+          ts=now - timedelta(hours=3))
+    # Reopened: resolved, then an escalation.
+    _turn(client, "e0", "Cancel my subscription before the renewal please", conv="c4", turn=0, user="u3",
+          outcome="resolved")
+    # Redone: the user fixed it themselves.
+    _turn(client, "d0", "Draft a reply to the customer about the late order", conv="c5", turn=0, user="u4")
+    # Fine: a follow-up that's a different request, and a short "thanks".
+    _turn(client, "f0", "What is your returns policy for shoes?", conv="c6", turn=0, user="u5")
+    _turn(client, "f1", "thanks", conv="c6", turn=1, user="u5")
+    client.post("/v1/events/feedback", json=[{"trace_id": "e0", "kind": "escalation"},
+                                             {"trace_id": "d0", "kind": "edited"}], headers={"X-Tenant": "q"})
+
+    an = client.get("/v1/learn/anomalies", params={"source": "events:q"}).json()
+    got = {a["trace_id"]: {s["type"] for s in a["signals"]} for a in an["items"]}
+    assert "restated" in got["r0"] and "asked_again" in got["a0"]
+    assert "reopened" in got["e0"] and "redone" in got["d0"]
+    assert "f0" not in got and "r1" not in got and "a1" not in got  # nothing came after them
+    texts = {s["type"]: s["text"] for a in an["items"] for s in a["signals"]}
+    assert texts["asked_again"].startswith("The same user asked it again in a new conversation 3h later")
+    pats = client.get("/v1/learn/patterns", params={"source": "events:q"}).json()
+    names = {p["name"].split(" · ")[0] for p in pats["patterns"]}
+    assert {"Users ask again in the next turn", "Marked resolved, then escalated",
+            "Users fix or redo the answer themselves", "Users ask the same thing again later"} <= names
+
+
+def test_similar_requests():
+    assert learn.similar("refund order 17 please", "please refund order 17") == 1.0
+    assert learn.similar("thanks", "thanks a lot") == 0.0  # too short to be a request
+    assert learn.similar({"q": "where is my parcel now"}, "where is my parcel") > learn.SIMILAR
+    assert learn.similar("reset my password", "cancel my order today") < learn.SIMILAR

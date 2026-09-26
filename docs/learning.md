@@ -18,8 +18,18 @@ suite. It also shows when a fixed bug comes back.
 | far more steps, time or cost than the task's usual (robust z ≥ 3.5, and ≥ 1.5× the median) | 1 each |
 | a fallback model answered; a path under 1% of the task's traces | 1 each |
 | never finished | 1.5 |
+| **quiet:** marked resolved, then escalated or complained about | 3 |
+| **quiet:** the user edited the answer before using it, or did it themselves (feedback `edited`, `redone`) | 3 |
+| **quiet:** the next turn asked nearly the same thing (half or more of the words the same) | 2 |
+| **quiet:** the same user asked it again in a new conversation within a day | 2 |
 
-A trace is anomalous at 2 or more. Evaluation-run trajectories are left out: tests aren't
+A trace is anomalous at 2 or more.
+
+The quiet signals catch the costly failures that don't announce themselves. The transcript looks
+fine and the score is fine, but the user rephrases, asks again later, or does the work by hand.
+They're read from what the user did next, not from what the agent said, so they need no
+labels. "Asked again" needs `user` on the run (`assay.run(..., user=hashed_id)`), a
+pseudonymous id, not an email. Evaluation-run trajectories are left out: tests aren't
 production.
 
 **2. Cluster into patterns.** Traces are grouped by their main **cause**, where it happened,

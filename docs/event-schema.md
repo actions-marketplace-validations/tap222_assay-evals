@@ -74,6 +74,7 @@ three things:
 | `tags` | {string: scalar} | anything else to filter by |
 | `conversation_id` | string | the conversation this run is a turn of: its turns share it |
 | `turn` | int ≥ 0 | this run's place in the conversation, from 0 |
+| `user` | string | who asked, as a pseudonymous id: the same person asking again in a new conversation is a signal |
 
 ### `step`
 | Field | Type | Meaning |
@@ -117,7 +118,8 @@ no events, then evaluated. The SDK sends it when the `with assay.run(...)` block
 ## Outcome events
 
 ### `feedback`: what a user did
-`run_id` (required), `kind` (`thumbs_up` \| `thumbs_down` \| `retry` \| `escalation` \| `complaint`), `note`.
+`run_id` (required), `kind` (`thumbs_up` \| `thumbs_down` \| `retry` \| `escalation` \| `complaint` \| `edited` \|
+`redone`), `note`. `edited`: the user changed the answer before using it; `redone`: they did it themselves.
 
 ### `check`: one result from a test run
 | Field | Type | Meaning |

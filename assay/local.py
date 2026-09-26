@@ -798,6 +798,8 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
            "judge_changed": judge_changes(rows, base_rows), **routing(engine, tenant, rows, base_rows)}
     from assay import acks as acks_
     acks_.apply(engine, tenant, run_id, out, acks or [])
+    skip = set(out["judge_changed"]) | set((out.get("acks") or {}).get("quiet") or {})
+    out.update(scores(engine, tenant, run_id, rows, base_rows, skip))
     return out
 
 
@@ -822,6 +824,80 @@ def _rows(engine, run_id: str, tenant: str = TENANT) -> list:
     t = store.eval_results
     with engine.connect() as conn:
         return conn.execute(select(t).where((t.c.tenant == tenant) & (t.c.run_id == run_id))).all()
+
+
+# ---------- scores: the noise floor, and cases that are a coin flip ----------
+
+FLOOR_RUNS = 10  # recent runs the check passed in: the scores it shows when nothing is wrong
+FLOOR_MIN = 3  # fewer scores than this aren't a floor
+
+
+def _judged_scores(rs) -> Dict[Tuple[str, str], List[float]]:
+    out: Dict[Tuple[str, str], List[float]] = defaultdict(list)
+    for r in rs:
+        if r.status in ("pass", "fail") and r.score is not None:
+            out[(r.case_id, r.field or "result")].append(float(r.score))
+    return out
+
+
+def noise_floors(engine, tenant: str, keys: set, run_id: str, base_rows: list) -> Dict[Tuple[str, str], dict]:
+    """Per (case, field): its scores in the last FLOOR_RUNS runs where it passed every attempt, or its
+    baseline's when there's no such history. {"min", "max", "median", "n"}."""
+    t = store.eval_results
+    cases = sorted({k[0] for k in keys})
+    hist: Dict[Tuple[str, str], Dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    with engine.connect() as conn:
+        for i in range(0, len(cases), 500):
+            for r in conn.execute(select(t.c.run_id, t.c.case_id, t.c.field, t.c.status, t.c.score, t.c.ts).where(
+                    (t.c.tenant == tenant) & t.c.case_id.in_(cases[i:i + 500]) & (t.c.run_id != run_id)
+                    & (t.c.run_id != BASELINE) & t.c.status.in_(("pass", "fail")))):
+                k = (r.case_id, r.field or "result")
+                if k in keys:
+                    hist[k][r.run_id].append(r)
+    base = _judged_scores(base_rows)
+    out = {}
+    for k in keys:
+        runs = [rs for rs in hist[k].values() if all(r.status == "pass" for r in rs)]
+        runs.sort(key=lambda rs: max(r.ts for r in rs))
+        vals = [float(r.score) for rs in runs[-FLOOR_RUNS:] for r in rs if r.score is not None] or base.get(k, [])
+        if vals:
+            out[k] = {"min": min(vals), "max": max(vals), "median": median(vals), "n": len(vals)}
+    return out
+
+
+def scores(engine, tenant: str, run_id: str, rows: list, base_rows: list, skip: set) -> dict:
+    """{"score_regressions": a check still passing, scored below the floor it showed when nothing
+    was wrong; "within_noise": lower, inside it; "no_floor": lower, with too few scores to tell;
+    "coin_flips": cases that give different answers on the same system}."""
+    now = _judged_scores(rows)
+    passing = {k for k, a in attempts(rows).items() if all(a)}
+    keys = {k for k in now if k in passing and k not in skip}
+    floors = noise_floors(engine, tenant, keys, run_id, base_rows) if keys else {}
+    out = {"score_regressions": [], "within_noise": [], "no_floor": [], "coin_flips": []}
+    for k in sorted(keys):
+        f, m = floors.get(k), median(now[k])
+        if f is None or m >= f["median"]:
+            continue
+        item = {"case_id": k[0], "field": k[1], "now": m, "floor": f}
+        out["no_floor" if f["n"] < FLOOR_MIN else "score_regressions" if m < f["min"] else "within_noise"].append(item)
+    # A coin flip: attempts of the same system that disagree with each other a lot.
+    spans: Dict[str, List[float]] = defaultdict(list)
+    for (case, field), v in now.items():
+        spans[field] += v
+    for k, a in sorted(attempts(rows).items()):
+        passed, n = sum(a), len(a)
+        split = n >= 3 and 0 < passed < n and min(passed, n - passed) >= max(1, 0.2 * n)
+        v = now.get(k) or []
+        lo, hi = (min(spans[k[1]]), max(spans[k[1]])) if spans.get(k[1]) else (0, 0)
+        wide = len(v) >= 3 and hi > lo and (max(v) - min(v)) >= 0.5 * (hi - lo)
+        if split or wide:
+            out["coin_flips"].append({"case_id": k[0], "field": k[1], "passed": passed, "n": n,
+                                      "scores": (min(v), max(v)) if v else None})
+    return out
+
+
+def _floor(f: dict) -> str:
+    return f"{f['min']:g}–{f['max']:g}" if f["min"] != f["max"] else f"{f['min']:g}"
 
 
 # ---------- which judge, and which model served ----------
@@ -988,7 +1064,7 @@ def verdict(result: dict, has_baseline: bool) -> Tuple[bool, dict]:
     result["_judge_changed"] = c["judge_changed"]
     dropped = has_baseline and result["stability"]["outcome"] == "rollback" and not result.get("judge_changed")
     worse = (result.get("behavior") or result.get("behavior_suite")) if result.get("behavior_fails", True) else []
-    return not c["problems"] and not dropped and not worse, c
+    return not c["problems"] and not dropped and not worse and not result.get("score_regressions"), c
 
 
 # ---------- the report ----------
@@ -1070,7 +1146,7 @@ def _explain(ps: List[dict], fails: dict, repeat: int, routes: Optional[dict] = 
 def case_states(result: dict, c: dict) -> Dict[str, str]:
     """Per case: failed (a problem: fails the run), known (failing, but flaky or failing in the
     baseline too), or passed."""
-    problems = {p["case_id"] for p in c["problems"]}
+    problems = {p["case_id"] for p in c["problems"]} | {x["case_id"] for x in result.get("score_regressions") or []}
     if result.get("behavior_fails", True):
         problems |= {b["case_id"] for b in result.get("behavior") or []}
     out = {}
@@ -1137,6 +1213,7 @@ def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
         why = [f"{', '.join(labels)}: {r}" for r, labels in grouped.items()]
         why += [f"Behavior: {ch['text']}" for b in result.get("behavior") or [] if b["case_id"] == case
                 for ch in b["changes"]]
+        why += [score_text(x) for x in result.get("score_regressions") or [] if x["case_id"] == case]
         if st == "failed":
             ET.SubElement(tc, "failure", message=(why or ["failed"])[0][:500]).text = "\n".join(why)
         elif case in unjudged:  # JUnit's "couldn't run", not a failure
@@ -1185,6 +1262,7 @@ def summarize(result: dict, c: dict, baseline: Optional[str]) -> dict:
     fails_behavior = result.get("behavior_fails", True)
     worse_behavior = {b["case_id"] for b in result.get("behavior") or []}
     regressed = {p["case_id"] for p in c["problems"] if p["kind"] in ("regression", "worse than acknowledged")} | \
+        {x["case_id"] for x in result.get("score_regressions") or []} | \
         (worse_behavior if fails_behavior else set())
     new = {p["case_id"] for p in c["problems"] if p["kind"] not in ("regression", "worse than acknowledged")} - regressed
     unjudged = {x["case_id"] for x in result["not_judged"]} - regressed - new
@@ -1288,6 +1366,39 @@ def _ack_parts(result: dict) -> Tuple[list, list, list, int]:
     return quiet, d.get("expired") or [], d.get("spent") or [], sum(1 for a in quiet if acks.soon(a))
 
 
+def score_text(x: dict) -> str:
+    """Helpful: 3.0, below the 4–5 it scores when nothing is wrong (6 scores)"""
+    f = x["floor"]
+    return (f"{_label(x['field'])}: {x['now']:g}, below the {_floor(f)} it scores when nothing is wrong "
+            f"({f['n']} scores)")
+
+
+def score_lines(result: dict) -> List[str]:
+    out = []
+    reg, within, none_, flips = (result.get(k) or [] for k in ("score_regressions", "within_noise", "no_floor",
+                                                               "coin_flips"))
+    if reg:
+        out.append(_paint(f"⚠ {_n(len(reg), 'check')} still passing, but scored below {'its' if len(reg) == 1 else 'their'}"
+                          f" noise floor", "yellow"))
+        out += [f"  {x['case_id']}  {score_text(x)}" for x in reg[:20]] + [""]
+    if within:
+        out.append(_paint(f"· {_n(len(within), 'score')} lower, within the noise (not failing): "
+                          + ", ".join(f"{x['case_id']} {x['now']:g} in {_floor(x['floor'])}" for x in within[:5])
+                          + (", …" if len(within) > 5 else ""), "dim"))
+    if none_:
+        out.append(_paint(f"· {_n(len(none_), 'score')} lower, with no noise floor yet (fewer than {FLOOR_MIN} "
+                          f"scores): `assay test --repeat 5` measures it", "dim"))
+    if flips:
+        out.append(_paint(f"~ {_n(len(flips), 'coin flip')}: different answers from the same system, so a "
+                          f"pass or a fail says little", "yellow"))
+        for x in flips[:10]:
+            sc = f", scores {x['scores'][0]:g}–{x['scores'][1]:g}" if x["scores"] and x["scores"][0] != x["scores"][1] else ""
+            out.append(_paint(f"  {x['case_id']}  {_label(x['field'])}: passed {x['passed']}/{x['n']}{sc}", "dim"))
+        out.append(_paint("  Tighten its rubric or its expected output, or check it deterministically if it can be.",
+                          "dim"))
+    return out + ([""] if (within or none_) and not flips else [""] if flips else [])
+
+
 def judge_changed_lines(items: List[dict]) -> List[str]:
     """Checks judged by another model or prompt than their baseline: not compared, and why."""
     by: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
@@ -1366,6 +1477,8 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
                 reasons[case].append(line)
     for x in result.get("behavior") or []:
         reasons[x["case_id"]] += [ch["text"] for ch in x["changes"]]
+    for x in result.get("score_regressions") or []:
+        reasons[x["case_id"]].insert(0, score_text(x))
     for key, r in (result.get("routing") or {}).items():
         if key[0] in reasons and routed(r):
             reasons[key[0]].append(f"{_label(key[1])}: {routed(r)}")
@@ -1407,6 +1520,12 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         out += ["| Category | Passed |", "|---|---|"] + [f"| {_md(k)} | {ok}/{n} |" for k, (ok, n) in s["categories"].items()]
         out.append("")
     out += ack_markdown(result)
+    flips = result.get("coin_flips") or []
+    if flips:
+        out += [f"<details><summary>{_n(len(flips), 'coin flip')}: different answers from the same system</summary>",
+                "", *(f"- {_code(_short(x['case_id']))} {_md(_label(x['field']))}: passed {x['passed']}/{x['n']}"
+                      for x in flips[:20]), "", "Tighten the rubric or the expected output, or check it "
+                "deterministically.", "", "</details>", ""]
     if jc:
         pairs = sorted({(p["before"], p["now"]) for p in jc})
         out += [f"**Judge changed** ({', '.join(f'{_md(a)} → {_md(b)}' for a, b in pairs)}): "
@@ -1514,6 +1633,7 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
         out.append("")
     if c.get("judge_changed"):
         out += judge_changed_lines(c["judge_changed"])
+    out += score_lines(result)
     out += ack_lines(result)
     if c["still"]:
         out.append(_paint(f"{_n(len(c['still']), 'check')} also failed in the baseline, so they don't count "

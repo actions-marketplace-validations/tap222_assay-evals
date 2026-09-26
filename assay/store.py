@@ -240,6 +240,7 @@ agent_trajectories = Table(
     Column("outcome", String(16)),  # resolved | unresolved | escalated
     Column("conversation_id", String(128), index=True),  # the turns of one conversation share it
     Column("turn", Integer),  # this run's place in it, from 0
+    Column("user_id", String(128), index=True),  # who asked, pseudonymous: asking again elsewhere is a signal
 )
 
 # How each test-case run behaved (assay/behavior.py): cost, latency, steps, context, tools offered,
@@ -329,6 +330,7 @@ runs = Table(
     Column("outcome", String(16)),  # resolved | unresolved | escalated
     Column("conversation_id", String(128)),
     Column("turn", Integer),
+    Column("user_id", String(128)),  # who asked, pseudonymous
 )
 
 # What a test case expects of a trajectory: the tool calls, the answer, and the end state.
@@ -363,7 +365,7 @@ trace_feedback = Table(
     Column("tenant", String(64), primary_key=True),
     Column("feedback_id", String(128), primary_key=True),
     Column("trace_id", String(128), nullable=False, index=True),
-    Column("kind", String(32), nullable=False),  # thumbs_down | thumbs_up | retry | escalation | complaint
+    Column("kind", String(32), nullable=False),  # thumbs_down | thumbs_up | retry | escalation | complaint | edited | redone
     Column("ts", DateTime, nullable=False, index=True),
     Column("note", String(1024)),
 )

@@ -89,6 +89,38 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
 - **Where things live:** everything goes in `.assay/` (recordings, the store, the baseline),
   which ignores itself in git. `assay test -- pytest -q tests/ai` overrides the command.
 
+## Noise floors and coin flips
+
+A judged case can score 5/5 on one run and 2/5 on the next with nothing changed. Comparing only
+pass rates misses a real drop that still passes, and alarms on noise that crosses the threshold.
+So each judged check has a **noise floor**: the scores it showed in its last 10 runs where it
+passed every attempt (or its baseline's). A drop counts only when it clears that floor:
+
+```
+⚠ 1 check still passing, but scored below its noise floor
+  tests/ai/test_support.py::test_refund  helpful: 0.61, below the 0.8–0.9 it scores when nothing is wrong (6 scores)
+
+· 2 scores lower, within the noise (not failing): test_warranty 0.83 in 0.8–0.9, test_returns 4 in 4–5
+```
+
+A score below the floor fails the run like any regression. One inside it is listed, dim, so
+nobody chases it. With fewer than 3 scores there's no floor yet: repeat the case
+(`assay test --repeat 5`) to measure one, which is also the way to try a case before it joins
+the suite.
+
+**Coin flips** are cases that give different answers from the same system: attempts in one run
+that split between passing and failing, or whose scores span half the check's range. A pass or a
+fail from them says little:
+
+```
+~ 1 coin flip: different answers from the same system, so a pass or a fail says little
+  tests/ai/test_support.py::test_tone  helpful: passed 2/5, scores 0.2–0.9
+  Tighten its rubric or its expected output, or check it deterministically if it can be.
+```
+
+They don't fail the run. They're the cases worth rewriting: a tighter rubric, a fixed output
+format, or a deterministic check in place of the judge.
+
 ## When the judge or the model changes
 
 A comparison with the baseline assumes only your AI changed. Two things break that.

@@ -68,6 +68,8 @@ class RunStart(_E):
     conversation_id: Optional[str] = Field(None, max_length=128,
                                            description="The conversation this run is a turn of: the turns share it")
     turn: Optional[int] = Field(None, ge=0, description="This run's place in the conversation, from 0")
+    user: Optional[str] = Field(None, max_length=128, description="Who asked, as a pseudonymous id: the same "
+                                "person asking again in a new conversation is a sign the first answer didn't do")
 
 
 class Step(_E):
@@ -190,7 +192,8 @@ class RunEnd(_E):
 class Feedback(_E):
     type: Literal["feedback"]
     run_id: str = Field(..., max_length=128)
-    kind: Literal["thumbs_up", "thumbs_down", "retry", "escalation", "complaint"]
+    kind: Literal["thumbs_up", "thumbs_down", "retry", "escalation", "complaint", "edited", "redone"] = Field(
+        ..., description="edited: the user changed the answer before using it; redone: they did it themselves")
     note: Optional[str] = Field(None, max_length=1024)
 
 
@@ -309,7 +312,7 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                        "started_at": e.ts, "status": "running", "version": e.version,
                        "test_run": e.test.run if e.test else None, "test_case": e.test.case if e.test else None,
                        "attempt": e.test.attempt if e.test else None, "parent_run_id": e.parent_run_id, "tags": e.tags,
-                       "conversation_id": e.conversation_id, "turn": e.turn}
+                       "conversation_id": e.conversation_id, "turn": e.turn, "user_id": e.user}
                 known[e.run_id] = run
                 rows["runs"].append(run)
                 rows["docs"].append({"tenant": tenant, "document_id": e.run_id, "received_at": e.ts,
@@ -469,7 +472,7 @@ def _head(run: dict) -> dict:
             "case_id": run.get("test_case"), "attempt": run.get("attempt"), "task": run.get("task"),
             "started_at": run.get("started_at"), "status": run.get("status") or "running",
             "lineage": run.get("version"), "outcome": run.get("outcome"),
-            "conversation_id": run.get("conversation_id"), "turn": run.get("turn")}
+            "conversation_id": run.get("conversation_id"), "turn": run.get("turn"), "user_id": run.get("user_id")}
 
 
 def _merge(rows: List[dict], key: str) -> List[dict]:

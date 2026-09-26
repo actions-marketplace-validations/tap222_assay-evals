@@ -173,6 +173,7 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
         fields = [f for f, _ in checks]
         reasons = [local._tidy(f"{local._label(f)}: {r.splitlines()[0][:200]}") for f, r in checks]
         reasons += [x["text"] for x in worse.get(case, [])]
+        reasons += [local.score_text(x) for x in result.get("score_regressions") or [] if x["case_id"] == case]
         reasons = sorted(dict.fromkeys(reasons), key=local._rank)
         reasons = [f"{local._label(k[1])}: {local.routed(r)}" for k, r in (result.get("routing") or {}).items()
                    if k[0] == case and local.routed(r)] + reasons  # the model it was routed to, first

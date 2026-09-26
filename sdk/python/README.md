@@ -33,6 +33,7 @@ with assay.run("invoice", kind="pipeline", input_ref="s3://inbox/inv-9.pdf") as 
 
 # Outcomes, whenever they're known
 assay.feedback(run.id, "thumbs_down")
+assay.feedback(run.id, "edited")      # the quiet ones: they fixed the answer, or "redone": did it themselves
 assay.correction(run.id, "total", expected="1240.00", observed="1204.00")
 assay.check("nightly-0924", "case-17", "fail", run_id=run.id, field="total", expected="1240.00", actual="1204.00")
 assay.check("nightly-0924", "case-17", "pass", run_id=run.id, field="helpful", evaluator="helpful@1",

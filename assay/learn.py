@@ -15,6 +15,15 @@ signals that need no label, each shown with its reason:
   rare_path      a path under 1% of that task's traces
   stuck          never finished
 
+The quiet ones, read from what the user did next rather than what the agent said: the
+transcript looks fine and the user worked around it.
+
+  restated       the next turn asks nearly the same thing: the answer didn't do it
+  asked_again    the same user asks it again in a new conversation within a day
+  reopened       marked resolved, then escalated or complained about
+  redone         the user edited the answer before using it, or did it themselves
+                 (feedback edited / redone)
+
 A trace is anomalous when its signals add up past a threshold. Anomalous
 traces are clustered into patterns by their strongest signal, where it
 happened and the task; each pattern is described by what sets its traces
@@ -65,8 +74,11 @@ from assay.rootcause import order_steps
 THRESHOLD = 2.0  # signal weight that makes a trace anomalous
 WEIGHTS = {"contract_critical": 3.0, "contract_warning": 1.0, "reported": 3.0, "feedback": 3.0, "retry": 1.5,
            "failed_step": 2.0, "tool_error": 2.0, "loop": 2.0, "fallback": 1.0, "outlier": 1.0,
-           "rare_path": 1.0, "stuck": 1.5}
-PRIORITY = ["contract", "reported", "tool_error", "loop", "failed_step", "feedback", "fallback", "stuck",
+           "rare_path": 1.0, "stuck": 1.5, "restated": 2.0, "asked_again": 2.0, "reopened": 3.0, "redone": 3.0}
+SIMILAR = 0.5  # word overlap at which a later request is the same request again
+AGAIN_WITHIN = timedelta(hours=24)
+PRIORITY = ["contract", "reported", "tool_error", "loop", "failed_step", "reopened", "redone", "feedback", "restated",
+            "asked_again", "fallback", "stuck",
             "outlier_steps", "outlier_seconds", "outlier_cost", "rare_path"]
 INFRA = re.compile(r"time ?out|timed out|connection|refused|unavailable|unreachable|\b5\d\d\b|rate.?limit|"
                    r"quota|throttl", re.I)
@@ -167,6 +179,91 @@ def _path_key(runs) -> tuple:
     return tuple(out)
 
 
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _text(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        return " ".join(_text(x) for x in v.values())
+    if isinstance(v, (list, tuple)):
+        return " ".join(_text(x) for x in v)
+    return str(v)
+
+
+def similar(a, b) -> float:
+    """How much two requests say the same thing: word overlap (Jaccard), 0 for ones too short to tell."""
+    wa, wb = set(_WORD.findall(_text(a).lower())), set(_WORD.findall(_text(b).lower()))
+    if len(wa) < 3 or len(wb) < 3:
+        return 0.0  # "yes", "thanks": not a request
+    return len(wa & wb) / len(wa | wb)
+
+
+def quiet_signals(engine: Engine, tenant: str, trajs: Dict[str, dict], fb: Dict[str, list]) -> Dict[str, List[dict]]:
+    """The failures that don't announce themselves, from what the user did next (see the docstring)."""
+    from assay import agents
+    out: Dict[str, List[dict]] = defaultdict(list)
+    if not trajs:
+        return out
+    inputs = _inputs(engine, tenant, list(trajs))
+    convs: Dict[str, List[dict]] = {}
+    for tid, tr in trajs.items():
+        cid = tr.get("conversation_id")
+        if cid and cid not in convs:
+            convs[cid] = agents.conversation_turns(engine, tenant, cid)
+    later_inputs = _inputs(engine, tenant, [t["trajectory_id"] for turns in convs.values() for t in turns
+                                            if t["trajectory_id"] not in inputs])
+    inputs.update(later_inputs)
+    for tid, tr in trajs.items():
+        mine = (inputs.get(tid) or {}).get("input")
+        turns = convs.get(tr.get("conversation_id")) or []
+        ids = [t["trajectory_id"] for t in turns]
+        nxt = turns[ids.index(tid) + 1] if tid in ids and ids.index(tid) + 1 < len(turns) else None
+        if nxt is not None:
+            s = similar(mine, (inputs.get(nxt["trajectory_id"]) or {}).get("input"))
+            if s >= SIMILAR:
+                out[tid].append({"type": "restated", "weight": WEIGHTS["restated"], "stage": None, "key": "",
+                                 "text": f"The next turn asked nearly the same thing ({s:.0%} the same words): the "
+                                         f"answer didn't do it"})
+        if tr.get("outcome") == "resolved":
+            after = [t for t in turns[ids.index(tid) + 1:]] if tid in ids else []
+            if any(k in ("escalation", "complaint") for k in fb.get(tid, [])) or \
+                    any(t.get("outcome") == "escalated" for t in after):
+                out[tid].append({"type": "reopened", "weight": WEIGHTS["reopened"], "stage": None, "key": "",
+                                 "text": "Marked resolved, then escalated or complained about"})
+    # The same user, the same request, a new conversation.
+    users = {tr.get("user_id") for tr in trajs.values() if tr.get("user_id")}
+    if users:
+        t = store.agent_trajectories
+        with engine.connect() as conn:
+            rows = conn.execute(select(t.c.trajectory_id, t.c.user_id, t.c.conversation_id, t.c.started_at).where(
+                and_(t.c.tenant == tenant, t.c.user_id.in_(sorted(users)), t.c.run_id.is_(None)))).all()
+        by_user = defaultdict(list)
+        for r in rows:
+            by_user[r.user_id].append(r)
+        inputs.update(_inputs(engine, tenant, [r.trajectory_id for r in rows if r.trajectory_id not in inputs]))
+        for tid, tr in trajs.items():
+            u, start = tr.get("user_id"), tr.get("started_at")
+            if not u or start is None:
+                continue
+            mine = (inputs.get(tid) or {}).get("input")
+            for r in sorted(by_user[u], key=lambda r: r.started_at):
+                if r.trajectory_id == tid or (tr.get("conversation_id") and r.conversation_id == tr["conversation_id"]):
+                    continue
+                if start < r.started_at <= start + AGAIN_WITHIN:
+                    s = similar(mine, (inputs.get(r.trajectory_id) or {}).get("input"))
+                    if s >= SIMILAR:
+                        hours = (r.started_at - start).total_seconds() / 3600
+                        out[tid].append({"type": "asked_again", "weight": WEIGHTS["asked_again"], "stage": None,
+                                         "key": "", "text": f"The same user asked it again in a new conversation "
+                                                            f"{hours:.0f}h later ({s:.0%} the same words)"})
+                        break
+    return out
+
+
 def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) -> dict:
     """Every trace in the window, scored from label-free signals; anomalous ones listed."""
     docs = list(source.documents(window) or [])[-MAX_TRACES:]
@@ -190,6 +287,7 @@ def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) 
                                                    t.c.ts < window.end + timedelta(days=2)))):
             fb[r.trace_id].append(r.kind)
 
+    quiet = quiet_signals(engine, tenant, trajs, fb)
     # Per task: typical steps, time and cost, and how common each path is.
     facts, by_task = {}, defaultdict(list)
     for d in docs:
@@ -230,6 +328,10 @@ def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) 
                         "text": f"Reported: {e.field} should be {e.expected!r}, was {e.observed!r}",
                         "field": e.field, "expected": e.expected, "observed": e.observed})
         kinds = Counter(fb.get(d_id, []))
+        sig += quiet.get(d_id, [])
+        for k, what in (("edited", "The user edited the answer before using it"), ("redone", "The user did it themselves")):
+            if kinds.get(k):
+                sig.append({"type": "redone", "weight": WEIGHTS["redone"], "stage": None, "key": k, "text": what})
         bad = {k: n for k, n in kinds.items() if k in ("thumbs_down", "complaint", "escalation")}
         if bad:
             sig.append({"type": "feedback", "weight": WEIGHTS["feedback"], "stage": None, "key": ",".join(sorted(bad)),
@@ -297,11 +399,14 @@ NAMES = {
     "fallback": "A fallback model answers at {stage}", "stuck": "Never finishes",
     "outlier_steps": "Far more steps than usual", "outlier_seconds": "Far slower than usual",
     "outlier_cost": "Far costlier than usual", "rare_path": "Takes a rare path",
+    "restated": "Users ask again in the next turn", "asked_again": "Users ask the same thing again later",
+    "reopened": "Marked resolved, then escalated", "redone": "Users fix or redo the answer themselves",
 }
 
 
 CAUSES = {"contract", "reported", "tool_error", "loop", "failed_step", "fallback"}
-TASK_RELATIVE = {"outlier_steps", "outlier_seconds", "outlier_cost", "rare_path", "feedback", "stuck"}
+TASK_RELATIVE = {"outlier_steps", "outlier_seconds", "outlier_cost", "rare_path", "feedback", "stuck", "restated",
+                 "asked_again", "reopened", "redone"}
 
 
 def _primary(sig: List[dict]) -> dict:

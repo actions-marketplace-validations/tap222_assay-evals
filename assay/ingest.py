@@ -207,7 +207,7 @@ class FeedbackEvent(Event):
     """What a user did about a trace: the strongest label-free signal that it went wrong."""
     feedback_id: Optional[str] = Field(None, max_length=128, description="Omit to derive one")
     trace_id: str = Field(..., max_length=128)
-    kind: str = Field(..., pattern="^(thumbs_down|thumbs_up|retry|escalation|complaint)$")
+    kind: str = Field(..., pattern="^(thumbs_down|thumbs_up|retry|escalation|complaint|edited|redone)$")
     ts: Optional[datetime] = None
     note: Optional[str] = Field(None, max_length=1024)
 
