@@ -102,6 +102,7 @@ class Config:
     session_secret: str
     admins: List[str] = field(default_factory=list)
     managers: List[str] = field(default_factory=list)
+    sensitive: List[str] = field(default_factory=list)  # groups or emails that may see raw conversations
     role_claim: str = "groups"
     allowed_domains: List[str] = field(default_factory=list)
     tenant: str = "default"
@@ -131,7 +132,7 @@ def from_settings(settings) -> Optional[Config]:
     return Config(issuer=settings.oidc_issuer.rstrip("/"), client_id=settings.oidc_client_id,
                   client_secret=settings.oidc_client_secret, redirect_url=redirect,
                   session_secret=settings.session_secret, admins=list(settings.oidc_admins),
-                  managers=list(settings.oidc_managers), role_claim=settings.oidc_role_claim or "groups",
+                  managers=list(settings.oidc_managers), sensitive=list(settings.oidc_sensitive), role_claim=settings.oidc_role_claim or "groups",
                   allowed_domains=[d.lower().lstrip("@") for d in settings.oidc_allowed_domains],
                   tenant=settings.oidc_tenant or "default", tenant_claim=settings.oidc_tenant_claim,
                   session_hours=settings.session_hours)
@@ -237,6 +238,11 @@ def role_for(cfg: Config, claims: dict) -> str:
     return "read"
 
 
+def sensitive_for(cfg: Config, claims: dict) -> bool:
+    who = {str(claims.get("email") or "").lower(), *_groups(claims, cfg.role_claim)}
+    return bool(who & {s.lower() if "@" in s else s for s in cfg.sensitive})
+
+
 def admitted(cfg: Config, claims: dict) -> Optional[str]:
     """Why someone may not sign in, or None."""
     email = str(claims.get("email") or "").lower()
@@ -259,7 +265,8 @@ def upsert_user(engine: Engine, cfg: Config, claims: dict) -> dict:
     tenant = str(claims.get(cfg.tenant_claim) or cfg.tenant) if cfg.tenant_claim else cfg.tenant
     now = datetime.utcnow()
     fields = {"email": claims.get("email"), "name": claims.get("name") or claims.get("preferred_username"),
-              "claims_role": role_for(cfg, claims), "last_login_at": now, "tenant": tenant}
+              "claims_role": role_for(cfg, claims), "sensitive": sensitive_for(cfg, claims), "last_login_at": now,
+              "tenant": tenant}
     with engine.begin() as conn:
         row = conn.execute(select(t).where(t.c.id == uid)).first()
         if row is None:
@@ -276,7 +283,7 @@ def public_user(row) -> dict:
     iso = lambda v: v.isoformat() if v else None
     return {"id": r["id"], "email": r["email"], "name": r["name"], "tenant": r["tenant"],
             "role": r["role"] or r["claims_role"], "role_set_by_admin": bool(r["role"]),
-            "claims_role": r["claims_role"], "disabled": bool(r["disabled"]),
+            "claims_role": r["claims_role"], "disabled": bool(r["disabled"]), "sensitive": bool(r.get("sensitive")),
             "created_at": iso(r["created_at"]), "last_login_at": iso(r["last_login_at"])}
 
 

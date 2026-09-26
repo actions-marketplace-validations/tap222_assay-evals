@@ -142,6 +142,11 @@ Send passes too: they're what failures are compared against.
 `run_id`, `field` (required; dotted paths like `line_items.0.total`), `expected`,
 `observed`, `kind` (`wrong` \| `missing` \| `extra`), `reporter`.
 
+### `claim_review`: an expert's decision on one claim
+`run_id`, `claim`, `verdict` (required: `supported` \| `wrong` \| `conflict_resolved` \| `unsure`),
+`evidence` (the sources checked, `[{"id", "text" | "uri"}]`), `correction` (what the claim should
+say), `by`, `note`. Sent by `assay_sdk.claim_review()`; see [sensitive data](sensitive.md).
+
 ### `prompt`: a prompt version and its text
 `prompt_id`, `version` (required), `template`, `note` (what changed). Registers the version, so a
 regression can show the text's diff next to it. `assay.prompt()` sends it.
@@ -177,6 +182,7 @@ regression can show the text's diff next to it. `assay.prompt()` sends it.
 | `step` `stage` | a pipeline stage run |
 | `run.end` | the run's end time, status and answer |
 | `feedback`, `check`, `correction`, `expect` | feedback, an evaluation result, a reported error, an agent reference |
+| `claim_review` | a label for the faithfulness judge, and a failure signal when the claim was wrong |
 
 The older per-record endpoints (`/v1/events`, `/v1/events/trajectories`, …) keep
 working. New integrations should use this schema.

@@ -250,6 +250,18 @@ class Correction(_E):
     reporter: Optional[str] = Field(None, max_length=128)
 
 
+class ClaimReview(_E):
+    type: Literal["claim_review"]
+    run_id: str = Field(..., max_length=128)
+    claim: str = Field(..., max_length=4096, description="The claim, as the answer made it")
+    verdict: Literal["supported", "wrong", "conflict_resolved", "unsure"]
+    evidence: Optional[List[Dict[str, Any]]] = Field(None, max_length=50,
+                                                     description='The sources it was checked against: [{"id", "text" | "uri"}]')
+    correction: Optional[str] = Field(None, max_length=4096, description="What the claim should say")
+    by: Optional[str] = Field(None, max_length=128, description="Who decided: a pseudonymous id or a role")
+    note: Optional[str] = Field(None, max_length=2048)
+
+
 class Expect(_E):
     type: Literal["expect"]
     case: str = Field(..., max_length=128)
@@ -270,7 +282,7 @@ class PromptVersion(_E):
     note: Optional[str] = Field(None, max_length=1024, description="What changed")
 
 
-Event = Annotated[Union[RunStart, Step, RunEnd, Feedback, Check, Correction, Expect, PromptVersion],
+Event = Annotated[Union[RunStart, Step, RunEnd, Feedback, Check, Correction, ClaimReview, Expect, PromptVersion],
                   Field(discriminator="type")]
 EVENTS = TypeAdapter(List[Event])
 
@@ -415,6 +427,10 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                 rows["errors"].append({"tenant": tenant, "error_id": e.id, "document_id": e.run_id, "field": e.field,
                                        "reported_at": e.ts, "expected": e.expected, "observed": e.observed,
                                        "kind": e.kind, "reporter": e.reporter, "source": "correction"})
+            elif isinstance(e, ClaimReview):
+                rows.setdefault("claims", []).append({"tenant": tenant, "review_id": e.id, "run_id": e.run_id,
+                                                      "claim": e.claim, "verdict": e.verdict, "evidence": e.evidence,
+                                                      "correction": e.correction, "by": e.by, "note": e.note, "ts": e.ts})
             elif isinstance(e, PromptVersion):
                 rows.setdefault("prompts", []).append(e)
             elif isinstance(e, Expect):
@@ -434,6 +450,7 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
             counts["duplicate_checks"] = dup
         _upsert(conn, engine, store.eval_results, rows["checks"], ["tenant", "result_id"])
         _upsert(conn, engine, store.event_errors, rows["errors"], ["tenant", "error_id"])
+        _upsert(conn, engine, store.claim_reviews, rows.get("claims", []), ["tenant", "review_id"])
         _upsert(conn, engine, store.agent_references, rows["refs"], ["tenant", "case_id"])
         # Server time of the latest event, per trajectory: when to evaluate again (assay/lifecycle.py).
         touched = {r["trajectory_id"] for r in rows["heads"]} | {r["trajectory_id"] for r in rows["steps"]}
@@ -499,7 +516,9 @@ def _head(run: dict) -> dict:
             "started_at": run.get("started_at"), "status": run.get("status") or "running",
             "lineage": run.get("version"), "outcome": run.get("outcome"),
             "conversation_id": run.get("conversation_id"), "turn": run.get("turn"), "user_id": run.get("user_id"),
-            "origin": "synthetic" if (run.get("tags") or {}).get("origin") == "synthetic" else None}
+            "origin": "synthetic" if (run.get("tags") or {}).get("origin") == "synthetic" else None,
+            "consent": True if str((run.get("tags") or {}).get("consent", "")).lower() in ("shared", "yes", "true")
+            else None}
 
 
 def _merge(rows: List[dict], key: str) -> List[dict]:

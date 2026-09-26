@@ -129,6 +129,10 @@ def main(argv=None) -> int:
     ga.add_argument("--output", help="The output, if it wasn't recorded")
     ga.add_argument("--note")
     ga.add_argument("--critique", help="Why this score: what a judge should learn from it")
+    gcl = gs.add_parser("claims", help="Add the claims experts called supported or wrong (a server) as labels")
+    gcl.add_argument("--url")
+    gcl.add_argument("--source", default="events:default")
+    gcl.add_argument("--days", type=float)
     gp = gs.add_parser("split", help="Assign train, dev and test, stratified by label, so a judge isn't measured "
                                      "on what it learned from")
     gp.add_argument("--train", type=float, default=0.2)
@@ -141,6 +145,22 @@ def main(argv=None) -> int:
     gg.add_argument("--vs", help="Another judge's check: pick the runs the two scored furthest apart")
     gg.add_argument("--disagree", action="store_true",
                     help="Pick runs the judge passed but a deterministic check failed")
+    rd = sub.add_parser("redact", help="Check redaction: personal data that got through, and whether edited traces "
+                                       "still behave like the real ones")
+    rs = rd.add_subparsers(dest="redact_cmd", required=True)
+    rc = rs.add_parser("check", help="Scan what was recorded (.assay/events.jsonl, or a server) for personal data")
+    rc.add_argument("--file")
+    rc.add_argument("--url")
+    rc.add_argument("--source", default="events:default")
+    rc.add_argument("--days", type=float, default=7)
+    rp = rs.add_parser("replay", help="Run recorded inputs through the app with personal data replaced, and compare")
+    rp.add_argument("--app", help='The entry point, as "app/bot.py:answer" (default: [synthetic] app)')
+    rp.add_argument("--file")
+    rp.add_argument("--mode", choices=["pseudonym", "placeholder"], default="pseudonym",
+                    help="Realistic stand-ins (default), or placeholders like <email>")
+    rp.add_argument("--no-control", action="store_true", help="Don't rerun the original to tell the app's own variation apart")
+    rp.add_argument("--limit", type=int)
+
     sy = sub.add_parser("synth", help="Synthetic data for error analysis: dimensions, tuples, queries, runs through "
                                       "the app, and a comparison with real traffic")
     ss = sy.add_subparsers(dest="synth_cmd", required=True)
@@ -216,6 +236,10 @@ def main(argv=None) -> int:
         from pathlib import Path
         from assay import diff
         return diff.main(Path.cwd(), args.baseline, args.current, args.format)
+    if args.cmd == "redact":
+        from pathlib import Path
+        from assay import redaction
+        return redaction.cli(Path.cwd(), args)
     if args.cmd == "synth":
         from pathlib import Path
         from assay import synth
@@ -245,6 +269,14 @@ def main(argv=None) -> int:
                     return local.golden_add(root, args.case, args.score, args.by,
                                             [t.strip() for t in args.tags.split(",") if t.strip()], args.run,
                                             args.input_, args.output, args.note, args.critique)
+                if args.golden_cmd == "claims":
+                    import os
+                    from assay import claims
+                    url = args.url or os.environ.get("ASSAY_URL")
+                    if not url:
+                        print("From which server? Set ASSAY_URL (and ASSAY_KEY), or pass --url.", file=sys.stderr)
+                        return 2
+                    return claims.pull(root, url, args.source, args.days, local._calib_cfg(root)["golden"])
                 if args.golden_cmd == "split":
                     return local.golden_split(root, args.train, args.dev, args.seed)
                 if args.golden_cmd == "stats":

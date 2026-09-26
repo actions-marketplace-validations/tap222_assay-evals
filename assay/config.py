@@ -30,6 +30,7 @@ class Settings:
     oidc_redirect_url: Optional[str] = None  # default: ASSAY_PUBLIC_URL/auth/callback
     oidc_admins: List[str] = field(default_factory=list)  # groups or emails that are admins
     oidc_managers: List[str] = field(default_factory=list)  # ... managers; everyone else reads
+    oidc_sensitive: List[str] = field(default_factory=list)  # ... who may see raw conversations (the sensitive scope)
     oidc_role_claim: str = "groups"
     oidc_allowed_domains: List[str] = field(default_factory=list)
     oidc_tenant: str = "default"  # the tenant people who sign in belong to
@@ -67,6 +68,7 @@ class Settings:
     judge_budget_usd: Optional[float] = None  # dollars for one request's judging
     review_sample: int = 50  # production conversations read per review run (assay/review.py)
     review_budget_usd: Optional[float] = None  # dollars for one review run
+    review_consented_only: bool = False  # without the sensitive scope, only conversations users agreed to share
     review_person_first: int = 30  # notes a person writes before the model's suggestions show
     review_daily: bool = False  # read ASSAY_REVIEW_SAMPLE conversations a day, per scheduled events source
 
@@ -88,6 +90,7 @@ class Settings:
             oidc_issuer=e("ASSAY_OIDC_ISSUER"), oidc_client_id=e("ASSAY_OIDC_CLIENT_ID"),
             oidc_client_secret=e("ASSAY_OIDC_CLIENT_SECRET"), oidc_redirect_url=e("ASSAY_OIDC_REDIRECT_URL"),
             oidc_admins=_list(e("ASSAY_OIDC_ADMINS")), oidc_managers=_list(e("ASSAY_OIDC_MANAGERS")),
+            oidc_sensitive=_list(e("ASSAY_OIDC_SENSITIVE")),
             oidc_role_claim=e("ASSAY_OIDC_ROLE_CLAIM", "groups"),
             oidc_allowed_domains=_list(e("ASSAY_OIDC_ALLOWED_DOMAINS")), oidc_tenant=e("ASSAY_OIDC_TENANT", "default"),
             oidc_tenant_claim=e("ASSAY_OIDC_TENANT_CLAIM"), session_secret=e("ASSAY_SESSION_SECRET"),
@@ -114,6 +117,7 @@ class Settings:
             review_sample=int(e("ASSAY_REVIEW_SAMPLE", "50")),
             review_budget_usd=_num(e("ASSAY_REVIEW_BUDGET_USD")),
             review_person_first=int(e("ASSAY_REVIEW_PERSON_FIRST", "30")),
+            review_consented_only=e("ASSAY_REVIEW_CONSENTED_ONLY", "false").lower() in ("1", "true", "yes"),
             review_daily=e("ASSAY_REVIEW_DAILY", "false").lower() in ("1", "true", "yes"),
             schedule_minutes=int(e("ASSAY_SCHEDULE_MINUTES", "0")),
             schedule_sources=_list(e("ASSAY_SCHEDULE_SOURCES")),

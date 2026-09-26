@@ -105,6 +105,10 @@ def test_production_failures_become_protected_regression_cases(client):
     assert out["stability"]["production_bugs_back"] == 1 and out["stability"]["outcome"] in ("hold", "rollback")
     g = next(g for g in out["groups"] if g.get("guards"))
     assert g["evidence"][0].startswith("Production bug back")
+    # With stand-ins: the same realistic fake in the input and the trace, not <email>.
+    client.post(f"/v1/learn/candidates/{c['id']}/approve", json={"source": src, "suite": "stand-ins", "stand_ins": True})
+    case = client.get("/v1/learn/suites/stand-ins", params={"source": src}).json()[0]
+    assert "@example.com" in str(case["input"]) and "<email>" not in str(case["input"])
 
 
 def test_dismissing_a_pattern(client):

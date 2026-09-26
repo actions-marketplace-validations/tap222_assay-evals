@@ -74,10 +74,11 @@ from assay.rootcause import order_steps
 THRESHOLD = 2.0  # signal weight that makes a trace anomalous
 WEIGHTS = {"contract_critical": 3.0, "contract_warning": 1.0, "reported": 3.0, "feedback": 3.0, "retry": 1.5,
            "failed_step": 2.0, "tool_error": 2.0, "loop": 2.0, "fallback": 1.0, "outlier": 1.0,
-           "rare_path": 1.0, "stuck": 1.5, "restated": 2.0, "asked_again": 2.0, "reopened": 3.0, "redone": 3.0}
+           "rare_path": 1.0, "stuck": 1.5, "restated": 2.0, "asked_again": 2.0, "reopened": 3.0, "redone": 3.0,
+           "expert": 3.0}
 SIMILAR = 0.5  # word overlap at which a later request is the same request again
 AGAIN_WITHIN = timedelta(hours=24)
-PRIORITY = ["contract", "reported", "tool_error", "loop", "failed_step", "reopened", "redone", "feedback", "restated",
+PRIORITY = ["contract", "reported", "expert", "tool_error", "loop", "failed_step", "reopened", "redone", "feedback", "restated",
             "asked_again", "fallback", "stuck",
             "outlier_steps", "outlier_seconds", "outlier_cost", "rare_path"]
 INFRA = re.compile(r"time ?out|timed out|connection|refused|unavailable|unreachable|\b5\d\d\b|rate.?limit|"
@@ -90,12 +91,18 @@ Z = 3.5
 # ---------- personal data ----------
 
 # Most specific first: redaction applies them in order, and a card number also looks like a phone number.
+# A pattern with a group named v finds only that part: the name after "my name is", not the words.
 PII = {
     "email": re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
     "card": re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)"),
     "iban": re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b"),
     "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+    "ip": re.compile(r"(?<![\d.])(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?![\d.]\d)"),
+    "birth_date": re.compile(r"(?i:\bborn(?: on)?|\bdate of birth:?|\bdob:?)\s+(?P<v>\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4})"),
     "phone": re.compile(r"(?<!\w)\+?\d[\d ().-]{7,}\d(?!\w)"),
+    "address": re.compile(r"\b\d{1,5}\s+(?:[A-Z][a-z]+\s+){1,3}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|"
+                         r"Drive|Dr|Court|Ct|Way|Place|Pl|Terrace)\b"),
+    "name": re.compile(r"(?i:\bmy name is|\bname:|\bcall me|\bsigned,?|\bregards,?)\s+(?P<v>[A-Z][a-z]+(?:[ -][A-Z][a-z]+){0,2})"),
 }
 
 
@@ -106,23 +113,30 @@ def _luhn(digits: str) -> bool:
     return len(d) >= 13 and s % 10 == 0
 
 
-def pii_matches(value) -> List[tuple]:
-    """(kind, the value as found) for each piece of personal data in a value. Raw: for comparing,
-    never for showing."""
-    text = value if isinstance(value, str) else json.dumps(value, default=str) if value is not None else ""
-    out, taken = [], []
+def pii_spans(text: str) -> List[tuple]:
+    """(start, end, kind) of each piece of personal data in a text, none overlapping, in order."""
+    out = []
     for kind, rx in PII.items():
         for m in rx.finditer(text):
-            v = m.group(0)
-            if any(m.start() < b and a < m.end() for a, b in taken):
+            a, b = m.span("v") if "v" in rx.groupindex else m.span()
+            v = text[a:b]
+            if kind == "email":
+                b -= len(v) - len(v.rstrip(".-"))  # not the sentence's full stop
+            if any(a < y and x < b for x, y, _ in out):
                 continue  # already found as something more specific
             if kind == "card" and not _luhn(v):
                 continue
             if kind == "phone" and len(re.sub(r"\D", "", v)) < 9:
                 continue
-            taken.append((m.start(), m.end()))
-            out.append((kind, v.rstrip(".-") if kind == "email" else v))  # not the sentence's full stop
-    return out
+            out.append((a, b, kind))
+    return sorted(out)
+
+
+def pii_matches(value) -> List[tuple]:
+    """(kind, the value as found) for each piece of personal data in a value. Raw: for comparing,
+    never for showing."""
+    text = value if isinstance(value, str) else json.dumps(value, default=str) if value is not None else ""
+    return [(kind, text[a:b]) for a, b, kind in pii_spans(text)]
 
 
 def pii_sample(v: str) -> str:
@@ -145,19 +159,75 @@ def pii_scan(value) -> List[dict]:
     return uniq[:20]
 
 
-def redact(value):
-    """The input with personal data replaced by placeholders, keeping its shape."""
+def _replace(value, fn):
+    """value with fn(kind, found) put in place of each piece of personal data, keeping its shape."""
     if isinstance(value, dict):
-        return {k: redact(v) for k, v in value.items()}
+        return {k: _replace(v, fn) for k, v in value.items()}
     if isinstance(value, list):
-        return [redact(v) for v in value]
+        return [_replace(v, fn) for v in value]
     if not isinstance(value, str):
         return value
-    out = value
-    for kind, rx in PII.items():
-        out = rx.sub(lambda m: m.group(0) if (kind == "card" and not _luhn(m.group(0))) or
-                     (kind == "phone" and len(re.sub(r"\D", "", m.group(0))) < 9) else f"<{kind}>", out)
-    return out
+    out, at = [], 0
+    for a, b, kind in pii_spans(value):
+        out += [value[at:a], fn(kind, value[a:b])]
+        at = b
+    return "".join(out + [value[at:]])
+
+
+def redact(value):
+    """The input with personal data replaced by placeholders, keeping its shape."""
+    return _replace(value, lambda kind, v: f"<{kind}>")
+
+
+_NAMES = ["Alex Morgan", "Sam Rivera", "Jordan Lee", "Taylor Brooks", "Casey Quinn", "Riley Park", "Jamie Fox",
+          "Morgan Hale", "Avery Stone", "Drew Carter"]
+_CARDS = ["4242424242424242", "4000056655665556", "5555555555554444", "2223003122003222", "5200828282828210",
+          "378282246310005", "6011111111111117"]  # published test card numbers
+
+
+def _fake(kind: str, v: str, n: int) -> str:
+    """A realistic stand-in of the same shape, the n-th of its kind: a lookup or a validation that
+    worked on the original still gets something that looks right."""
+    if kind == "email":
+        return f"person{n}@example.com"
+    if kind == "card":
+        c = _CARDS[(n - 1) % len(_CARDS)]
+        sep = " " if " " in v else "-" if "-" in v else ""
+        return sep.join(c[i:i + 4] for i in range(0, len(c), 4)) if sep else c
+    if kind == "iban":
+        return (v[:2] + f"{n:02d}" + "TEST" + "0" * max(0, len(v) - 8))[:len(v)]
+    if kind == "ssn":
+        return f"900-00-{n:04d}"  # an area number never issued
+    if kind == "ip":
+        return f"192.0.2.{n % 250 + 1}"  # a range reserved for documentation
+    if kind == "birth_date":
+        sep = next((c for c in v if c in "/.-"), "-")
+        return sep.join(["1990", "01", f"{n % 28 + 1:02d}"]) if len(v.split(sep)[0]) == 4 else \
+            sep.join(["01", f"{n % 28 + 1:02d}", "1990"])
+    if kind == "phone":
+        digits = [c for c in v if c.isdigit()]
+        tail = iter(digits[:-7] + list(f"555{n % 10000:04d}"))  # the country and area kept, the number a 555 one
+        return "".join(next(tail) if c.isdigit() else c for c in v)
+    if kind == "address":
+        return f"{100 + n} Example Street"
+    if kind == "name":
+        return _NAMES[(n - 1) % len(_NAMES)] if " " in v else _NAMES[(n - 1) % len(_NAMES)].split()[0]
+    return f"<{kind}>"
+
+
+def pseudonymize(value, mapping: Optional[Dict[str, str]] = None):
+    """(value, mapping): personal data replaced by realistic stand-ins, the same one each time the same
+    person or number appears (mapping carries it across calls: {original: stand-in}). Placeholders like
+    <email> can change what an app does (a lookup finds nothing, a validation fails); stand-ins
+    usually don't. Check that they don't: assay redact replay."""
+    mapping = {} if mapping is None else mapping
+
+    def fn(kind, v):
+        key = f"{kind}:{pii_key(kind, v)}"
+        if key not in mapping:
+            mapping[key] = _fake(kind, v, sum(1 for k in mapping if k.startswith(kind + ":")) + 1)
+        return mapping[key]
+    return _replace(value, fn), mapping
 
 
 # ---------- scoring traces ----------
@@ -286,6 +356,12 @@ def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) 
         for r in conn.execute(select(t).where(and_(t.c.tenant == tenant, t.c.ts >= window.start,
                                                    t.c.ts < window.end + timedelta(days=2)))):
             fb[r.trace_id].append(r.kind)
+    wrong = defaultdict(list)  # claims an expert marked wrong (assay_sdk.claim_review)
+    cr = store.claim_reviews
+    with engine.connect() as conn:
+        for r in conn.execute(select(cr).where(and_(cr.c.tenant == tenant, cr.c.verdict == "wrong",
+                                                    cr.c.ts >= window.start, cr.c.ts < window.end + timedelta(days=2)))):
+            wrong[r.run_id].append(r.claim)
 
     quiet = quiet_signals(engine, tenant, trajs, fb)
     # Per task: typical steps, time and cost, and how common each path is.
@@ -329,6 +405,11 @@ def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) 
                         "field": e.field, "expected": e.expected, "observed": e.observed})
         kinds = Counter(fb.get(d_id, []))
         sig += quiet.get(d_id, [])
+        if wrong.get(d_id):
+            n = len(wrong[d_id])
+            sig.append({"type": "expert", "weight": WEIGHTS["expert"], "stage": None, "key": "claim",
+                        "text": f"An expert marked {'a claim' if n == 1 else f'{n} claims'} wrong: "
+                                f"“{wrong[d_id][0][:120]}”"})
         for k, what in (("edited", "The user edited the answer before using it"), ("redone", "The user did it themselves")):
             if kinds.get(k):
                 sig.append({"type": "redone", "weight": WEIGHTS["redone"], "stage": None, "key": k, "text": what})
@@ -404,7 +485,7 @@ NAMES = {
 }
 
 
-CAUSES = {"contract", "reported", "tool_error", "loop", "failed_step", "fallback"}
+CAUSES = {"contract", "reported", "expert", "tool_error", "loop", "failed_step", "fallback"}
 TASK_RELATIVE = {"outlier_steps", "outlier_seconds", "outlier_cost", "rare_path", "feedback", "stuck", "restated",
                  "asked_again", "reopened", "redone"}
 
@@ -787,7 +868,7 @@ def _step(r: dict) -> dict:
 
 
 def snapshot(engine: Engine, source: str, trace_id: str, redact_pii: bool = True,
-             with_conversation: bool = True) -> Optional[dict]:
+             with_conversation: bool = True, mapping: Optional[Dict[str, str]] = None) -> Optional[dict]:
     """The trace in full, to keep with a test case: its input, every step (model calls with their
     model, prompt, tokens and the tools they were offered; tool calls with arguments and results;
     MCP resource reads and prompts; approvals; state changes), its answer, and the run's metadata.
@@ -804,7 +885,8 @@ def snapshot(engine: Engine, source: str, trace_id: str, redact_pii: bool = True
         run = conn.execute(select(r.c.tags, r.c.segment, r.c.parent_run_id, r.c.error).where(
             and_(r.c.tenant == tenant, r.c.run_id == trace_id))).first()
     inp = _inputs(engine, tenant, [trace_id]).get(trace_id) or {}
-    clean = redact if redact_pii else (lambda v: v)
+    clean = (lambda v: pseudonymize(v, mapping)[0]) if redact_pii and mapping is not None else \
+        redact if redact_pii else (lambda v: v)  # mapping: stand-ins, the same across the trace
     steps = [_step(x) for x in traj["steps"]]
     for st in steps:
         for k in CONTENT:
@@ -822,7 +904,7 @@ def snapshot(engine: Engine, source: str, trace_id: str, redact_pii: bool = True
         from assay import agents
         before = [t for t in agents.conversation_turns(engine, tenant, traj["conversation_id"])
                   if t["trajectory_id"] != trace_id and _earlier(t, traj)]
-        out["conversation"] = [snapshot(engine, source, t["trajectory_id"], redact_pii, False) for t in before]
+        out["conversation"] = [snapshot(engine, source, t["trajectory_id"], redact_pii, False, mapping) for t in before]
     return {k: v for k, v in out.items() if v is not None}
 
 
@@ -834,22 +916,31 @@ def _earlier(a: dict, b: dict) -> bool:
 
 
 def approve(engine: Engine, source: str, candidate_id: int, suite: str, case: Optional[dict] = None,
-            redact_pii: bool = True, by: Optional[str] = None) -> Optional[dict]:
-    """Add a candidate to a suite (with the developer's edits), and for agents store its reference."""
+            redact_pii: bool = True, by: Optional[str] = None, stand_ins: bool = False) -> Optional[dict]:
+    """Add a candidate to a suite (with the developer's edits), and for agents store its reference.
+    stand_ins: personal data becomes realistic stand-ins, the same one everywhere in the trace, instead
+    of placeholders, so the case still exercises what the real one did (assay redact replay checks)."""
     t, sc = store.regression_candidates, store.suite_cases
     with engine.begin() as conn:
         row = conn.execute(select(t).where(and_(t.c.source == source, t.c.id == candidate_id))).first()
         if row is None:
             return None
         c = dict(row.case) | (case or {})
-        inp = redact(c.get("input")) if redact_pii else c.get("input")
+        mapping = {} if redact_pii and stand_ins else None
+        if mapping is not None:  # from the trace's own input (the draft's is redacted already), unless edited
+            tenant = source.split(":", 1)[1] if source.startswith("events:") else source
+            orig = c["input"] if "input" in (case or {}) else \
+                (_inputs(engine, tenant, [row.trace_id]).get(row.trace_id) or {}).get("input", c.get("input"))
+            inp = pseudonymize(orig, mapping)[0]
+        else:
+            inp = redact(c.get("input")) if redact_pii else c.get("input")
         ref = c.get("reference") or {}
         props = c.get("properties") or []
         conn.execute(sc.delete().where(and_(sc.c.source == source, sc.c.case_id == c["case_id"])))
         conn.execute(sc.insert().values(source=source, case_id=c["case_id"], suite=suite, candidate_id=candidate_id,
                                         pattern=row.pattern, origin_trace=row.trace_id, task=row.task, input=inp,
                                         input_ref=c.get("input_ref"), reference=ref, properties=props,
-                                        trajectory=snapshot(engine, source, row.trace_id, redact_pii),
+                                        trajectory=snapshot(engine, source, row.trace_id, redact_pii, mapping=mapping),
                                         added_at=datetime.utcnow(), added_by=by))
         conn.execute(t.update().where(t.c.id == candidate_id).values(
             status="approved", decided_at=datetime.utcnow(), decided_by=by, case=c | {"input": inp}))

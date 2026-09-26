@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-__all__ = ["init", "run", "tagged", "feedback", "check", "correction", "expect", "prompt", "flush", "shutdown", "Run"]
+__all__ = ["init", "run", "tagged", "claim_review", "feedback", "check", "correction", "expect", "prompt", "flush", "shutdown", "Run"]
 __version__ = "0.2.0"
 
 log = logging.getLogger("assay_sdk")
@@ -576,6 +576,19 @@ def correction(run_id: str, field: str, expected: Any = None, observed: Any = No
     s = lambda v: None if v is None else str(v)
     _c().emit({"type": "correction", "run_id": run_id, "field": field, "expected": s(expected),
                "observed": s(observed), "kind": kind, "reporter": reporter})
+
+
+def claim_review(run_id: str, claim: str, verdict: str, *, evidence: Optional[List[Dict[str, Any]]] = None,
+                 correction: Optional[str] = None, by: Optional[str] = None, note: Optional[str] = None) -> None:
+    """An expert's decision on one claim in an answer, made while using the product: verdict is
+    "supported", "wrong", "conflict_resolved" (sources disagreed, and they picked) or "unsure".
+    evidence: the sources they checked it against, [{"id", "text" | "uri"}]. correction: what the
+    claim should say. Redacted like every other event (init(redact=...)) before it leaves."""
+    if verdict not in ("supported", "wrong", "conflict_resolved", "unsure"):
+        raise ValueError("verdict is supported, wrong, conflict_resolved or unsure")
+    c = _c()
+    c.emit({"type": "claim_review", "run_id": run_id, "claim": c.clean(claim), "verdict": verdict,
+            "evidence": c.clean(evidence), "correction": c.clean(correction), "by": by, "note": c.clean(note)})
 
 
 def expect(case: str, *, calls: Optional[List[Dict[str, Any]]] = None, answer: Optional[str] = None,

@@ -85,9 +85,11 @@ def _norm(s: Any) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip().strip("\"'“”‘’ .").lower()
 
 
-def conversations(engine: Engine, tenant: str, since: datetime, until: datetime) -> Dict[str, List[dict]]:
+def conversations(engine: Engine, tenant: str, since: datetime, until: datetime,
+                  consented_only: bool = False) -> Dict[str, List[dict]]:
     """Production conversations that ended in the window: {id: its runs, in order}. A run with no
-    conversation is a conversation of one."""
+    conversation is a conversation of one. consented_only: only those whose user agreed to share
+    them (a run tagged consent=shared, or set with POST /v1/consent), and synthetic ones."""
     t = store.agent_trajectories
     with engine.connect() as conn:
         rows = [dict(r._mapping) for r in conn.execute(select(t).where(and_(
@@ -96,6 +98,9 @@ def conversations(engine: Engine, tenant: str, since: datetime, until: datetime)
     out: Dict[str, List[dict]] = defaultdict(list)
     for r in rows:
         out[r.get("conversation_id") or r["trajectory_id"]].append(r)
+    if consented_only:
+        out = defaultdict(list, {c: runs for c, runs in out.items()
+                                 if all(r.get("consent") or r.get("origin") == "synthetic" for r in runs)})
     for runs in out.values():
         runs.sort(key=lambda r: (r.get("turn") if r.get("turn") is not None else 0, r["started_at"]))
     return dict(out)
@@ -128,11 +133,12 @@ def render(engine: Engine, tenant: str, runs: List[dict], redact: bool = True) -
     return text if len(text) <= MAX_CONVERSATION else text[:MAX_CONVERSATION] + "\n[... the rest not shown]"
 
 
-def sample(engine: Engine, source, tenant: str, since: datetime, until: datetime, n: int, day: str) -> List[str]:
+def sample(engine: Engine, source, tenant: str, since: datetime, until: datetime, n: int, day: str,
+           consented_only: bool = False) -> List[str]:
     """Conversations to read: those learn.py flagged first, then a random sample, none read before."""
     from assay import learn
     from assay.models import Window
-    convs = conversations(engine, tenant, since, until)
+    convs = conversations(engine, tenant, since, until, consented_only)
     done = _noted(engine, tenant)
     left = [c for c in convs if c not in done]
     of = {r["trajectory_id"]: c for c, runs in convs.items() for r in runs}
@@ -216,12 +222,12 @@ def group(judge, notes: List[dict], categories: List[dict]) -> Dict[int, Any]:
 # ---------- a day's review ----------
 
 def run(engine: Engine, source, tenant: str, judge, n: int = 50, days: float = 1.0, rt=None,
-        now: Optional[datetime] = None, redact: bool = True) -> dict:
+        now: Optional[datetime] = None, redact: bool = True, consented_only: bool = False) -> dict:
     """Read up to n conversations from the last `days`, note them, and group the notes."""
     from assay_sdk.runtime import EvalRuntime
     now = now or datetime.utcnow()
     since, day = now - timedelta(days=days), now.strftime("%Y-%m-%d")
-    chosen = sample(engine, source, tenant, since, now, n, day)
+    chosen = sample(engine, source, tenant, since, now, n, day, consented_only)
     convs = conversations(engine, tenant, since, now)
     texts = {c: render(engine, tenant, convs[c], redact) for c in chosen}
     rt = rt or EvalRuntime(concurrency=4, retries=2)
@@ -552,7 +558,7 @@ def _latest_model(notes: List[dict]) -> Dict[str, dict]:
 
 
 def queue(engine: Engine, source, tenant: str, days: float = 7, limit: int = 20, now: Optional[datetime] = None,
-          person_first: int = PERSON_FIRST) -> dict:
+          person_first: int = PERSON_FIRST, raw: bool = False, consented_only: bool = False) -> dict:
     """Conversations for a person to read. Before they've written person_first notes: a diverse sample,
     no suggestions. After: likely instances of their categories first, then what production signals
     flagged, then what the model thought went wrong, then the diverse rest, each with the model's note
@@ -561,7 +567,7 @@ def queue(engine: Engine, source, tenant: str, days: float = 7, limit: int = 20,
     from assay.models import Window
     now = now or datetime.utcnow()
     since = now - timedelta(days=days)
-    convs = conversations(engine, tenant, since, now)
+    convs = conversations(engine, tenant, since, now, consented_only)
     t = store.review_notes
     with engine.connect() as conn:
         notes = [dict(r._mapping) for r in conn.execute(select(t).where(t.c.tenant == tenant))]
@@ -591,12 +597,14 @@ def queue(engine: Engine, source, tenant: str, days: float = 7, limit: int = 20,
         m = model.get(c) if suggest else None
         made = next((synth[r["trajectory_id"]] for r in convs[c] if r["trajectory_id"] in synth), None)
         out.append({"conversation": c, "trace_ids": [r["trajectory_id"] for r in convs[c]],
-                    "flagged": c in flagged, "turns": turns(engine, tenant, convs[c]), "synthetic": made,
+                    "flagged": c in flagged, "turns": turns(engine, tenant, convs[c], redact=not raw),
+                    "synthetic": made, "consent": all(r.get("consent") for r in convs[c]),
                     "suggestion": None if m is None else {
                         "id": m["id"], "went_wrong": m["went_wrong"], "note": m["note"], "hint": m["hint"],
                         "quotes": m["quotes"], "searched": m.get("by") == SEARCHED,
                         "category": names.get(m["category_id"]) if m["went_wrong"] else None}})
-    return {"conversations": out, "reviewed": len(reviewed), "suggestions_after": person_first,
+    return {"conversations": out, "raw": raw, "consented_only": consented_only,
+            "reviewed": len(reviewed), "suggestions_after": person_first,
             "suggestions": suggest, "left": len(left), "saturation": saturation(engine, tenant)}
 
 
@@ -607,9 +615,13 @@ def add_note(engine: Engine, tenant: str, conversation: str, by: str, went_wrong
     """A person's note on a conversation: their own, or the model's suggestion accepted (accept= its id).
     It replaces the model's note on that conversation in every count. also= lists other independent
     failures in the same conversation, [{"note", "hint", "first_step"}], each counted on its own."""
+    from assay.learn import redact as scrub
     t = store.review_notes
     now = datetime.utcnow()
-    also = [a for a in also or [] if isinstance(a, dict) and str(a.get("note") or "").strip()][:10]
+    # Stored redacted, like everything kept: a note written from a raw view mustn't carry what it saw.
+    note, hint = scrub(note), scrub(hint)
+    also = [{**a, "note": scrub(str(a["note"])), "hint": scrub(a.get("hint"))}
+            for a in also or [] if isinstance(a, dict) and str(a.get("note") or "").strip()][:10]
     if also and not went_wrong:
         raise ValueError("Other failures go on a conversation that went wrong.")
     with engine.begin() as conn:
@@ -673,7 +685,8 @@ def _match(judge, known: str, ids: set, text: str, retries: int = 1) -> dict:
 
 
 def search(engine: Engine, source, tenant: str, judge, n: int = 50, days: float = 7, rt=None,
-           now: Optional[datetime] = None, redact: bool = True, person_first: int = PERSON_FIRST) -> dict:
+           now: Optional[datetime] = None, redact: bool = True, person_first: int = PERSON_FIRST,
+           consented_only: bool = False) -> dict:
     """Read conversations no person has read for likely instances of the categories people's notes are
     in. A match is a suggestion in the queue ("likely: ..."), counted only once a person accepts it."""
     from assay_sdk.runtime import EvalRuntime
@@ -688,7 +701,7 @@ def search(engine: Engine, source, tenant: str, judge, n: int = 50, days: float 
     cats = [c for c in categories(engine, tenant) if c["status"] in ("open", "confirmed") and c["by_people"]]
     if not cats:
         raise ValueError("None of your notes is in a category yet: group them first (a review run).")
-    convs = conversations(engine, tenant, now - timedelta(days=days), now)
+    convs = conversations(engine, tenant, now - timedelta(days=days), now, consented_only)
     searched = {x["conversation"] for x in notes if x.get("by") == SEARCHED}
     left = [c for c in convs if c not in reviewed and c not in searched]
     chosen = diverse(left, features(engine, tenant, {c: convs[c] for c in left}), n, f"{tenant}|search")[:max(0, n)]

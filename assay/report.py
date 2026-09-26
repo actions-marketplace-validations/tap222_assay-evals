@@ -98,7 +98,7 @@ def _fix(engine: Engine, tenant: str, bad_rows, good_rows, revisions, bad_run: s
 # ---------- production ----------
 
 def production(engine: Engine, source, tenant: str, since: datetime, until: datetime) -> dict:
-    from assay import learn, review
+    from assay import claims, learn, review
     from assay.models import Window
     cats = [c for c in review.categories(engine, tenant, now=until) if c["status"] in ("open", "confirmed")]
     try:
@@ -129,7 +129,7 @@ def production(engine: Engine, source, tenant: str, since: datetime, until: date
             "fixed": fixed, "recurred": recurred, "falling": [x for x in cats if x["share"] is not None and
                                                               x["share_before"] and x["share"] < x["share_before"] / 2],
             "new_categories": new_cats, "new_tasks": new_tasks, "rare_paths": rare,
-            "saturation": review.saturation(engine, tenant)}
+            "saturation": review.saturation(engine, tenant), "claims": claims.summary(engine, tenant, since, until)}
 
 
 # ---------- the log ----------
@@ -207,6 +207,12 @@ def markdown(r: dict) -> str:
             out += [f"| {_md(n)} | {_md(by)} | {_pct(a)} | {_pct(b)} |" for n, by, a, b in rows]
         else:
             out.append("Nothing found this period.")
+        cl = p.get("claims") or {}
+        if cl.get("reviewed"):
+            out += ["", f"Experts checked {cl['reviewed']} claim{'s' * (cl['reviewed'] != 1)} in {cl['runs']} answer"
+                        f"{'s' * (cl['runs'] != 1)}: {cl['supported']} supported, {cl['wrong']} wrong, "
+                        f"{cl['conflict_resolved']} conflicts between sources resolved."]
+            out += [f"- Wrong: “{_md(x)}”" for x in cl["wrong_examples"]]
         sat = p.get("saturation") or {}
         if sat.get("reviewed"):
             out += ["", f"People read {sat['reviewed']} conversation{'s' * (sat['reviewed'] != 1)} "
@@ -242,5 +248,5 @@ def as_json(r: dict) -> dict:
                 "categories": p["categories"], "patterns": [clean(x) for x in p["patterns"]],
                 "fixed": [clean(x) for x in p["fixed"]], "recurred": [clean(x) for x in p["recurred"]],
                 "new_categories": p["new_categories"], "new_tasks": p["new_tasks"],
-                "saturation": p.get("saturation")},
+                "saturation": p.get("saturation"), "claims": p.get("claims")},
             "log": [clean(x) for x in r["log"]]}

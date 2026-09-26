@@ -1460,6 +1460,7 @@ async function renderReview(){
   box.innerHTML=`<div class="panel stack">
     <div class="panel-head"><div><h2>Review <span class="note">${S.ri+1} of ${L.length}</span></h2><p class="sub">Read the whole conversation, write what went wrong in your own words, and mark the first thing that failed. Your notes become the categories; the model's are only suggestions.${c.flagged?" This one was flagged by production signals.":""}</p>
     ${c.synthetic?`<p><b>Synthetic</b> <span class="note">generated to test (${esc(Object.entries(c.synthetic).map(([k,v])=>k+": "+v).join(", "))}); it's never counted as production.</span></p>`:""}</div></div>
+    <p class="note">${Q.raw?"<b>Unredacted</b>: you have sensitive access, and this view is recorded in the audit log. Notes are stored redacted.":"Redacted: personal data is replaced before it's shown."+(Q.consented_only?" Only conversations their users agreed to share.":"")}</p>
     ${gate}${tools}
     <div class="stack" id="rv-turns">${c.turns.map(turn).join("")||`<p class="note">No turns recorded.</p>`}</div></div>
   <div class="panel stack">

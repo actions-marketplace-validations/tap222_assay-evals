@@ -6,6 +6,7 @@ See assay/auth.py for scopes and tenant isolation.
 # No `from __future__ import annotations` here: the per-record-type ingest
 # endpoints are built in a loop, and FastAPI needs their body types as real
 # objects rather than strings to resolve later.
+import json
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -119,7 +120,9 @@ class ApproveIn(BaseModel):
     source: str
     suite: str = Field("production-regressions", max_length=128)
     case: Optional[Dict[str, Any]] = Field(None, description="Edits to the drafted case: reference, properties, input")
-    redact_pii: bool = Field(True, description="Replace emails, phone and card numbers in the input with placeholders")
+    redact_pii: bool = Field(True, description="Replace personal data in the input and the trace")
+    stand_ins: bool = Field(False, description="With redact_pii: realistic stand-ins, the same one each time, "
+                                               "instead of placeholders like <email>")
 
 
 class RejectIn(BaseModel):
@@ -925,15 +928,64 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         rt = review.runtime_for(settings)
         return review.run(engine, runner.CachedSource(resolve(p, source)), _tenant(source), reviewer(),
                           n=sample if sample is not None else settings.review_sample, days=days, rt=rt,
-                          redact=settings.judge_redact)
+                          redact=settings.judge_redact, consented_only=settings.review_consented_only)
 
     @app.get("/v1/review/queue", tags=["results"],
              summary="Conversations for a person to read, the likeliest wrong first, with the model's note as a suggestion")
     def review_queue(source: str, days: float = 7, limit: int = 20, p: Principal = Depends(require("read"))):
         check_source(p, source)
-        from assay import review
-        return review.queue(engine, runner.CachedSource(resolve(p, source)), _tenant(source), days, min(limit, 100),
-                            person_first=settings.review_person_first)
+        from assay import review, sso
+        raw = "sensitive" in p.scopes  # a domain expert allowed to see it: unredacted, and on the record
+        out = review.queue(engine, runner.CachedSource(resolve(p, source)), _tenant(source), days, min(limit, 100),
+                           person_first=settings.review_person_first, raw=raw,
+                           consented_only=settings.review_consented_only and not raw)
+        if raw and out["conversations"]:
+            sso.audit(engine, sso.actor_of(p), "viewed raw conversations", tenant=_tenant(source),
+                      detail={"conversations": [c["conversation"] for c in out["conversations"]]})
+        return out
+
+    class ConsentIn(BaseModel):
+        trace_ids: List[str] = Field(default_factory=list, max_length=10000)
+        conversations: List[str] = Field(default_factory=list, max_length=10000)
+        shared: bool = True
+
+    @app.post("/v1/consent", tags=["operate"],
+              summary="Mark traces or conversations as ones their users agreed to share (or withdraw it)")
+    def consent(source: str, body: ConsentIn, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        t = store.agent_trajectories
+        tenant = _tenant(source)
+        with engine.begin() as conn:
+            n = 0
+            for field_, ids in ((t.c.trajectory_id, body.trace_ids), (t.c.conversation_id, body.conversations)):
+                for i in range(0, len(ids), 500):
+                    n += conn.execute(t.update().where(and_(t.c.tenant == tenant, field_.in_(ids[i:i + 500])))
+                                      .values(consent=True if body.shared else None)).rowcount
+        return {"updated": n, "shared": body.shared}
+
+    @app.get("/v1/claims", tags=["results"], summary="Experts' decisions on single claims: counts per verdict")
+    def claims_summary(source: str, days: float = 30, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        from assay import claims
+        now = datetime.utcnow()
+        return claims.summary(engine, _tenant(source), now - timedelta(days=days), now)
+
+    @app.get("/v1/claims/golden", tags=["results"],
+             summary="Claims experts called supported or wrong, as golden-set items for calibrating a judge")
+    def claims_golden(source: str, days: Optional[float] = None, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        from assay import claims
+        items = claims.golden(engine, _tenant(source), datetime.utcnow() - timedelta(days=days) if days else None)
+        return {"items": items, "jsonl": "".join(json.dumps(x, default=str) + "\n" for x in items)}
+
+    @app.get("/v1/redaction/check", tags=["results"],
+             summary="Personal data that got through redaction into what's stored: by kind and field, masked")
+    def redaction_check(source: str, days: float = 7, sample: int = 5, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        from assay import redaction
+        now = datetime.utcnow()
+        return redaction.scan(redaction.store_events(engine, _tenant(source), now - timedelta(days=days), now),
+                              sample=max(0, min(sample, 50)))
 
     @app.post("/v1/review/search", tags=["operate"],
               summary="Read conversations nobody has for likely instances of the failures people described (model calls)")
@@ -945,7 +997,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return review.search(engine, runner.CachedSource(resolve(p, source)), _tenant(source), reviewer(),
                                  n=sample if sample is not None else settings.review_sample, days=days,
                                  rt=review.runtime_for(settings), redact=settings.judge_redact,
-                                 person_first=settings.review_person_first)
+                                 person_first=settings.review_person_first,
+                                 consented_only=settings.review_consented_only)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
 
@@ -964,7 +1017,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         from assay import review, synth
         dims = [synth.Dimension(d.name, d.values) for d in body.dimensions]
         return synth.compare(engine, _tenant(source), reviewer(), dims, days, max(0, min(sample, 1000)),
-                             rt=review.runtime_for(settings), redact=settings.judge_redact)
+                             rt=review.runtime_for(settings), redact=settings.judge_redact,
+                             consented_only=settings.review_consented_only)
 
     @app.get("/v1/review/saturation", tags=["results"],
              summary="Whether new reviews still find new failure modes")
@@ -1077,7 +1131,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
               summary="Add a drafted case to a suite, with edits; for agents its reference is stored for evaluation")
     def learn_approve(candidate_id: int, body: ApproveIn, p: Principal = Depends(require("manage"))):
         check_source(p, body.source)
-        out = learn.approve(engine, body.source, candidate_id, body.suite, body.case, body.redact_pii, p.name)
+        out = learn.approve(engine, body.source, candidate_id, body.suite, body.case, body.redact_pii, p.name,
+                            stand_ins=body.stand_ins)
         if out is None:
             raise HTTPException(404, f"No candidate {candidate_id} in {body.source}.")
         return out

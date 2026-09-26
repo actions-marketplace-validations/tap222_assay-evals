@@ -147,6 +147,11 @@ measured on: `golden_examples(split="train", k=8)` returns them with their label
 and `assay calibrate` fails a judge that read dev or test (see
 [calibration](../../docs/calibration.md)).
 
+`assay.claim_review(run_id, claim, verdict, evidence=..., correction=..., by=...)` records an
+expert's decision on one claim (supported, wrong, a conflict between sources resolved), made while
+they use the product. A run tagged `consent="shared"` is one its user agreed to share. See
+[sensitive data](../../docs/sensitive.md).
+
 `with assay.tagged(origin="synthetic"):` gives every run started inside its tags, including runs
 the code opens itself; `assay synth run` uses it so generated traffic is never counted as
 production.

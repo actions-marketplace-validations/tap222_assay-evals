@@ -6,7 +6,9 @@ Every request is made by a *principal*: an API key bound to one tenant (or to
   ingest   send events (a pipeline's key)
   read     read results: dashboard, measures, alerts, traces, cost
   manage   run measures, backfill, set SLOs and rates, record gate decisions (includes read)
-  admin    create and revoke keys (includes everything)
+  admin    create and revoke keys (includes everything but sensitive)
+  sensitive  see production conversations unredacted in the Review tab, for a domain expert who is
+           allowed to; granted on its own, never implied, and every raw view is in the audit log
 
 A tenant key only ever sees its own tenant: its source is events:<tenant>,
 and a different X-Tenant header is refused. Keys are stored as SHA-256
@@ -33,8 +35,9 @@ from sqlalchemy.engine import Engine
 
 from assay import store
 
-SCOPES = ("ingest", "read", "manage", "admin")
-_IMPLIES = {"admin": set(SCOPES), "manage": {"manage", "read"}, "read": {"read"}, "ingest": {"ingest"}}
+SCOPES = ("ingest", "read", "manage", "admin", "sensitive")
+_IMPLIES = {"admin": set(SCOPES) - {"sensitive"}, "manage": {"manage", "read"}, "read": {"read"},
+            "ingest": {"ingest"}, "sensitive": {"sensitive"}}
 KEY_PREFIX = "ak_"
 
 
@@ -163,7 +166,8 @@ class Authenticator:
         u = sso.get_user(self.engine, v["uid"]) if v else None
         if u is None or u["disabled"]:
             return None
-        return Principal(u["tenant"], expand([u["role"]]), name=u["email"] or u["id"], mode="sso", user_id=u["id"])
+        return Principal(u["tenant"], expand([u["role"]] + (["sensitive"] if u.get("sensitive") else [])),
+                         name=u["email"] or u["id"], mode="sso", user_id=u["id"])
 
 
 class RateLimiter:

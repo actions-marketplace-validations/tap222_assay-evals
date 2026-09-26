@@ -426,7 +426,7 @@ def _place(judge, text: str, dims: List[Dimension]) -> Optional[Dict[str, Option
 
 
 def compare(engine, tenant: str, judge, dims: List[Dimension], days: float = 30, sample: int = 100,
-            rt=None, now: Optional[datetime] = None, redact: bool = True) -> dict:
+            rt=None, now: Optional[datetime] = None, redact: bool = True, consented_only: bool = False) -> dict:
     """Synthetic runs against production, on the same dimensions. Production conversations are placed
     on the dimensions by a model, once each (kept in synthetic_labels)."""
     import random
@@ -436,7 +436,7 @@ def compare(engine, tenant: str, judge, dims: List[Dimension], days: float = 30,
     now = now or datetime.utcnow()
     fp = fingerprint(dims)
     synth = review.synthetic(engine, tenant)
-    convs = review.conversations(engine, tenant, now - timedelta(days=days), now)
+    convs = review.conversations(engine, tenant, now - timedelta(days=days), now, consented_only)
     real = {c: runs for c, runs in convs.items() if not any(r["trajectory_id"] in synth for r in runs)}
     t = store.synthetic_labels
     with engine.connect() as conn:

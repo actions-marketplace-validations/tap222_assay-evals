@@ -14,6 +14,7 @@
 | [Failure analysis](failures.md) | Where a wrong answer started, failure causes, path contracts |
 | [The report](report.md) | What the evaluation found: issues caught before users saw them, failure modes, fixes, the log |
 | [Learning from production](learning.md) | Production failures become regression tests, with the whole trace |
+| [Sensitive data](sensitive.md) | Consented traces, experts with raw access, claim-level reviews, checking redaction and that edited traces still behave |
 | [Synthetic data](synthetic.md) | `assay synth`: dimensions, tuples, queries, runs through the app, kept apart from production and compared with it |
 | [Prompt versions](prompts.md) | The prompt registry, diffs, and results per version |
 | [Release gates](release-gates.md) | Advance, hold or roll back, and flaky checks that rerun instead of block |

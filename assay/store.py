@@ -245,6 +245,24 @@ agent_trajectories = Table(
     Column("turn", Integer),  # this run's place in it, from 0
     Column("user_id", String(128), index=True),  # who asked, pseudonymous: asking again elsewhere is a signal
     Column("origin", String(16)),  # synthetic: generated to test (assay synth), never counted as production
+    Column("consent", Boolean),  # the user agreed to share it: people without sensitive access may read it
+)
+
+# An expert's decision on one claim in an answer, made while using the product (assay_sdk.claim_review):
+# supported, wrong, or a conflict between sources resolved. Labels for the faithfulness judge, and a
+# failure signal for learn.py, finer than "was the answer helpful".
+claim_reviews = Table(
+    "claim_reviews", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("review_id", String(128), primary_key=True),
+    Column("run_id", String(128), nullable=False, index=True),
+    Column("claim", Text, nullable=False),
+    Column("verdict", String(24), nullable=False),  # supported | wrong | conflict_resolved | unsure
+    Column("evidence", JSON),  # the sources it was checked against: [{"id", "text" | "uri"}]
+    Column("correction", Text),  # what the claim should say
+    Column("by", String(128)),
+    Column("note", Text),
+    Column("ts", DateTime, nullable=False, index=True),
 )
 
 # Production conversations placed on the dimensions synthetic data was generated from (assay/synth.py),
@@ -379,6 +397,7 @@ users = Table(
     Column("tenant", String(64), nullable=False),
     Column("email", String(320)),
     Column("name", String(256)),
+    Column("sensitive", Boolean),  # may see raw conversations: in ASSAY_OIDC_SENSITIVE at their last sign-in
     Column("claims_role", String(16)),  # read | manage | admin, from the provider's claims at sign-in
     Column("role", String(16)),  # set by an admin; holds over the claims while it's set
     Column("disabled", Boolean, nullable=False, default=False),

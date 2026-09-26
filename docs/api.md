@@ -15,7 +15,8 @@ different `X-Tenant` header is refused. Scopes:
 | `ingest` | send events: give this to a pipeline |
 | `read` | dashboards, measures, alerts, traces, cost, coverage |
 | `manage` | everything in `read`, plus runs, backfill, SLOs, the rate card and release-gate decisions |
-| `admin` | everything, plus create and revoke that tenant's keys |
+| `admin` | everything but `sensitive`, plus create and revoke that tenant's keys |
+| `sensitive` | see production conversations unredacted in the Review tab (a domain expert allowed to); never implied by another scope, and every raw view is in the audit log. With SSO, `ASSAY_OIDC_SENSITIVE` lists the groups or emails that get it |
 
 A key with tenant `*` is a platform key: it sees every tenant and may pass `X-Tenant` to
 write on a tenant's behalf. Keys are stored as SHA-256 hashes, shown once at creation, and can
