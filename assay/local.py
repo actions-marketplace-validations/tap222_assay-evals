@@ -50,7 +50,8 @@ CHECK_NAMES = {"plan_quality": "Plan quality", "consistency": "Consistency", "co
                "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts",
                "plan": "Plan adherence", "injection": "Prompt injection", "max_fragments": "Fragments per query",
                "max_retrieved_tokens": "Retrieved tokens per query", "max_context_tokens": "Prompt size",
-               "faithfulness": "Faithfulness", "context_relevance": "Context relevance"}
+               "faithfulness": "Faithfulness", "context_relevance": "Context relevance",
+               "max_fixed_context_tokens": "Fixed context per call"}
 PII_EVALUATOR = "assay.pii@1"
 
 CONFIG_TEMPLATE = '''\
@@ -104,7 +105,8 @@ steps = 1.5
 suite = 1.25             # the whole run's totals: every query a little bigger adds up
 # max_fragments = 8          # limits, whatever the baseline: fragments per query,
 # max_retrieved_tokens = 3000  # tokens of fragments per query,
-# max_context_tokens = 8000    # and input per model call
+# max_context_tokens = 8000    # and input per model call,
+# max_fixed_context_tokens = 3000  # of which system prompt and tool definitions
 
 # Judge calibration: your judge against golden.jsonl, outputs a person scored (`assay calibrate`).
 # [calibrate]
@@ -510,7 +512,8 @@ def as_trajectory(steps: List[dict], answer: Optional[str]) -> dict:
                     {"uri": s.get("uri")} if resource else
                     {"steps": s.get("plan")} if kind == "plan" else
                     schema.retrieval_args(s.get("query"), s.get("fragments")) if kind == "retrieval" else s.get("args"),
-                    "tokens_in": s.get("tokens_in"), "tools": s.get("tools"),
+                    "tokens_in": s.get("tokens_in"), "tools": s.get("tools"), "context": s.get("context"),
+                    "media": s.get("media"), "settings": s.get("settings"),
                     "result": s.get("value") if state else s.get("fragments") if kind == "retrieval" else
                     s.get("result"), "error": s.get("error"),
                     "text": s.get("text"), "model": s.get("model"),
@@ -806,6 +809,7 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     out["surface"] = surface_shift(engine, tenant, rows, base_rows) if baseline else []
     out["kinds"] = failure_kinds(rows, base_rows)
     out["setup"] = setup_changes(engine, tenant, rows, base_rows) if baseline else {}
+    out["fixed_context"] = fixed_context(engine, tenant, rows, base_rows)
     return out
 
 
@@ -911,11 +915,12 @@ def _floor(f: dict) -> str:
 def _setups(engine, tenant: str, docs: List[str]) -> Dict[str, dict]:
     """Per run: the prompt versions its model calls used, the models, and the tools they were offered."""
     st = store.agent_steps
-    out: Dict[str, dict] = defaultdict(lambda: {"prompts": set(), "models": set(), "tools": set()})
+    out: Dict[str, dict] = defaultdict(lambda: {"prompts": set(), "models": set(), "tools": set(), "calls": []})
     ids = sorted({d for d in docs if d})
     with engine.connect() as conn:
         for i in range(0, len(ids), 500):
-            for r in conn.execute(select(st.c.trajectory_id, st.c.prompt, st.c.model, st.c.tools).where(
+            for r in conn.execute(select(st.c.trajectory_id, st.c.prompt, st.c.model, st.c.tools, st.c.context,
+                                         st.c.media, st.c.settings).where(
                     (st.c.tenant == tenant) & st.c.trajectory_id.in_(ids[i:i + 500]) & (st.c.kind == "reason"))):
                 s = out[r.trajectory_id]
                 if r.prompt:
@@ -923,6 +928,62 @@ def _setups(engine, tenant: str, docs: List[str]) -> Dict[str, dict]:
                 if r.model:
                     s["models"].add(r.model)
                 s["tools"] |= set(r.tools or [])
+                s["calls"].append({"context": r.context or {}, "media": r.media or {}, "settings": r.settings or {}})
+    return out
+
+
+def _inputs_of(calls: List[dict]) -> dict:
+    """A case's model calls, summed up: the median system prompt and tool definitions per call, the
+    media per call, and the settings most calls used."""
+    med = lambda k: median(c["context"].get(k) or 0 for c in calls) if calls else 0
+    per = [(c["media"].get("images") or 0) + (c["media"].get("videos") or 0) for c in calls]
+    common = lambda key: Counter(c["media"].get(key) for c in calls if c["media"].get(key)).most_common(1)
+    settings: Dict[str, Any] = {}
+    for k in sorted({k for c in calls for k in c["settings"]}):
+        vals = Counter(json.dumps(c["settings"].get(k)) for c in calls if k in c["settings"])
+        settings[k] = json.loads(vals.most_common(1)[0][0])
+    return {"system": med("system"), "tools": med("tools"), "known": any(c["context"] for c in calls),
+            "media": {"per_call": max(per, default=0), "size": (common("size") or [(None,)])[0][0],
+                      "detail": (common("detail") or [(None,)])[0][0]} if any(per) else None,
+            "settings": settings}
+
+
+def fixed_context(engine, tenant: str, rows: list, base_rows: list) -> Optional[dict]:
+    """The fixed context per model call, this run and its baseline: the system prompt and tool
+    definitions every call starts with, whatever it was asked. The input nobody measures."""
+    def of(rs):
+        docs = {r.document_id for r in rs if r.document_id}
+        calls = [c for s in _setups(engine, tenant, list(docs)).values() for c in s["calls"] if c["context"]]
+        if not calls:
+            return None
+        sys_ = median(c["context"].get("system") or 0 for c in calls)
+        tools = median(c["context"].get("tools") or 0 for c in calls)
+        return {"system": round(sys_), "tools": round(tools), "fixed": round(sys_ + tools), "calls": len(calls)}
+    now = of(rows)
+    return {"now": now, "before": of(base_rows) if base_rows else None} if now else None
+
+
+def fixed_context_text(f: dict) -> str:
+    n, b = f["now"], f.get("before")
+    line = f"{n['fixed']:,} tokens (system prompt {n['system']:,}, tool definitions {n['tools']:,})"
+    if b and b["fixed"] != n["fixed"]:
+        line += f", {b['fixed']:,} before ({n['fixed'] - b['fixed']:+,})"
+    return line
+
+
+def _input_changes(a: dict, b: dict) -> List[dict]:
+    out = []
+    if a["known"] and b["known"]:
+        parts = {k: (a[k], b[k]) for k in ("system", "tools")
+                 if abs(b[k] - a[k]) >= max(200, 0.2 * a[k]) and a[k] != b[k]}
+        if parts:
+            out.append({"what": "context", "parts": {k: [round(x), round(y)] for k, (x, y) in parts.items()}})
+    if a["settings"] and b["settings"] and a["settings"] != b["settings"]:
+        ch = {k: [a["settings"].get(k), b["settings"].get(k)] for k in sorted(a["settings"].keys() | b["settings"].keys())
+              if a["settings"].get(k) != b["settings"].get(k)}
+        out.append({"what": "settings", "changed": ch})
+    if (a["media"] or b["media"]) and a["media"] != b["media"]:
+        out.append({"what": "media", "before": a["media"], "now": b["media"]})
     return out
 
 
@@ -947,10 +1008,12 @@ def setup_changes(engine, tenant: str, rows: list, base_rows: list) -> dict:
 
     def union(ds):
         u = {"prompts": set(), "models": set(), "tools": set()}
+        calls = []
         for d in ds:
             for k in u:
                 u[k] |= setups[d][k] if d in setups else set()
-        return u
+            calls += setups[d]["calls"] if d in setups else []
+        return {**u, "inputs": _inputs_of(calls)}
     now = {c: union(ds) for c, ds in docs_now.items()}
     before = {c: union(ds) for c, ds in docs_before.items()}
     cases: Dict[str, List[dict]] = {}
@@ -967,6 +1030,7 @@ def setup_changes(engine, tenant: str, rows: list, base_rows: list) -> dict:
             ch.append({"what": "model", "before": sorted(a["models"]), "now": sorted(b["models"])})
         if a["tools"] != b["tools"]:
             ch.append({"what": "tools", "added": sorted(b["tools"] - a["tools"]), "removed": sorted(a["tools"] - b["tools"])})
+        ch += _input_changes(a["inputs"], b["inputs"])
         if ch:
             cases[c] = ch
     compared = [c for c in now.keys() & before.keys() if any(now[c].values()) and any(before[c].values())]
@@ -979,7 +1043,7 @@ def setup_changes(engine, tenant: str, rows: list, base_rows: list) -> dict:
         if x["what"] == "prompt" and len(x["before"]) == 1 and len(x["now"]) == 1 and "diff" not in x:
             x["diff"] = _prompt_diff(engine, tenant, x["id"], x["before"][0], x["now"][0])
     return {"cases": {c: chs for c, chs in cases.items() if chs}, "everywhere": everywhere,
-            "now": {c: {k: sorted(v) for k, v in s.items()} for c, s in now.items()}}
+            "now": {c: {k: sorted(v) for k, v in s.items() if k != "inputs"} for c, s in now.items()}}
 
 
 def _prompt_diff(engine, tenant: str, pid: str, a: str, b: str) -> Optional[dict]:
@@ -1008,6 +1072,20 @@ def change_text(x: dict) -> str:
         return f"prompt  {was} → {now}{tail}"
     if x["what"] == "model":
         return f"model   {', '.join(x['before'])} → {', '.join(x['now'])}"
+    if x["what"] == "context":
+        names = {"system": "system prompt", "tools": "tool definitions"}
+        return "context " + "; ".join(f"{names[k]} {a:,} → {b:,} tokens ({b - a:+,})" for k, (a, b) in x["parts"].items()) \
+            + " per call"
+    if x["what"] == "settings":
+        return "settings " + ", ".join(f"{k} {a if a is not None else '(unset)'} → {b if b is not None else '(unset)'}"
+                                        for k, (a, b) in x["changed"].items())
+    if x["what"] == "media":
+        def m(v):
+            if not v:
+                return "none"
+            return f"{v['per_call']} per call" + (f" at {v['size']}" if v.get("size") else "") + \
+                (f", detail {v['detail']}" if v.get("detail") else "")
+        return f"media   {m(x['before'])} → {m(x['now'])}"
     parts = ([f"+{t}" for t in x["added"]] + [f"−{t}" for t in x["removed"]])
     return f"tools   offered {' '.join(parts)}"
 
@@ -1812,6 +1890,8 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         out += [f"> {_md(x['text'])}", ""]
     if result.get("kinds"):
         out += [f"**Failures by kind:** {_md(kinds_text(result['kinds']))}", ""]
+    if result.get("fixed_context"):
+        out += [f"**Fixed context per call:** {_md(fixed_context_text(result['fixed_context']))}", ""]
     setup = result.get("setup") or {}
     if setup.get("everywhere"):
         out += ["**Changed in every case:** " + "; ".join(_md(change_text(x)) for x in setup["everywhere"]), ""]
@@ -1883,6 +1963,8 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
         out.append(line)
     out.append("")
     out += trust_block
+    if result.get("fixed_context"):
+        out += [_paint("Fixed context per call", "bold"), f"  {fixed_context_text(result['fixed_context'])}", ""]
     if result.get("kinds"):
         out += [_paint("Failures by kind", "bold"), f"  {kinds_text(result['kinds'])}", ""]
     problems = c["problems"]

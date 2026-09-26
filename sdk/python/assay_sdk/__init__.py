@@ -307,11 +307,15 @@ class Run:
             started: Optional[datetime] = None, ended: Optional[datetime] = None, error: Optional[str] = None,
             tools: Optional[List[Any]] = None, name: Optional[str] = None, finish_reason: Optional[str] = None,
             tool_calls: Optional[List[dict]] = None, tokens_cached: Optional[int] = None,
-            tokens_reasoning: Optional[int] = None) -> None:
+            tokens_reasoning: Optional[int] = None, context: Optional[Dict[str, int]] = None,
+            media: Optional[Dict[str, Any]] = None, settings: Optional[Dict[str, Any]] = None) -> None:
         """A model call. prompt is "id@version"; text is the output (or a summary of it); tools are the
         tools the model was offered (names, or the tool definitions you passed the model). name: the
         step it belongs to, for a pipeline (the calls of a step are its cost and its models). Without
-        cost_usd, the cost comes from ASSAY_PRICES ([prices] in assay.toml) when the model has one."""
+        cost_usd, the cost comes from ASSAY_PRICES ([prices] in assay.toml) when the model has one.
+        context: what the input was made of, in tokens ({"system", "tools", "history", "user",
+        "retrieved"}); media: images and video ({"images", "videos", "bytes", "size", "detail"});
+        settings: temperature, max_tokens, reasoning effort, ... assay.instrument() fills all three."""
         if cost_usd is None and model and (tokens_in or tokens_out):
             from assay_sdk.runtime import env_prices, price_of
             p = price_of(env_prices(), model)
@@ -320,7 +324,8 @@ class Run:
         self._step("llm", started, name=name, finish_reason=finish_reason, tool_calls=self._c.clean(tool_calls),
                    tokens_cached=tokens_cached, tokens_reasoning=tokens_reasoning, model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
                    prompt=prompt, text=self._c.clean(text), ended_at=_ts(ended),
-                   status="error" if error else "ok", error=error, tools=_tool_names(tools))
+                   status="error" if error else "ok", error=error, tools=_tool_names(tools),
+                   context=context, media=media, settings=settings)
 
     def approval(self, action: str, decision: str = "approved", by: Optional[str] = None,
                  reason: Optional[str] = None) -> None:

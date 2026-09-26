@@ -228,7 +228,7 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
             "judge_changed": [{"name": local._short(p["case_id"]), "field": p["field"], "before": p["before"],
                                "now": p["now"]} for p in c.get("judge_changed") or []],
             "models": result.get("models") or {}, "surface": result.get("surface") or [],
-            "kinds": result.get("kinds") or {},
+            "kinds": result.get("kinds") or {}, "fixed_context": result.get("fixed_context"),
             "everywhere": [local.change_text(x) for x in (result.get("setup") or {}).get("everywhere") or []],
             "blame": local.blame(result.get("setup") or {}, list(b["regressed"])),
             "totals": [{**x, "most": [{**m, "name": local._short(m["case_id"])} for m in x["most"]]}
@@ -278,6 +278,9 @@ def text(d: dict) -> str:
                                  (k.get("judge_changed", 0), "?", "judged by a new judge, not compared", "yellow")):
         if n or word in ("unchanged", "regressed"):
             out.append(f"{paint(mark, color)} {n} {word}")
+    if d.get("fixed_context"):
+        from assay.local import fixed_context_text
+        out += ["", paint("FIXED CONTEXT PER CALL", "bold"), "", f"  {fixed_context_text(d['fixed_context'])}"]
     if d.get("everywhere"):
         out += ["", paint("CHANGED IN EVERY CASE", "bold"), ""] + [f"  {x}" for x in d["everywhere"]]
     for title, items in (("REGRESSIONS", d["regressions"]), ("NEW FAILING", d["new_failures"]),

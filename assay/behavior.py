@@ -9,6 +9,8 @@ what it was asked, or decide differently about something that needs approval. Pe
   steps           model calls, tool calls, state changes, approvals and the answer
   context_tokens  the largest input any model call got: how big the context grew
   input_tokens    all the input the run's model calls got: what the bill counts
+  fixed_context_tokens  the most fixed context one call started with: its system prompt and tool
+                  definitions, paid whatever was asked (assay_sdk/inputs.py)
   fragments       the most retrieved fragments one query put into the prompt (run.retrieve())
   retrieved_tokens  the most tokens of fragments one query put into the prompt, with their share
                   of the prompt that took them
@@ -37,21 +39,25 @@ NUMBERS = {  # name: (default ratio, minimum increase, how to show a value)
     "steps": (1.5, 2, lambda v: f"{v:g} steps"),
     "context_tokens": (1.5, 500, lambda v: f"{v:,.0f} tokens"),
     "input_tokens": (1.5, 500, lambda v: f"{v:,.0f} tokens"),
+    "fixed_context_tokens": (1.25, 200, lambda v: f"{v:,.0f} tokens"),
     "fragments": (1.5, 2, lambda v: f"{v:g} fragments"),
     "retrieved_tokens": (1.5, 200, lambda v: f"{v:,.0f} tokens"),
     "tools_exposed": (1.5, 2, lambda v: f"{v:g} tools"),
 }
 LABELS = {"cost_usd": "Cost", "seconds": "Latency", "steps": "Steps", "context_tokens": "Context",
-          "input_tokens": "Input tokens", "fragments": "Retrieved fragments", "retrieved_tokens": "Retrieved tokens",
+          "input_tokens": "Input tokens", "fixed_context_tokens": "Fixed context", "fragments": "Retrieved fragments",
+          "retrieved_tokens": "Retrieved tokens",
           "tools_exposed": "Tools exposed", "outcome": "Outcome", "approvals": "Approval"}
 SUITE = {  # whole-run totals: (minimum increase, how to show)
     "input_tokens": (1000, lambda v: f"{v:,.0f}"),
     "cost_usd": (0.01, lambda v: f"${v:,.2f}"),
     "retrieved_tokens": (500, lambda v: f"{v:,.0f}"),
+    "fixed_input_tokens": (1000, lambda v: f"{v:,.0f}"),
 }
-SUITE_LABELS = {"input_tokens": "Input tokens", "cost_usd": "Cost", "retrieved_tokens": "Retrieved tokens"}
+SUITE_LABELS = {"input_tokens": "Input tokens", "cost_usd": "Cost", "retrieved_tokens": "Retrieved tokens",
+                "fixed_input_tokens": "Fixed context (system prompts and tool definitions)"}
 SUITE_RATIO = 1.25
-LIMITS = ("max_fragments", "max_retrieved_tokens", "max_context_tokens")
+LIMITS = ("max_fragments", "max_retrieved_tokens", "max_context_tokens", "max_fixed_context_tokens")
 LIMIT_EVALUATOR = "assay.limits@1"
 WORSE_OUTCOME = {"unresolved", "escalated"}
 
@@ -74,6 +80,8 @@ def measure(traj: dict) -> dict:
         "context_tokens": max((s.get("tokens_in") or 0 for s in calls), default=0) or None,
         "tools_exposed": max((len(s.get("tools") or []) for s in calls), default=0) or None,
         "input_tokens": sum(s.get("tokens_in") or 0 for s in calls) or None,
+        "fixed_context_tokens": max((_fixed(s) for s in calls), default=0) or None,
+        "fixed_input_tokens": sum(_fixed(s) for s in calls) or None,
         "fragments": max(((s.get("args") or {}).get("used") or 0 for s in rets), default=None) if rets else None,
         "retrieved_tokens": ((biggest.get("args") or {}).get("tokens_used") or 0) if biggest else None,
         "context_share": _share(steps, biggest),
@@ -81,6 +89,11 @@ def measure(traj: dict) -> dict:
         "outcome": traj.get("outcome"),
         "approvals": approvals or None,
     }
+
+
+def _fixed(s: dict) -> int:
+    c = s.get("context") or {}
+    return (c.get("system") or 0) + (c.get("tools") or 0)
 
 
 def _share(steps: List[dict], ret: Optional[dict]) -> Optional[float]:
@@ -98,6 +111,8 @@ def combine(runs: List[dict]) -> dict:
     for k in NUMBERS:
         vals = [r[k] for r in runs if r.get(k) is not None]
         out[k] = median(vals) if vals else None
+    fixed = [r["fixed_input_tokens"] for r in runs if r.get("fixed_input_tokens") is not None]
+    out["fixed_input_tokens"] = median(fixed) if fixed else None
     shares = [r["context_share"] for r in runs if r.get("context_share") is not None]
     out["context_share"] = median(shares) if shares else None
     names = [r["retriever"] for r in runs if r.get("retriever")]
@@ -191,7 +206,11 @@ def limits(traj: dict, cfg: Dict[str, Optional[float]]) -> List[dict]:
              lambda s, v, n: f"{s.get('name') or 'retrieval'} (step {s['seq']}) put {v:,} tokens of fragments in "
                              f"the prompt"),
             ("max_context_tokens", calls, lambda s: s.get("tokens_in") or 0,
-             lambda s, v, n: f"the model call at step {s['seq']} got {v:,} tokens of input")):
+             lambda s, v, n: f"the model call at step {s['seq']} got {v:,} tokens of input"),
+            ("max_fixed_context_tokens", [s for s in steps if s["kind"] == "reason" and s.get("context")], _fixed,
+             lambda s, v, n: f"the model call at step {s['seq']} started with {v:,} tokens of fixed context "
+                             f"(system prompt {(s['context'].get('system') or 0):,}, tool definitions "
+                             f"{(s['context'].get('tools') or 0):,})")):
         limit = cfg.get(key)
         if limit is None or not pool:
             continue

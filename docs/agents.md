@@ -277,6 +277,42 @@ the ratios (0 turns one off), and `fail = false` only reports it. With repeats, 
 is the median of its attempts. The `requires_approval` contract puts an approval rule in
 `assay.toml` instead of in every test.
 
+### The input side: what went in before the model did anything
+
+A system prompt that quietly grew 3,000 tokens, tool definitions that doubled, half as many video
+frames: output metrics move, and nothing traces the move back to its cause. So every model call
+records what its input was made of. `assay.instrument()` reads it from the request (Anthropic,
+OpenAI chat and Responses, Gemini, Ollama, LiteLLM); `run.llm(context=, media=, settings=)` takes
+it for calls it didn't see:
+
+| Recorded | What |
+|---|---|
+| `context` | tokens by part, estimated from the text: `system` (the system prompt and standing instructions), `tools` (tool definitions), `history`, `user`, `retrieved` |
+| `media` | images and video: how many, their bytes, their size (read from the image's own header when it's inline), `detail` |
+| `settings` | temperature, top_p, max tokens, reasoning effort, thinking, seed |
+
+**Fixed context** is the system prompt plus the tool definitions: paid on every call, whatever was
+asked, and usually the cheapest input to trim. The report says what it is and how it moved:
+
+```
+Fixed context per call
+  4,700 tokens (system prompt 4,300, tool definitions 400), 1,600 before (+3,100)
+```
+
+A case whose fixed context grew 1.25× (and by 200 tokens) behaved worse, the whole run's fixed
+context is a total like input tokens and cost, and `[behavior] max_fixed_context_tokens` is a
+limit. Next to a regression, the input that moved is listed with the prompt and model:
+
+```
+   Changed around it:
+     context system prompt 1,200 → 4,300 tokens (+3,100) per call
+     media   8 per call at 1280x720 → 4 per call at 1920x1080
+     settings temperature 0.2 → 0.7
+```
+
+So a faithfulness dip that's really "someone added 40 lines to the instructions" says so, and
+two setups with the same model but a different frame sampling are told apart.
+
 ### Faithfulness: is the answer backed by what was retrieved?
 
 A judge that reads only the final answer scores fluency. A RAG system that retrieves the wrong

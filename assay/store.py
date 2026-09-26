@@ -296,6 +296,9 @@ agent_steps = Table(
     Column("tool_calls", JSON),  # the tool calls a model asked for: [{"name", "arguments", "id"}]
     Column("tokens_cached", Integer),
     Column("tokens_reasoning", Integer),
+    Column("context", JSON),  # a model call's input by part, in tokens: system, tools, history, user, retrieved
+    Column("media", JSON),  # its images and video: count, bytes, size, detail
+    Column("settings", JSON),  # temperature, max tokens, reasoning effort, ...
 )
 
 # People who sign in with SSO (assay/sso.py), and every change anyone made.

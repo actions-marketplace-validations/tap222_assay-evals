@@ -29,7 +29,8 @@ def test_measure_and_what_counts_as_worse():
                                                           "args": {"decision": "approved"}}]))
     assert before == {"cost_usd": 0.004, "seconds": 2.0, "steps": 2, "context_tokens": 1200, "tools_exposed": 8,
                       "outcome": "resolved", "approvals": {"refund": "approved"}, "input_tokens": 1200,
-                      "fragments": None, "retrieved_tokens": None, "context_share": None, "retriever": None}
+                      "fragments": None, "retrieved_tokens": None, "context_share": None, "retriever": None,
+                      "fixed_context_tokens": None, "fixed_input_tokens": None}
     same = behavior.measure(traj([llm(1300, 0.0045, 9), {"kind": "approval", "name": "refund",
                                                          "args": {"decision": "approved"}}], seconds=2.4))
     assert behavior.compare(same, before) == []  # small moves aren't news

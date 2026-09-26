@@ -276,6 +276,11 @@ The run failed Assay's checks:
 .must_get_approval_before("refund").max_cost(0.05).max_latency(8).max_tools_exposed(10)
 .max_context_tokens(8000).must_resolve()`.
 
+Each model call also records what its input was made of: the system prompt, tool definitions,
+history and user message in tokens, images and video (count, bytes, size), and settings
+(temperature, max tokens, reasoning effort). `assay.instrument()` reads them from the request;
+`run.llm(context=, media=, settings=)` takes them otherwise.
+
 What retrieval put into the prompt is recorded with `run.retrieve(query, docs, used=4)`: the
 fragments (text, dicts, LangChain Documents, LlamaIndex nodes), their tokens, and which went into
 the prompt. `assay.instrument()` records LangChain and LlamaIndex retrievers on its own.

@@ -21,8 +21,10 @@ check's reason, and a severity:
 
 **What changed around it.** Output being different isn't a reason. So each regression also says
 what changed in what it ran, against its baseline run: the prompt versions its model calls used
-(with the text's diff, when both versions were registered), the models, and the tools the model
-was offered:
+(with the text's diff, when both versions were registered), the models, the tools the model
+was offered, and the input side: the system prompt's and tool definitions' size per call, the
+media per call (frames, resolution, detail), and settings such as temperature
+([The input side](agents.md#the-input-side-what-went-in-before-the-model-did-anything)):
 
 ```
 1. refund_flow

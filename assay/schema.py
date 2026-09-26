@@ -97,6 +97,12 @@ class Step(_E):
                                                                                           "model asked for")
     tokens_cached: Optional[int] = Field(None, ge=0)
     tokens_reasoning: Optional[int] = Field(None, ge=0)
+    context: Optional[Dict[str, int]] = Field(None, description='llm: what the input was made of, in tokens: '
+                                              '{"system", "tools", "history", "user", "retrieved"}')
+    media: Optional[Dict[str, Any]] = Field(None, description='llm: images and video: {"images", "videos", "bytes", '
+                                            '"size", "detail"}')
+    settings: Optional[Dict[str, Union[str, int, float, bool]]] = Field(
+        None, description="llm: temperature, max_tokens, reasoning effort, ...")
     # tool; mcp_prompt: args are the prompt's arguments, result the messages it returned
     args: Optional[Dict[str, Any]] = None
     result: Optional[Any] = None
@@ -148,14 +154,15 @@ class Step(_E):
     @model_validator(mode="after")
     def _kind_fields(self):
         allowed = {"llm": {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "tools", "finish_reason",
-                           "tool_calls", "tokens_cached", "tokens_reasoning"},
+                           "tool_calls", "tokens_cached", "tokens_reasoning", "context", "media", "settings"},
                    "tool": {"args", "result", "server"}, "state": {"op", "value"}, "answer": {"text"},
                    "stage": {"outputs", "did_work", "prompt"}, "approval": {"decision", "by", "text"},
                    "resource": {"uri", "result", "server"}, "mcp_prompt": {"args", "result", "server"},
                    "plan": {"plan", "text"}, "retrieval": {"query", "fragments", "server"}}[self.kind]
         specific = {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "args", "result", "op",
                     "value", "outputs", "did_work", "tools", "decision", "by", "server", "uri", "plan",
-                    "finish_reason", "tool_calls", "tokens_cached", "tokens_reasoning", "query", "fragments"}
+                    "finish_reason", "tool_calls", "tokens_cached", "tokens_reasoning", "query", "fragments",
+                    "context", "media", "settings"}
         wrong = [f for f in specific - allowed if getattr(self, f) is not None]
         if wrong:
             raise ValueError(f"a {self.kind} step doesn't take {', '.join(sorted(wrong))}")
@@ -371,7 +378,8 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                         retrieval_args(e.query, e.fragments) if e.kind == "retrieval" else e.args, "server": e.server,
                         "tokens_in": e.tokens_in, "tokens_out": e.tokens_out, "prompt": e.prompt, "tools": e.tools,
                         "finish_reason": e.finish_reason, "tool_calls": e.tool_calls, "tokens_cached": e.tokens_cached,
-                        "tokens_reasoning": e.tokens_reasoning,
+                        "tokens_reasoning": e.tokens_reasoning, "context": e.context, "media": e.media,
+                        "settings": e.settings,
                         "result": e.value if e.kind == "state" else e.fragments if e.kind == "retrieval" else e.result,
                         "error": e.error if e.status == "error" else None, "text": e.text, "model": e.model,
                         "tokens": tokens or None, "cost_usd": e.cost_usd, "started_at": e.ts,

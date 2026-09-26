@@ -228,7 +228,12 @@ def _reading(provider: str):
         if r.model is None and kwargs.get("model"):
             r.model = kwargs["model"]
         prices = env_prices()
-        return {"model": r.model, "tokens_in": r.usage.get("input"),
+        from assay_sdk.inputs import describe
+        try:
+            inputs = describe(provider, kwargs)  # what went in: never allowed to break the call's record
+        except Exception:
+            inputs = {}
+        return {**{k: v for k, v in inputs.items() if v}, "model": r.model, "tokens_in": r.usage.get("input"),
                 "cost_usd": cost_of(r, prices) if (prices or r.cost is not None) else None,
                 "tokens_out": r.usage.get("output"), "tokens_cached": r.usage.get("cached"),
                 "tokens_reasoning": r.usage.get("reasoning"), "text": (r.text or "")[:MAX_TEXT] or None,
