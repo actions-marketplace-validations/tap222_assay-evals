@@ -172,8 +172,10 @@ def ensure_home(root: Path) -> Path:
     return home
 
 
-def load_config(root: Path) -> dict:
-    path = root / CONFIG
+def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) -> dict:
+    """assay.toml, checked. With ASSAY_POLICY set (CI, on a pull request), its checks are held to
+    that trusted copy's: see with_trusted_policy."""
+    path = path or root / CONFIG
     if not path.exists():
         raise SetupError(f"No {CONFIG} here. Run `assay init` first.")
     try:
@@ -195,13 +197,130 @@ def load_config(root: Path) -> dict:
     for tool, allowed in allow.items():
         if not isinstance(allowed, list) or set(allowed) - kinds:
             raise SetupError(f"{CONFIG}, [pii] allow.{tool}: a list of kinds from {', '.join(learn.PII)}.")
-    return {"command": test.get("command"), "repeat": int(test.get("repeat", 1)),
+    out = {"command": test.get("command"), "repeat": int(test.get("repeat", 1)),
             "timeout": float(test["timeout"]) if test.get("timeout") else None,
             "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
             "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()},
                     "answers": bool(pii.get("answers", True)), "answer_allow": set(answer_allow)},
             "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
             "behavior": _behavior_config(cfg.get("behavior") or {}), "judge": _judge_config(cfg.get("judge") or {})}
+    return with_trusted_policy(out) if policy else out
+
+
+# ---------- trusted policy: a pull request can't loosen the checks that judge it ----------
+#
+# On a pull request, assay.toml comes from the PR, so the PR could delete the contract its own
+# change breaks, or turn the PII check off, and pass. In CI (the GitHub Action), ASSAY_POLICY is
+# the base branch's assay.toml: the checks (contracts, [pii], [behavior], [pytest] checks,
+# tolerance) are held to it. The PR can tighten them; loosening them is reported and fails the
+# run, unless ASSAY_POLICY_CHANGE=accepted (the action sets it from a PR label), which runs the
+# PR's own checks. How the tests run (command, repeat, timeout, judge) stays the PR's.
+
+POLICY_ENV, POLICY_ACCEPT_ENV = "ASSAY_POLICY", "ASSAY_POLICY_CHANGE"
+
+
+def _ratio(cfg: dict, key: str) -> float:
+    return cfg["behavior"]["ratios"].get(key, behavior.NUMBERS[key][0])
+
+
+def _looser_ratio(a: float, b: float) -> bool:
+    """b lets more through than a (0 turns a check off)."""
+    return (b == 0 and a != 0) or (a != 0 and b > a)
+
+
+def _stricter_ratio(a: float, b: float) -> float:
+    return b if a == 0 else a if b == 0 else min(a, b)
+
+
+def policy_changes(base: dict, pr: dict) -> List[dict]:
+    """How a PR's checks differ from the trusted ones: [{"text", "weakens"}]."""
+    out = []
+    add = lambda text, weakens: out.append({"text": text, "weakens": weakens})
+    key = lambda c: json.dumps(c, sort_keys=True, default=str)
+    was, now = {key(c): c for c in base["contracts"]}, {key(c): c for c in pr["contracts"]}
+    for k in was.keys() - now.keys():
+        add(f"removes the contract “{contracts.describe(was[k])}”", True)
+    for k in now.keys() - was.keys():
+        add(f"adds the contract “{contracts.describe(now[k])}”", False)
+    bp, pp = base["pii"], pr["pii"]
+    if bp["check"] != pp["check"]:
+        add("turns the PII check off" if bp["check"] else "turns the PII check on", bp["check"])
+    if bp.get("answers", True) != pp.get("answers", True):
+        add("stops checking answers for personal data" if bp.get("answers", True) else
+            "checks answers for personal data", bp.get("answers", True))
+    for tool in sorted(set(bp["allow"]) | set(pp["allow"])):
+        more, less = pp["allow"].get(tool, set()) - bp["allow"].get(tool, set()), \
+            bp["allow"].get(tool, set()) - pp["allow"].get(tool, set())
+        if more:
+            add(f"lets {tool} receive {', '.join(sorted(more))}", True)
+        if less:
+            add(f"no longer lets {tool} receive {', '.join(sorted(less))}", False)
+    more = set(pp.get("answer_allow") or ()) - set(bp.get("answer_allow") or ())
+    if more:
+        add(f"allows {', '.join(sorted(more))} in answers", True)
+    if base["pytest"]["checks"] != pr["pytest"]["checks"]:
+        add("stops failing tests on Assay's checks ([pytest] checks = false)" if base["pytest"]["checks"] else
+            "fails tests on Assay's checks", base["pytest"]["checks"])
+    if base["behavior"]["fail"] != pr["behavior"]["fail"]:
+        add("stops failing on behavior regressions ([behavior] fail = false)" if base["behavior"]["fail"] else
+            "fails on behavior regressions", base["behavior"]["fail"])
+    for k in behavior.NUMBERS:
+        a, b = _ratio(base, k), _ratio(pr, k)
+        if a != b:
+            what = behavior.LABELS.get(k, k)
+            add(f"turns the {what.lower()} regression check off" if b == 0 else
+                f"lets {what.lower()} grow {b:g}x over the baseline, not {a:g}x" if a else
+                f"checks {what.lower()} against the baseline ({b:g}x)", _looser_ratio(a, b))
+    if pr["tolerance"] != base["tolerance"]:
+        add(f"raises the tolerated pass-rate drop from {base['tolerance']:g} to {pr['tolerance']:g}"
+            if pr["tolerance"] > base["tolerance"] else
+            f"lowers the tolerated pass-rate drop to {pr['tolerance']:g}", pr["tolerance"] > base["tolerance"])
+    return out
+
+
+def strictest(base: dict, pr: dict) -> dict:
+    """The PR's config, with each check at the stricter of the two: its additions count, its
+    removals don't."""
+    key = lambda c: json.dumps(c, sort_keys=True, default=str)
+    rules = list({key(c): c for c in [*base["contracts"], *pr["contracts"]]}.values())
+    bp, pp = base["pii"], pr["pii"]
+    pii = {"check": bp["check"] or pp["check"], "answers": bp.get("answers", True) or pp.get("answers", True),
+           "allow": {t: bp["allow"][t] & pp["allow"][t] for t in bp["allow"].keys() & pp["allow"].keys()},
+           "answer_allow": set(bp.get("answer_allow") or ()) & set(pp.get("answer_allow") or ())}
+    ratios = {k: _stricter_ratio(_ratio(base, k), _ratio(pr, k)) for k in behavior.NUMBERS}
+    return {**pr, "contracts": rules, "pii": pii, "tolerance": min(base["tolerance"], pr["tolerance"]),
+            "pytest": {**pr["pytest"], "checks": base["pytest"]["checks"] or pr["pytest"]["checks"]},
+            "behavior": {"fail": base["behavior"]["fail"] or pr["behavior"]["fail"], "ratios": ratios}}
+
+
+def with_trusted_policy(cfg: dict) -> dict:
+    """cfg held to the trusted policy in ASSAY_POLICY, with cfg["policy"] saying what differed."""
+    path = os.environ.get(POLICY_ENV)
+    if not path:
+        return cfg
+    if not Path(path).exists():  # the base branch has no assay.toml yet: this PR sets Assay up
+        return {**cfg, "policy": {"trusted": None, "changes": [], "accepted": False, "weakened": False}}
+    trusted = load_config(Path(path).parent, Path(path), policy=False)
+    changes = policy_changes(trusted, cfg)
+    accepted = os.environ.get(POLICY_ACCEPT_ENV) == "accepted"
+    weakened = any(c["weakens"] for c in changes)
+    out = cfg if accepted else strictest(trusted, cfg)
+    return {**out, "policy": {"trusted": path, "changes": changes, "accepted": accepted,
+                              "weakened": weakened and not accepted}}
+
+
+def policy_lines(policy: Optional[dict]) -> List[str]:
+    """The policy section of the report, if the PR changed the checks."""
+    if not policy or not policy["changes"]:
+        return []
+    if policy["weakened"]:
+        head = ("This PR loosens the checks that judge it, so they're held to the base branch's. To make the "
+                "change, add the assay-policy-change label (ASSAY_POLICY_CHANGE=accepted):")
+    elif policy["accepted"]:
+        head = "This PR changes the checks, and the change is accepted: its own checks are used."
+    else:
+        head = "This PR tightens the checks; they apply to this run:"
+    return [head, *(f"  {'- ' if c['weakens'] else '+ '}{c['text']}" for c in policy["changes"])]
 
 
 def _judge_config(j: dict) -> dict:
@@ -868,7 +987,13 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
                 f["passed"] / f["total"] < f["base_passed"] / f["base_total"]:
             changes.append(f"- {_code(f['label'])} accuracy {_pct(f['base_passed'], f['base_total'])} → "
                            f"{_pct(f['passed'], f['total'])}")
-    out = [MARKER, f"## {HEADLINES.get(code, 'AI regression detected')}", "", " · ".join(counts), ""]
+    policy = result.get("policy")
+    head = "Checks weakened: this PR loosens the checks that judge it" if policy and policy["weakened"] else \
+        HEADLINES.get(code, "AI regression detected")
+    out = [MARKER, f"## {head}", "", " · ".join(counts), ""]
+    if policy and policy["changes"]:
+        out += [f"**{'Policy changes (not applied: add the `assay-policy-change` label to accept them)' if policy['weakened'] else 'Policy changes (accepted)' if policy['accepted'] else 'Policy changes (applied)'}**",
+                "", *(f"- {'loosens' if c['weakens'] else 'tightens'}: {_md(c['text'])}" for c in policy["changes"]), ""]
     if changes:
         out += [f"**{_n(len(changes), 'change')} in behavior**", "", *changes[:30], ""]
         if len(changes) > 30:
@@ -1099,9 +1224,18 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
         write_junit(junit, run_id, result, verdict(result, bool(baseline))[1])
     state["last"] = run_id
     inconclusive = passed and bool(result["not_judged"])
+    baseline_before = dict(state.get("baseline_cases") or {})
     if passed and not inconclusive:
         state["baseline_cases"] = {**(state.get("baseline_cases") or {}), **{c: run_id for c in promote(engine, run_id)}}
     code = 1 if not passed else 3 if inconclusive else 0
+    policy = cfg.get("policy")
+    if policy_lines(policy):
+        text += "\n\n" + _paint("\n".join(policy_lines(policy)), "yellow" if policy["weakened"] else "dim")
+    if policy and policy["weakened"]:  # loosening the gate needs a person to say so
+        code = 1
+        if passed:
+            state["baseline_cases"] = baseline_before
+    result["policy"] = policy
     # What's left to rerun (`--failed`): everything that didn't simply pass.
     state["rerun"] = sorted(set().union(*(v for k, v in result["summary"]["buckets"].items() if k != "passed")))
     _save_state(home, state)

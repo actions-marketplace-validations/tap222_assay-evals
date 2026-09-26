@@ -27,6 +27,18 @@ inputs:
   token:
     description: "For the PR comment: needs `pull-requests: write`."
     default: ${{ github.token }}
+  trusted-policy:
+    description: >-
+      On a pull request, hold the checks (contracts, [pii], [behavior], tolerance) to the base
+      branch's assay.toml, so a PR can't loosen the checks that judge it. Loosening them fails
+      the run unless the PR has the policy-label.
+    default: "true"
+  config:
+    description: Where assay.toml is, from the repository root.
+    default: assay.toml
+  policy-label:
+    description: The PR label that accepts a change that loosens the checks.
+    default: assay-policy-change
 
 outputs:
   result:
@@ -36,6 +48,31 @@ outputs:
 runs:
   using: composite
   steps:
+    # pull_request_target runs with a write token and the repository's secrets. Checking out and
+    # running a PR's code there hands both to whoever opened the PR.
+    - if: github.event_name == 'pull_request_target'
+      shell: bash
+      run: |
+        echo "::error::Don't run Assay under pull_request_target: it would run the PR's code with write access and secrets. Use pull_request."
+        exit 1
+
+    # The checks come from the base branch, not the PR (see trusted-policy).
+    - if: github.event_name == 'pull_request' && inputs.trusted-policy == 'true'
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+        CONFIG: ${{ inputs.config }}
+        ACCEPTED: ${{ contains(github.event.pull_request.labels.*.name, inputs.policy-label) }}
+      run: |
+        git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF" >/dev/null 2>&1 || true
+        if git show "FETCH_HEAD:$CONFIG" > "$RUNNER_TEMP/assay.base.toml" 2>/dev/null; then
+          echo "ASSAY_POLICY=$RUNNER_TEMP/assay.base.toml" >> "$GITHUB_ENV"
+        else
+          echo "::notice::No $CONFIG on $BASE_REF yet: this PR's checks are used as they are."
+          echo "ASSAY_POLICY=$RUNNER_TEMP/assay.none.toml" >> "$GITHUB_ENV"
+        fi
+        if [ "$ACCEPTED" = "true" ]; then echo "ASSAY_POLICY_CHANGE=accepted" >> "$GITHUB_ENV"; fi
+
     # Baselines live in .assay/, which isn't in git. The default branch saves them to the cache;
     # a pull request restores its base branch's latest, so it's compared with what's on main.
     - uses: actions/cache/restore@v4

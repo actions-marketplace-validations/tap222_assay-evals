@@ -145,11 +145,16 @@ def test_the_github_action_is_well_formed():
     action = yaml.safe_load((Path(REPO) / "action.yml").read_text())
     steps = action["runs"]["steps"]
     assert action["runs"]["using"] == "composite"
-    assert steps[0]["uses"].startswith("actions/cache/restore") and steps[-2]["uses"].startswith("actions/cache/save")
-    assert "github.base_ref" in steps[0]["with"]["restore-keys"]  # a PR restores its base branch's baseline
+    restore = next(s for s in steps if s.get("uses", "").startswith("actions/cache/restore"))
+    assert steps[-2]["uses"].startswith("actions/cache/save")
+    assert "github.base_ref" in restore["with"]["restore-keys"]  # a PR restores its base branch's baseline
     assert "assay pr-comment" in next(s["run"] for s in steps if "pr-comment" in s.get("run", ""))
+    guard = steps[0]  # never with a write token and secrets on a PR's code
+    assert guard["if"] == "github.event_name == 'pull_request_target'" and "exit 1" in guard["run"]
+    policy = next(s for s in steps if "ASSAY_POLICY=" in s.get("run", ""))
+    assert "${{" not in policy["run"]  # values reach the script as variables, never spliced into it
     # the exit-code mapping in the test step matches assay's codes
-    script = steps[2]["run"]
+    script = next(s for s in steps if s.get("id") == "test")["run"]
     assert all(part in script for part in ("0) result=passed", "1) result=regressed", "3|6) result=inconclusive"))
 
 
@@ -238,3 +243,56 @@ def test_the_pr_comment_is_text_never_markdown(project):
     assert "![p](" not in line and "[x](" not in line and "\\[x\\]" in line  # link syntax escaped
     assert "`test_'evil'`" in line  # a backtick can't end the code span
 
+
+DELETES = '''
+def test_cleanup(assay_case):
+    assay_case.tool("delete_order", {"id": "O-17"}, {"ok": True})
+    assay_case.answer("Done.")
+'''
+BASE_TOML = '[test]\ncommand = "pytest -q tests"\n\n[[contracts]]\nkind = "never"\nstep = "delete_order"\n'
+
+
+def test_a_pr_cant_loosen_the_checks_that_judge_it(project):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_suite.py").write_text(DELETES)
+    (project / "base.toml").write_text(BASE_TOML)  # the base branch's, as the action fetches it
+    (project / "assay.toml").write_text('[test]\ncommand = "pytest -q tests"\n\n[pii]\ncheck = false\n')  # the PR's
+    assert run(project).returncode == 0  # judged by its own weakened config, the PR would pass
+
+    out = run(project, env={"ASSAY_POLICY": str(project / "base.toml")})
+    assert out.returncode == 1
+    assert "delete_order never runs" in out.stdout  # the contract it removed still holds
+    assert "This PR loosens the checks that judge it" in out.stdout
+    assert "- removes the contract" in out.stdout and "- turns the PII check off" in out.stdout
+    md = (project / ".assay" / "summary.md").read_text()
+    assert "## Checks weakened: this PR loosens the checks that judge it" in md
+    assert "- loosens: removes the contract" in md
+
+    accepted = run(project, env={"ASSAY_POLICY": str(project / "base.toml"), "ASSAY_POLICY_CHANGE": "accepted"})
+    assert accepted.returncode == 0 and "the change is accepted" in accepted.stdout  # a person said so
+
+
+def test_what_counts_as_loosening():
+    from assay import local
+    base = local.load_config(Path("."), _toml(BASE_TOML + '\n[pii]\nallow = { send_receipt = ["email"] }\n'
+                                          '\n[behavior]\ncost_usd = 1.5\n'), policy=False)
+    pr = local.load_config(Path("."), _toml('[test]\ntolerance = 0.2\n\n[[contracts]]\nkind = "never"\n'
+                                            'step = "delete_order"\n\n[[contracts]]\nkind = "never"\nstep = "drop_db"\n'
+                                            '\n[pii]\nallow = { send_receipt = ["email", "phone"] }\n'
+                                            '\n[behavior]\ncost_usd = 0\nsteps = 1.2\n'), policy=False)
+    changes = {c["text"]: c["weakens"] for c in local.policy_changes(base, pr)}
+    assert changes == {"adds the contract “drop_db never runs”": False, "lets send_receipt receive phone": True,
+                       "turns the cost regression check off": True,
+                       "lets steps grow 1.2x over the baseline, not 1.5x": False,
+                       "raises the tolerated pass-rate drop from 0.01 to 0.2": True}
+    merged = local.strictest(base, pr)
+    assert len(merged["contracts"]) == 2 and merged["pii"]["allow"] == {"send_receipt": {"email"}}
+    assert merged["behavior"]["ratios"]["cost_usd"] == 1.5 and merged["behavior"]["ratios"]["steps"] == 1.2
+    assert merged["tolerance"] == 0.01
+
+
+def _toml(text):
+    import tempfile
+    f = Path(tempfile.mkdtemp()) / "assay.toml"
+    f.write_text(text)
+    return f
