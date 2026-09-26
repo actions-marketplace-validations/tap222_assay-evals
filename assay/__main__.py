@@ -131,6 +131,9 @@ def main(argv=None) -> int:
     gg = gs.add_parser("suggest", help="Recorded outputs to label next, spread over the judge's scores")
     gg.add_argument("-n", type=int, default=10)
     gg.add_argument("--field", help="The judge's check (default: [calibrate] field)")
+    gg.add_argument("--vs", help="Another judge's check: pick the runs the two scored furthest apart")
+    gg.add_argument("--disagree", action="store_true",
+                    help="Pick runs the judge passed but a deterministic check failed")
     cb = sub.add_parser("calibrate", help="Run the judge over the golden set: ranking, agreement, bias, consistency; "
                                           "compared with the last calibration that passed")
     cb.add_argument("--baseline", help="A calibration id, or 'none'")
@@ -193,7 +196,7 @@ def main(argv=None) -> int:
                                             args.input_, args.output, args.note)
                 if args.golden_cmd == "stats":
                     return local.golden_stats(root)
-                return local.golden_suggest(root, args.n, args.field)
+                return local.golden_suggest(root, args.n, args.field, args.vs, args.disagree)
             except (local.SetupError, ValueError) as exc:  # a bad assay.toml, or a golden set that doesn't read
                 print(exc, file=sys.stderr)
                 return 2

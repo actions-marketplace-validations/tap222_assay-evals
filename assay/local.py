@@ -27,7 +27,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime
-from statistics import median
+from statistics import mean, median
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -802,6 +802,7 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     skip = set(out["judge_changed"]) | set((out.get("acks") or {}).get("quiet") or {})
     out.update(scores(engine, tenant, run_id, rows, base_rows, skip))
     out["trust"] = trust(engine, tenant, rows)
+    out["surface"] = surface_shift(engine, tenant, rows, base_rows) if baseline else []
     return out
 
 
@@ -902,6 +903,59 @@ def _floor(f: dict) -> str:
     return f"{f['min']:g}–{f['max']:g}" if f["min"] != f["max"] else f"{f['min']:g}"
 
 
+# ---------- a score that rose with the answers' surface ----------
+
+def _answers(engine, tenant: str, ids: List[str]) -> Dict[str, str]:
+    t = store.agent_trajectories
+    out = {}
+    ids = sorted({i for i in ids if i})
+    with engine.connect() as conn:
+        for i in range(0, len(ids), 500):
+            for r in conn.execute(select(t.c.trajectory_id, t.c.answer).where(
+                    (t.c.tenant == tenant) & t.c.trajectory_id.in_(ids[i:i + 500]))):
+                if r.answer:
+                    out[r.trajectory_id] = r.answer
+    return out
+
+
+def surface_shift(engine, tenant: str, rows: list, base_rows: list) -> List[dict]:
+    """Judged fields whose scores rose while the answers got longer, more formatted or more cited
+    than the baseline's: part of the rise may be what the judge rewards besides quality."""
+    from assay.calibrate import surface
+    judged = lambda rs: [r for r in rs if r.score is not None and r.status in ("pass", "fail")]
+    now, before = judged(rows), judged(base_rows)
+    if not now or not before:
+        return []
+    texts = _answers(engine, tenant, [r.document_id for r in [*now, *before]])
+    out = []
+    for field in sorted({r.field or "result" for r in now}):
+        a = [r for r in before if (r.field or "result") == field]
+        b = [r for r in now if (r.field or "result") == field]
+        cases = {r.case_id for r in a} & {r.case_id for r in b}
+        if len(cases) < 3:
+            continue
+        per = lambda rs: {c: median(r.score for r in rs if r.case_id == c) for c in cases}
+        rise = mean(v - per(a)[c] for c, v in per(b).items())
+        fa = [surface(texts[r.document_id]) for r in a if r.case_id in cases and r.document_id in texts]
+        fb = [surface(texts[r.document_id]) for r in b if r.case_id in cases and r.document_id in texts]
+        if rise <= 0 or len(fa) < 3 or len(fb) < 3:
+            continue
+        words = median(f["words"] for f in fb) / max(1, median(f["words"] for f in fa))
+        share = lambda fs, k: sum(f[k] for f in fs) / len(fs)
+        why = []
+        if words >= 1.25:
+            why.append(f"the answers are {words - 1:.0%} longer")
+        for k, what in (("formatted", "formatted with headers or bullets"), ("citations", "citing sources")):
+            if share(fb, k) - share(fa, k) >= 0.25:
+                why.append(f"{share(fb, k):.0%} are {what} ({share(fa, k):.0%} before)")
+        if why:
+            out.append({"field": field, "rise": rise, "cases": len(cases), "why": why,
+                        "text": f"{_label(field)} rose {rise:.2f} on average over {len(cases)} cases, and "
+                                f"{' and '.join(why)} than the baseline's: part of the rise may be what the judge "
+                                f"rewards besides quality. Check it with calibration's bias probes."})
+    return out
+
+
 # ---------- can a judged number be trusted: its calibration ----------
 
 STALE_DAYS = 30
@@ -910,12 +964,23 @@ STALE_DAYS = 30
 def trust(engine, tenant: str, rows: list) -> Dict[str, dict]:
     """Per judged field (one with scores): whether its judge was calibrated against people, when,
     how well, and for the same judge that scored this run."""
+    from assay.calibrate import family
     fields: Dict[str, set] = defaultdict(set)
+    docs: Dict[str, set] = defaultdict(set)
     for r in rows:
         if r.score is not None and r.status in ("pass", "fail"):
             fields[r.field or "result"].update({r.judge_model} if getattr(r, "judge_model", None) else set())
+            if r.document_id:
+                docs[r.field or "result"].add(r.document_id)
     if not fields:
         return {}
+    served = serving_models(engine, tenant, [d for ds in docs.values() for d in ds])
+
+    def same_family(f, models):
+        judges = {family(m) for m in models} - {None}
+        answered = {family(m) for d in docs[f] for m in (served.get(d) or "").split(" + ") if m} - {None}
+        both = judges & answered
+        return sorted(both)[0] if both else None
     c = store.calibrations
     with engine.connect() as conn:
         cals = conn.execute(select(c.c.run_id, c.c.created_at, c.c.passed, c.c.result).where(c.c.tenant == tenant)
@@ -928,8 +993,9 @@ def trust(engine, tenant: str, rows: list) -> Dict[str, dict]:
     out = {}
     for f, models in sorted(fields.items()):
         x = latest.get(f)
+        fam = same_family(f, models)
         if x is None:
-            out[f] = {"state": "none"}
+            out[f] = {"state": "none", "same_family": fam}
             continue
         cal = x.result["calibration"]
         age = (datetime.utcnow() - x.created_at).days
@@ -937,11 +1003,17 @@ def trust(engine, tenant: str, rows: list) -> Dict[str, dict]:
         state = "regressed" if not x.passed else "other_judge" if models and cal_models and models != cal_models \
             else "stale" if age > STALE_DAYS else "ok"
         out[f] = {"state": state, "age": age, "spearman": cal.get("spearman"), "n": cal.get("n"),
-                  "models": sorted(cal_models), "now": sorted(models), "run_id": x.run_id}
+                  "models": sorted(cal_models), "now": sorted(models), "run_id": x.run_id, "same_family": fam}
     return out
 
 
 def trust_text(field: str, t: dict) -> str:
+    fam = (f"; the judge and the answers are both {t['same_family']} models, and judges favor their own family"
+           if t.get("same_family") else "")
+    return _trust_text(t) + fam
+
+
+def _trust_text(t: dict) -> str:
     if t["state"] == "none":
         return "not calibrated: its scores haven't been checked against people (`assay calibrate`)"
     when = "today" if t["age"] == 0 else f"{t['age']} day{'s' * (t['age'] != 1)} ago"
@@ -960,7 +1032,8 @@ def trust_lines(result: dict) -> List[str]:
         return []
     w = max(len(_label(f)) for f in t)
     tone = {"ok": "dim", "none": "yellow", "stale": "yellow", "regressed": "red", "other_judge": "yellow"}
-    return [_paint("Judges", "bold")] + [_paint(f"  {_label(f):<{w}}  {trust_text(f, x)}", tone[x["state"]])
+    return [_paint("Judges", "bold")] + [_paint(f"  {_label(f):<{w}}  {trust_text(f, x)}",
+                                                "yellow" if x.get("same_family") and x["state"] == "ok" else tone[x["state"]])
                                          for f, x in t.items()] + [""]
 
 
@@ -1584,6 +1657,8 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         out += ["| Category | Passed |", "|---|---|"] + [f"| {_md(k)} | {ok}/{n} |" for k, (ok, n) in s["categories"].items()]
         out.append("")
     out += ack_markdown(result)
+    for x in result.get("surface") or []:
+        out += [f"> {_md(x['text'])}", ""]
     tr = result.get("trust") or {}
     if tr:
         out += ["**Judges**", ""] + [f"- {_md(_label(f))}: {_md(trust_text(f, x))}" for f, x in tr.items()] + [""]
@@ -1703,6 +1778,8 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     if c.get("judge_changed"):
         out += judge_changed_lines(c["judge_changed"])
     out += score_lines(result)
+    for x in result.get("surface") or []:
+        out += [_paint(f"~ {x['text']}", "yellow"), ""]
     out += ack_lines(result)
     if c["still"]:
         out.append(_paint(f"{_n(len(c['still']), 'check')} also failed in the baseline, so they don't count "
@@ -2156,8 +2233,39 @@ def golden_stats(root: Path) -> int:
     return 0
 
 
-def golden_suggest(root: Path, n: int, field: Optional[str]) -> int:
-    """Recorded outputs to label next, spread over the judge's scores so the set spans poor to great."""
+def _disagreements(engine, field: str, vs: Optional[str], have: set) -> List[Tuple[float, str, str]]:
+    """(how far apart, case, why) where two judges scored the same run far apart, or the judge
+    passed a run a deterministic check failed: where the judge is most likely wrong."""
+    t = store.eval_results
+    with engine.connect() as conn:
+        rows = conn.execute(select(t.c.case_id, t.c.document_id, t.c.field, t.c.status, t.c.score).where(
+            (t.c.tenant == TENANT) & (t.c.run_id != BASELINE) & t.c.document_id.isnot(None))).all()
+    by: Dict[str, List] = defaultdict(list)
+    for r in rows:
+        if r.case_id not in have:
+            by[r.document_id].append(r)
+    out = {}
+    for doc, rs in by.items():
+        mine = [r for r in rs if r.field == field and r.score is not None]
+        if not mine:
+            continue
+        case, s = mine[0].case_id, mine[0].score
+        other = [r for r in rs if vs and r.field == vs and r.score is not None]
+        if other and abs(s - other[0].score) > 0:
+            gap = abs(s - other[0].score)
+            out[case] = max(out.get(case, (0, "", "")), (gap, case, f"{field} {s:g} vs {vs} {other[0].score:g}"))
+        broke = [r.field for r in rs if r.score is None and r.status == "fail"]
+        if mine[0].status == "pass" and broke:
+            # A deterministic check is the stronger witness: it outranks two judges' scores apart.
+            out[case] = max(out.get(case, (0, "", "")), (10.0, case, f"{field} passed it, but {_label(broke[0])} "
+                                                                      f"(deterministic) failed"))
+    return sorted(out.values(), reverse=True)
+
+
+def golden_suggest(root: Path, n: int, field: Optional[str], vs: Optional[str] = None,
+                   disagree: bool = False) -> int:
+    """Recorded outputs to label next, spread over the judge's scores so the set spans poor to great;
+    or, with vs / disagree, where judges disagree with each other or with a deterministic check."""
     from assay import calibrate
     ccfg = _calib_cfg(root)
     field = field or ccfg.get("field")
@@ -2171,6 +2279,17 @@ def golden_suggest(root: Path, n: int, field: Optional[str]) -> int:
     if engine is None:
         print("No recorded runs yet: run `assay test` first.", file=sys.stderr)
         return 2
+    if vs or disagree:
+        found = _disagreements(engine, field, vs, have)[:n]
+        if not found:
+            print("No disagreements recorded: every run the judges both scored, they scored alike.", file=sys.stderr)
+            return 2
+        print("Label these next: where the judges disagree, with each other or with a deterministic check. "
+              "Disagreement says more about a judge's bias than agreement does:")
+        for _, case, why in found:
+            print(f"  {case}  {why}")
+        print("\n`assay golden add CASE --score N` labels one (your score, not the judge's).")
+        return 0
     t = store.eval_results
     with engine.connect() as conn:
         rows = conn.execute(select(t.c.case_id, t.c.score).where((t.c.tenant == TENANT) & (t.c.field == field)

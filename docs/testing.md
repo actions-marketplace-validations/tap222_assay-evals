@@ -100,6 +100,16 @@ Judges
   consistency  not calibrated: its scores haven't been checked against people (`assay calibrate`)
 ```
 
+Two more warnings sit next to judged scores:
+
+- **The same family.** When the judge and the model that wrote the answers are from the same
+  family (Anthropic judging Claude, OpenAI judging GPT), the label says so: judges favor their
+  own family.
+- **A score that rose with the surface.** When a judged score rose from the baseline while the
+  answers got notably longer, more formatted or more cited, the report says part of the rise may
+  be the judge's taste, not quality, and points to calibration's bias probes. It doesn't fail the
+  run.
+
 ## Noise floors and coin flips
 
 A judged case can score 5/5 on one run and 2/5 on the next with nothing changed. Comparing only

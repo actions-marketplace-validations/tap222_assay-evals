@@ -34,6 +34,11 @@ Three more things say whether a judge can be trusted:
                {"id": "q17", ..., "variants": [{"output": "...", "expect": "same", "note": "paraphrase"}]}
   second judge another judge over the same items (second_judge): how often they agree, and the
                items they disagree on, which is usually where the rubric is ambiguous
+  catch rate   of the answers people called bad, how many the judge failed. Judges confirm good
+               answers far more reliably than they catch bad ones, and a score says nothing of it
+  bias probes  whether the judge's gap from people follows a surface feature: length, citations,
+               hedging, formatting, or an item written by a model of the judge's own family
+               (give items "model": "claude-sonnet-5")
   drift        the same judge (its code, and the models that answered) over the same items,
                agreeing with people less than it did: the provider changed the model under its
                name. Only a calibration run on a schedule, with nothing else changed, catches it.
@@ -247,6 +252,95 @@ def load_judge(spec: str, root: Path) -> Callable:
     return fn
 
 
+# ---------- rates, and what the judge rewards besides quality ----------
+
+def wilson(k: int, n: int) -> Optional[Tuple[float, float]]:
+    if not n:
+        return None
+    p, z = k / n, 1.96
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return max(0.0, c - h), min(1.0, c + h)
+
+
+def _binom_tail(k: int, n: int) -> float:
+    """P(X >= k) for X ~ Binomial(n, 1/2): a one-sided sign test."""
+    return sum(math.comb(n, i) for i in range(k, n + 1)) / 2 ** n if n else 1.0
+
+
+FAMILIES = (("claude", "anthropic"), ("gpt", "openai"), ("o1", "openai"), ("o3", "openai"), ("o4", "openai"),
+            ("chatgpt", "openai"), ("gemini", "google"), ("gemma", "google"), ("llama", "meta"),
+            ("mistral", "mistral"), ("mixtral", "mistral"), ("qwen", "alibaba"), ("deepseek", "deepseek"),
+            ("grok", "xai"), ("command", "cohere"))
+
+
+def family(model: Optional[str]) -> Optional[str]:
+    """The model family a model name belongs to: claude-sonnet-5 → anthropic."""
+    if not model:
+        return None
+    m = model.lower().split("/")[-1]
+    return next((f for prefix, f in FAMILIES if m.startswith(prefix)), None)
+
+
+CITATION = __import__("re").compile(r"\[\d+\]|https?://|\baccording to\b|\bsource[s]?:|\(\w[\w .&-]*,? (19|20)\d\d\)", 2)
+HEDGE = __import__("re").compile(r"\b(might|may|possibly|perhaps|probably|likely|it seems|i'?m not (sure|certain)|"
+                                 r"i am not (sure|certain)|not sure|uncertain)\b", 2)
+FORMAT = __import__("re").compile(r"^\s*(#{1,6} |[-*] |\d+[.)] )", 8)
+
+
+def surface(text: Any) -> dict:
+    """The surface features a judge may reward besides quality."""
+    t = text if isinstance(text, str) else json.dumps(text, default=str)
+    return {"words": len(t.split()), "citations": bool(CITATION.search(t)), "hedges": bool(HEDGE.search(t)),
+            "formatted": len(FORMAT.findall(t)) >= 2}
+
+
+def _boot_diff(a: List[float], b: List[float]) -> Optional[Tuple[float, float]]:
+    rnd = random.Random(SEED)
+    if len(a) < 3 or len(b) < 3:
+        return None
+    out = [mean(rnd.choice(a) for _ in a) - mean(rnd.choice(b) for _ in b) for _ in range(BOOTSTRAP)]
+    return _interval(out)
+
+
+def probes(judged: List[dict], judge_models: List[str], span: float) -> List[dict]:
+    """How the judge's gap from people (judged - label) follows each surface feature. Only what's
+    beyond chance is reported."""
+    if len(judged) < 6:
+        return []
+    gap = [r["judged"] - r["label"] for r in judged]
+    feats = [surface(r["output"]) for r in judged]
+    out = []
+    rho = spearman([f["words"] for f in feats], gap)
+    if rho is not None and abs(rho) >= 0.3:
+        iv = None
+        rnd, n = random.Random(SEED), len(gap)
+        boots = []
+        for _ in range(BOOTSTRAP):
+            idx = [rnd.randrange(n) for _ in range(n)]
+            boots.append(spearman([feats[i]["words"] for i in idx], [gap[i] for i in idx]))
+        iv = _interval(boots)
+        if iv and (iv[0] > 0 or iv[1] < 0):
+            out.append({"feature": "length", "effect": rho, "text": f"{'longer' if rho > 0 else 'shorter'} answers "
+                        f"score higher than people scored them (Spearman {rho:.2f} between length and the gap)"})
+    fams = {family(m) for m in judge_models} - {None}
+    labels = {"citations": "answers with citations or links", "hedges": "answers that hedge (might, not sure)",
+              "formatted": "answers with headers or bullets", "family": "answers written by the judge's own family"}
+    split = {k: [f[k] for f in feats] for k in ("citations", "hedges", "formatted")}
+    if fams:
+        split["family"] = [family(r.get("model")) in fams if r.get("model") else None for r in judged]
+    for k, has in split.items():
+        yes = [g for g, h in zip(gap, has) if h is True]
+        no = [g for g, h in zip(gap, has) if h is False]
+        iv = _boot_diff(yes, no)
+        if iv and (iv[0] > 0 or iv[1] < 0) and abs(mean(yes) - mean(no)) >= 0.1 * span:
+            d = mean(yes) - mean(no)
+            out.append({"feature": k, "effect": d, "text": f"{labels[k]} score {abs(d):.1f} {'more' if d > 0 else 'less'} "
+                        f"than people scored them, compared with the rest ({len(yes)} vs {len(no)} items)"})
+    return out
+
+
 def fingerprint(judge: Callable) -> Optional[str]:
     """The judge's code, as a digest of its source file: an edited rubric is another judge."""
     import inspect
@@ -343,7 +437,21 @@ def analyze(items: List[dict], results: Dict[str, list], cfg: dict) -> dict:
                         "widest": sorted(judged, key=lambda r: -(r["spread"] or 0))[:3]},
         "tags": tags, "coverage": coverage(items, label_range), "label_range": label_range,
         "variants": variants, "models": models, "golden_digest": digest(items),
+        "catch": _catch(judged, _to_labels(threshold, score_range, label_range)),
+        "probes": probes(judged, models, span),
     }
+
+
+def _catch(judged: List[dict], thr: float) -> dict:
+    """Of the answers people called bad (label below the pass mark), how many the judge failed; of the
+    good, how many it passed."""
+    bad = [r for r in judged if r["label"] < thr]
+    good = [r for r in judged if r["label"] >= thr]
+    caught = [r["id"] for r in bad if r["judged"] < thr]
+    passed = [r["id"] for r in good if r["judged"] >= thr]
+    return {"threshold": thr, "bad": len(bad), "caught": caught, "missed": [r["id"] for r in bad if r["id"] not in caught],
+            "good": len(good), "confirmed": len(passed), "tnr": len(caught) / len(bad) if bad else None,
+            "tpr": len(passed) / len(good) if good else None, "tnr_interval": wilson(len(caught), len(bad))}
 
 
 def between_judges(a: dict, b: dict) -> dict:
@@ -384,11 +492,17 @@ def compare(now: dict, before: dict, cfg: dict) -> dict:
             out["tags"][t] = test(ids)
     old = {(v["high"], v["low"]) for v in violations([a[i] for i in common])[0]}
     out["new_violations"] = [v for v in violations([b[i] for i in common])[0] if (v["high"], v["low"]) not in old]
+    c0, c1 = before.get("catch") or {}, now.get("catch") or {}
+    common_bad = set(c0.get("caught", []) + c0.get("missed", [])) & set(c1.get("caught", []) + c1.get("missed", []))
+    lost = sorted(i for i in common_bad if i in c0.get("caught", []) and i in c1.get("missed", []))
+    won = sorted(i for i in common_bad if i in c0.get("missed", []) and i in c1.get("caught", []))
+    out["catch"] = {"lost": lost, "won": won, "worse": len(lost) > len(won) and
+                    _binom_tail(len(lost), len(lost) + len(won)) < 0.05}
     was_ok = {(v["id"], v["variant"]) for v in before.get("variants") or [] if v["ok"]}
     out["new_variant_failures"] = [v for v in now.get("variants") or [] if not v["ok"] and (v["id"], v["variant"]) in was_ok]
     blind = [v for v in out["new_variant_failures"] if v["expect"] == "lower" and v["judged"] >= v["original"]]
     out["regressed"] = bool((out["overall"] or {}).get("worse") or any((t or {}).get("worse") for t in out["tags"].values())
-                            or any(v["gap"] >= 2 for v in out["new_violations"]) or blind)
+                            or any(v["gap"] >= 2 for v in out["new_violations"]) or blind or out["catch"]["worse"])
     # Why: the judge changed (its code, its model), or nothing did and the provider's model moved.
     j0, j1 = before.get("judge") or {}, now.get("judge") or {}
     same_items = before.get("golden_digest") == now.get("golden_digest")
@@ -448,6 +562,18 @@ def text(run_id: str, spec: str, a: dict, cfg: dict, cmp: Optional[dict], baseli
                 f"{v['low']} labeled {v['low_label']:g}, judged {v['low_judged']:.1f}" for v in far[:5]]
     ag2 = a["agreement"]
     out.append(f"Agreement    exact {_pct(ag2['exact'])}, within one {_pct(ag2['within_one'])}")
+    ct = a.get("catch") or {}
+    if ct.get("bad"):
+        iv = ct["tnr_interval"]
+        weak = ct["tnr"] < 0.7
+        line = (f"Catch rate   fails {len(ct['caught'])} of the {ct['bad']} answers people called bad "
+                f"({_pct(ct['tnr'])}, 95% interval {_pct(iv[0])}–{_pct(iv[1])}); passes {ct['confirmed']} of "
+                f"{ct['good']} good ones")
+        out.append(paint(line + ": it confirms good answers but lets bad ones through", "yellow") if weak else line)
+        if weak and ct["missed"]:
+            out.append(paint(f"             missed: {', '.join(ct['missed'][:6])}", "dim"))
+    for p in a.get("probes") or []:
+        out.append(paint(f"Bias probe   {p['text']}", "yellow"))
     if a["bias"] is not None:
         lean = "lenient" if a["bias"] > 0.25 else "harsh" if a["bias"] < -0.25 else "no lean"
         worst = max(a["per_label"].items(), key=lambda kv: abs(kv[1] - kv[0]), default=None)
@@ -519,6 +645,11 @@ def text(run_id: str, spec: str, a: dict, cfg: dict, cmp: Optional[dict], baseli
     near = len(cmp["new_violations"]) - len(far)
     if near:
         out.append(paint(f"  {near} new near-miss{'es' * (near != 1)} one label apart (not failing)", "dim"))
+    cc = cmp.get("catch") or {}
+    if cc.get("lost"):
+        out.append(paint(f"{'✗ ' if cc['worse'] else '  '}{len(cc['lost'])} bad answer{'s' * (len(cc['lost']) != 1)} it "
+                         f"caught before now pass{'es' * (len(cc['lost']) == 1)}: {', '.join(cc['lost'][:6])}"
+                         + (" (beyond chance)" if cc["worse"] else ""), "red" if cc["worse"] else "dim"))
     nv = cmp.get("new_variant_failures") or []
     if nv:
         out.append(paint(f"✗ {len(nv)} variant{'s' * (len(nv) != 1)} that behaved before no longer do:", "red"))

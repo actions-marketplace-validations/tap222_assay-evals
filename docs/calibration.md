@@ -30,6 +30,11 @@ assay golden suggest --field helpful                                   # what to
 assay golden stats
 ```
 
+`golden suggest --vs helpful_gpt` picks the runs two judges scored furthest apart, and
+`--disagree` the ones the judge passed but a deterministic check failed. Where evaluators
+disagree says more about a judge's bias than where they agree, so those are the items to
+label first.
+
 `golden add` takes the input and output from the latest recorded run of that case (or
 `--input`/`--output`). `golden suggest` picks recorded outputs spread over what the judge scored
 them, so the set spans poor to great instead of piling up typical answers. `golden stats` shows
@@ -94,6 +99,34 @@ Regressed.
   between pass and fail.
 - **Validity:** answers that weren't verdicts, and timeouts, are counted apart. They never
   become scores.
+
+## Bias: what the judge rewards besides quality
+
+A judge's score mixes quality with what the judge happens to like. Calibration separates the two
+in two ways.
+
+**Catch rate.** Judges confirm good answers far more reliably than they catch bad ones:
+
+```
+Catch rate   fails 3 of the 12 answers people called bad (25%, 95% interval 9%–53%); passes 40 of 42 good ones: it confirms good answers but lets bad ones through
+```
+
+"Bad" is a label below the pass mark (`threshold`, on the labels' scale). A bad answer it caught
+before and passes now counts against it, and more of those than the reverse, beyond chance (a
+sign test), fails the calibration.
+
+**Bias probes.** For each item, the gap between the judge's score and the person's. The probes
+check whether that gap follows a surface feature, and report what's beyond chance:
+
+```
+Bias probe   longer answers score higher than people scored them (Spearman 0.41 between length and the gap)
+Bias probe   answers with citations or links score 1.2 more than people scored them, compared with the rest (14 vs 16 items)
+```
+
+The features are length, citations or links, hedging ("might", "I'm not sure"), and headers or
+bullets. With `"model": "claude-sonnet-5"` on items (which model wrote the output), a judge that
+favors its own family shows up the same way. Variants test one bias directly: the same answer
+with fake citations, `expect: "same"`.
 
 ## Variants: does the score move for the right reasons?
 

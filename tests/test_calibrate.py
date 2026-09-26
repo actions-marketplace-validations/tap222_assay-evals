@@ -70,10 +70,11 @@ def test_a_calibrated_judge_then_a_change_that_breaks_one_question_type(project,
     assert "people agree: exact 70%, within one 100% (10 items labeled twice)" in out
     assert "this one is the baseline" in out
 
-    monkeypatch.setenv("MODE", "lenient")  # kinder, same order: reported, not failed
-    assert main(["calibrate"]) == 0
+    monkeypatch.setenv("MODE", "lenient")  # the same order, but a point kinder: it now passes bad answers
+    assert main(["calibrate"]) == 1
     out = capsys.readouterr().out
-    assert "(lenient)" in out and "Calibrated as before." in out
+    assert "(lenient)" in out and "bad answers it caught before now pass" in out and "(beyond chance)" in out
+    assert "it confirms good answers but lets bad ones through" in out
 
     monkeypatch.setenv("MODE", "broken")
     assert main(["calibrate"]) == 1

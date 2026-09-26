@@ -226,7 +226,7 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
                            for x in result["not_judged"]],
             "judge_changed": [{"name": local._short(p["case_id"]), "field": p["field"], "before": p["before"],
                                "now": p["now"]} for p in c.get("judge_changed") or []],
-            "models": result.get("models") or {},
+            "models": result.get("models") or {}, "surface": result.get("surface") or [],
             "totals": [{**x, "most": [{**m, "name": local._short(m["case_id"])} for m in x["most"]]}
                        for x in result.get("behavior_suite") or []] if cfg["behavior"]["fail"] else [],
             "totals_info": [] if cfg["behavior"]["fail"] else result.get("behavior_suite") or []}
@@ -286,6 +286,8 @@ def text(d: dict) -> str:
         out += ["", paint("JUDGE CHANGED", "bold"), "",
                 f"{', '.join(f'{a} → {b}' for a, b in pairs)}: {len(d['judge_changed'])} failing check(s) not compared, "
                 f"since a drop could be the judge, not the AI. `assay calibrate` checks the new judge."]
+    if d.get("surface"):
+        out += ["", paint("SCORES THAT ROSE WITH THE SURFACE", "bold"), ""] + [f"- {x['text']}" for x in d["surface"]]
     if d.get("models"):
         out += ["", paint("BY MODEL", "bold"), ""] + [f"- {m}: {ok}/{n} cases passing" for m, (ok, n) in d["models"].items()]
     if d["flaky"]:
