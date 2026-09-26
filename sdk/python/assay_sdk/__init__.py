@@ -564,3 +564,4 @@ from assay_sdk.auto import agent, instrument, pipeline, step, tool  # noqa: E402
 # Any model provider, one shape (assay_sdk/llm.py).
 from assay_sdk.llm import Judge, Response, normalize, normalize_args  # noqa: E402
 from assay_sdk.runtime import EvalRuntime, Report, Sample  # noqa: E402
+from assay_sdk.faithfulness import faithfulness  # noqa: E402

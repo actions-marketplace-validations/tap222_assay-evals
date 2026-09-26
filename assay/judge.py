@@ -349,6 +349,54 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
     return out
 
 
+def rag_fragments(traj: dict) -> List[dict]:
+    """The fragments with text that went into the prompt, across the run's retrievals."""
+    rets = [s for s in traj["steps"] if s["kind"] == "retrieval"]
+    out = []
+    for s in rets:
+        for f in s.get("result") or []:
+            if isinstance(f, dict) and f.get("used", True) and f.get("text"):
+                fid = f"{s.get('name')}:{f.get('id')}" if len(rets) > 1 else str(f.get("id"))
+                out.append({**f, "id": fid})
+    return out
+
+
+def faithful(traj: dict, input_: Any, model: str = MODEL, client=None, redact: bool = True,
+             provider: str = "anthropic") -> Dict[str, dict]:
+    """faithfulness and context_relevance for a run that retrieved (assay_sdk.faithfulness), as the
+    same result dicts judge() gives. {} for a run with no fragments."""
+    from assay_sdk.faithfulness import EVALUATOR as FE
+    from assay_sdk.faithfulness import faithfulness
+    from assay_sdk.llm import Judge
+    frags = rag_fragments(traj)
+    if not frags:
+        return {}
+    answer = traj.get("answer") or ""
+    if redact:  # personal data doesn't leave for the model API
+        from assay.learn import redact as scrub
+        frags = [{**f, "text": scrub(f["text"])} for f in frags]
+        answer, input_ = scrub(answer), scrub(input_)
+    if client is None and provider == "anthropic":
+        try:
+            client = _client()
+        except ImportError:
+            return {}
+    out = faithfulness(Judge(provider, model, client=client), input_, answer, frags)
+    rows = {}
+    for field in ("faithfulness", "context_relevance"):
+        r = out[field]
+        status = {"PASS": "pass", "FAIL": "fail"}.get(r.status, "error")
+        rows[field] = {"status": status, "score": r.score if r.valid else None,
+                       "reason": (r.reason if r.valid else r.error) or "", "inputs": out["inputs"],
+                       "error_kind": None if r.valid else r.error_kind, "tries": r.attempts,
+                       "raw_output": r.raw_judge_output[:16384] if isinstance(r.raw_judge_output, str) else None,
+                       "category": r.category, "judge_model": r.judge_model or model, "judge_prompt": FE,
+                       "evaluator": FE, "expected": "≥ 0.90 of claims supported" if field == "faithfulness"
+                       else "≥ 0.50 of fragments relevant",
+                       "actual": f"{r.score:.2f}" if r.valid and r.score is not None else None}
+    return rows
+
+
 def runtime(cfg: Optional[dict] = None):
     """The EvalRuntime a test run is judged with: RUNTIME, and what [judge] (or settings) says."""
     from assay_sdk.runtime import EvalRuntime
@@ -380,7 +428,8 @@ def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
                        if t["trajectory_id"] != h["trajectory_id"] and learn._earlier(t, traj)]
         work.append((h, traj, (inputs.get(h["trajectory_id"]) or {}).get("input"), earlier))
     rt = rt or runtime()
-    report = rt.map(lambda w: judge(w[1], w[2], w[3], model, client, redact, provider), work)
+    report = rt.map(lambda w: {**judge(w[1], w[2], w[3], model, client, redact, provider),
+                               **faithful(w[1], w[2], model, client, redact, provider)}, work)
     rows, not_run = [], 0
     for (h, traj, _, _), done in zip(work, report.results):
         if done.status == "NOT_RUN":  # max_time or the budget: not judged, and not a failure
@@ -392,11 +441,13 @@ def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
             for f in FIELDS if f != "plan_quality" or any(s["kind"] == "plan" for s in traj["steps"])}
         case = h["case_id"] or h["trajectory_id"]
         for field, r in found.items():
-            rows.append({"tenant": tenant, "result_id": ingest._derive(run_id, case, field, EVALUATOR, h["attempt"]),
+            ev = r.get("evaluator") or EVALUATOR
+            rows.append({"tenant": tenant, "result_id": ingest._derive(run_id, case, field, ev, h["attempt"]),
                          "run_id": run_id, "case_id": case, "attempt": h["attempt"],
                          "document_id": h["trajectory_id"], "field": field, "status": r["status"],
-                         "evaluator": EVALUATOR, "score": r["score"], "reason": r["reason"][:2000],
-                         "expected": f"≥ {PASS_SCORE}/5", "actual": f"{r['score']}/5" if r["score"] else None,
+                         "evaluator": ev, "score": r["score"], "reason": r["reason"][:2000],
+                         "expected": r.get("expected") or f"≥ {PASS_SCORE}/5",
+                         "actual": r.get("actual") if "actual" in r else f"{r['score']}/5" if r["score"] else None,
                          "inputs": r["inputs"], "lineage": h["lineage"], "ts": _now(),
                          "error_kind": r.get("error_kind"), "tries": r.get("tries"), "raw_output": r.get("raw_output"),
                          "category": r.get("category"), "judge_model": r.get("judge_model"),

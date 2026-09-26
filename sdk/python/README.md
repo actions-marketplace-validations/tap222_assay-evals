@@ -278,6 +278,9 @@ The run failed Assay's checks:
 What retrieval put into the prompt is recorded with `run.retrieve(query, docs, used=4)`: the
 fragments (text, dicts, LangChain Documents, LlamaIndex nodes), their tokens, and which went into
 the prompt. `assay.instrument()` records LangChain and LlamaIndex retrievers on its own.
+`faithfulness(judge, question, answer, fragments)` checks the answer claim by claim against
+them, with the judge's quotes checked
+([Faithfulness](../../docs/agents.md#faithfulness-is-the-answer-backed-by-what-was-retrieved)).
 Fragments and retrieved tokens per query are compared with the baseline, the whole run's
 totals are too, and `[behavior] max_fragments` and `max_retrieved_tokens` are limits
 ([Retrieved context](../../docs/agents.md#retrieved-context-what-rag-puts-in-the-prompt-and-what-it-costs)).

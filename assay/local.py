@@ -49,7 +49,8 @@ EXAMPLE = "tests/ai/test_support.py"
 CHECK_NAMES = {"plan_quality": "Plan quality", "consistency": "Consistency", "completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state",
                "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts",
                "plan": "Plan adherence", "injection": "Prompt injection", "max_fragments": "Fragments per query",
-               "max_retrieved_tokens": "Retrieved tokens per query", "max_context_tokens": "Prompt size"}
+               "max_retrieved_tokens": "Retrieved tokens per query", "max_context_tokens": "Prompt size",
+               "faithfulness": "Faithfulness", "context_relevance": "Context relevance"}
 PII_EVALUATOR = "assay.pii@1"
 
 CONFIG_TEMPLATE = '''\
@@ -1397,6 +1398,7 @@ CATEGORIES = [  # (name, which checks): the first that matches a check's field t
      or f.startswith(("expect.must_resolve", "expect.max_steps", "expect.must_answer"))),
     ("Planning", lambda f: f in ("plan", "plan_quality")),
     ("Reasoning", lambda f: f == "consistency"),
+    ("Grounding", lambda f: f in ("faithfulness", "context_relevance")),
     ("Behavior", lambda f: f in behavior.LIMITS or f.startswith(("expect.max_cost", "expect.max_latency",
                                                                   "expect.max_tools", "expect.max_context"))),
     ("Output quality", lambda f: True),  # the answer, the end state, your asserts, your own fields

@@ -191,11 +191,15 @@ def run_context(engine: Engine, tenant: str, ids: Iterable[str]) -> Dict[str, di
                     st.c.tenant == tenant, st.c.trajectory_id.in_(chunk), st.c.kind.in_(("reason", "answer")),
                     st.c.text.is_not(None))).order_by(st.c.trajectory_id, st.c.seq)):
                 ctx[r.trajectory_id]["outputs"].append(r.text)
-            for r in conn.execute(select(st.c.trajectory_id, st.c.result).where(and_(  # what the judge's context
-                    st.c.tenant == tenant, st.c.trajectory_id.in_(chunk),  # should come from: tools, MCP resources
-                    st.c.kind.in_(("tool", "resource")),
+            for r in conn.execute(select(st.c.trajectory_id, st.c.kind, st.c.result).where(and_(  # what the judge's
+                    st.c.tenant == tenant, st.c.trajectory_id.in_(chunk),  # context should come from: tools, MCP
+                    st.c.kind.in_(("tool", "resource", "retrieval")),  # resources, retrieved fragments
                     st.c.error.is_(None), st.c.result.is_not(None))).order_by(st.c.trajectory_id, st.c.seq)):
-                ctx[r.trajectory_id]["retrieved"].append(r.result)
+                if r.kind == "retrieval":  # the fragments that went into the prompt
+                    ctx[r.trajectory_id]["retrieved"] += [f.get("text") for f in r.result or []
+                                                          if isinstance(f, dict) and f.get("used", True) and f.get("text")]
+                else:
+                    ctx[r.trajectory_id]["retrieved"].append(r.result)
             for tbl, key in ((t, t.c.trajectory_id), (runs, runs.c.run_id)):
                 for r in conn.execute(select(key.label("id"), tbl.c.answer).where(and_(
                         tbl.c.tenant == tenant, key.in_(chunk), tbl.c.answer.is_not(None)))):

@@ -277,6 +277,37 @@ the ratios (0 turns one off), and `fail = false` only reports it. With repeats, 
 is the median of its attempts. The `requires_approval` contract puts an approval rule in
 `assay.toml` instead of in every test.
 
+### Faithfulness: is the answer backed by what was retrieved?
+
+A judge that reads only the final answer scores fluency. A RAG system that retrieves the wrong
+documents, or writes past them, still reads well. So for a run that retrieved (`run.retrieve()`),
+`assay test --judge` also checks two things apart:
+
+| Check | What it says |
+|---|---|
+| `faithfulness` | the answer's claims, one by one: **supported** by a fragment, **contradicted** by one, **fabricated** (no fragment says anything of it), or **inferred** beyond what the fragments say. The score is the share supported; below 0.9 fails, and the kind of failure is the worst claim's (`contradicts_source`, `fabricated`, `unsupported_inference`) |
+| `context_relevance` | which of the fragments that went into the prompt address the question. Low relevance with high faithfulness is a retrieval problem, not a generation one |
+
+```
+Faithfulness   0.33: 1 of 3 claims supported; contradicted: “Refunds take 5 days” vs kb-1 “Refunds take 10 business days”; fabricated: “You will also get a coupon”
+```
+
+The judge has to show its evidence, and Assay checks it rather than trusting it. Each claim is a
+quote of the answer, and each supported or contradicted claim quotes the fragment it rests on.
+A claim that isn't in the answer, or whose evidence isn't in the fragment it names, isn't
+counted, and the reason says how many. When most of it doesn't check out, the result is
+`INVALID`, never a score. The fragments are the judge's recorded context, so the judge-input
+audit checks them against what the run retrieved.
+
+Outside `assay test`, on your own pipeline:
+
+```python
+from assay_sdk import Judge, faithfulness
+
+out = faithfulness(Judge("anthropic", "claude-opus-5"), question, answer, fragments, run=case)
+out["faithfulness"].score, out["context_relevance"].score, out["claims"]
+```
+
 ### Retrieved context: what RAG puts in the prompt, and what it costs
 
 Adding retrieval to an app often multiplies its bill. Every fragment retrieved is added to the
