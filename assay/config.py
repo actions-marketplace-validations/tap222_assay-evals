@@ -70,6 +70,8 @@ class Settings:
     review_budget_usd: Optional[float] = None  # dollars for one review run
     review_consented_only: bool = False  # without the sensitive scope, only conversations users agreed to share
     review_person_first: int = 30  # notes a person writes before the model's suggestions show
+    production_judge_sample: float = 0.0  # share of ended production runs the judge reads (assay/monitor.py)
+    production_judge_budget_usd: Optional[float] = None  # dollars a day for it
     review_daily: bool = False  # read ASSAY_REVIEW_SAMPLE conversations a day, per scheduled events source
 
     # built-in scheduler (0 = off)
@@ -118,6 +120,8 @@ class Settings:
             review_budget_usd=_num(e("ASSAY_REVIEW_BUDGET_USD")),
             review_person_first=int(e("ASSAY_REVIEW_PERSON_FIRST", "30")),
             review_consented_only=e("ASSAY_REVIEW_CONSENTED_ONLY", "false").lower() in ("1", "true", "yes"),
+            production_judge_sample=float(e("ASSAY_PRODUCTION_JUDGE_SAMPLE", "0") or 0),
+            production_judge_budget_usd=_num(e("ASSAY_PRODUCTION_JUDGE_BUDGET_USD")),
             review_daily=e("ASSAY_REVIEW_DAILY", "false").lower() in ("1", "true", "yes"),
             schedule_minutes=int(e("ASSAY_SCHEDULE_MINUTES", "0")),
             schedule_sources=_list(e("ASSAY_SCHEDULE_SOURCES")),

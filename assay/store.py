@@ -250,6 +250,35 @@ agent_trajectories = Table(
     Column("consent", Boolean),  # the user agreed to share it: people without sensitive access may read it
 )
 
+# What the sampled judge said of production runs (assay/monitor.py): kept apart from test results, never a
+# baseline; failures are signals for learn.py, pass rates are production quality.
+production_results = Table(
+    "production_results", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("result_id", String(128), primary_key=True),
+    Column("trajectory_id", String(128), nullable=False, index=True),
+    Column("task", String(128)),
+    Column("field", String(64), nullable=False),
+    Column("status", String(16), nullable=False),  # pass | fail | error
+    Column("category", String(64)),
+    Column("reason", String(2048)),
+    Column("judge_model", String(128)),
+    Column("judge_prompt", String(192)),
+    Column("cost_usd", Float),
+    Column("duration_ms", Float),
+    Column("started_at", DateTime, index=True),  # when the run started: the day it counts for
+    Column("ts", DateTime, nullable=False, index=True),  # when it was judged
+)
+
+# A target per production quality metric (assay/monitor.py): a pass rate's floor, a failure share's ceiling.
+production_targets = Table(
+    "production_targets", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("metric", String(160), primary_key=True),
+    Column("target", Float, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
 # An expert's decision on one claim in an answer, made while using the product (assay_sdk.claim_review):
 # supported, wrong, or a conflict between sources resolved. Labels for the faithfulness judge, and a
 # failure signal for learn.py, finer than "was the answer helpful".

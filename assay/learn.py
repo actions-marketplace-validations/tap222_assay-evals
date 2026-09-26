@@ -75,10 +75,10 @@ THRESHOLD = 2.0  # signal weight that makes a trace anomalous
 WEIGHTS = {"contract_critical": 3.0, "contract_warning": 1.0, "reported": 3.0, "feedback": 3.0, "retry": 1.5,
            "failed_step": 2.0, "tool_error": 2.0, "loop": 2.0, "fallback": 1.0, "outlier": 1.0,
            "rare_path": 1.0, "stuck": 1.5, "restated": 2.0, "asked_again": 2.0, "reopened": 3.0, "redone": 3.0,
-           "expert": 3.0, "claimed_success": 3.0, "malformed_args": 2.0}
+           "expert": 3.0, "claimed_success": 3.0, "malformed_args": 2.0, "judged": 2.5}
 SIMILAR = 0.5  # word overlap at which a later request is the same request again
 AGAIN_WITHIN = timedelta(hours=24)
-PRIORITY = ["contract", "reported", "expert", "claimed_success", "malformed_args", "tool_error", "loop", "failed_step", "reopened", "redone", "feedback", "restated",
+PRIORITY = ["contract", "reported", "expert", "claimed_success", "malformed_args", "tool_error", "judged", "loop", "failed_step", "reopened", "redone", "feedback", "restated",
             "asked_again", "fallback", "stuck",
             "outlier_steps", "outlier_seconds", "outlier_cost", "rare_path"]
 INFRA = re.compile(r"time ?out|timed out|connection|refused|unavailable|unreachable|\b5\d\d\b|rate.?limit|"
@@ -356,6 +356,12 @@ def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) 
         for r in conn.execute(select(t).where(and_(t.c.tenant == tenant, t.c.ts >= window.start,
                                                    t.c.ts < window.end + timedelta(days=2)))):
             fb[r.trace_id].append(r.kind)
+    judged = defaultdict(list)  # what the sampled production judge failed (assay/monitor.py)
+    pr = store.production_results
+    with engine.connect() as conn:
+        for r in conn.execute(select(pr).where(and_(pr.c.tenant == tenant, pr.c.status == "fail",
+                                                    pr.c.ts >= window.start, pr.c.ts < window.end + timedelta(days=2)))):
+            judged[r.trajectory_id].append(r)
     wrong = defaultdict(list)  # claims an expert marked wrong (assay_sdk.claim_review)
     cr = store.claim_reviews
     with engine.connect() as conn:
@@ -417,6 +423,11 @@ def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) 
                 m = malformed[0]
                 sig.append({"type": "malformed_args", "weight": WEIGHTS["malformed_args"], "stage": m["tool"],
                             "key": m["tool"], "text": f"Malformed arguments to {m['tool']}: {', '.join(m['problems'][:3])}"})
+        if judged.get(d_id):
+            j = judged[d_id][0]
+            sig.append({"type": "judged", "weight": WEIGHTS["judged"], "stage": None, "key": j.category or j.field,
+                        "text": f"The production judge failed its {j.field.replace('_', ' ')}"
+                                + (f" ({j.category})" if j.category else "") + f": {(j.reason or '')[:160]}"})
         if wrong.get(d_id):
             n = len(wrong[d_id])
             sig.append({"type": "expert", "weight": WEIGHTS["expert"], "stage": None, "key": "claim",

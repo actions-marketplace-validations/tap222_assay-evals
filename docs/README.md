@@ -15,6 +15,7 @@
 | [The report](report.md) | What the evaluation found: issues caught before users saw them, failure modes, fixes, the log |
 | [Learning from production](learning.md) | Production failures become regression tests, with the whole trace |
 | [Triage](triage.md) | Which evaluator a failure mode needs, if any: fix the prompt, a code check (tried first), or a judge only if it persists; what each judge costs to keep |
+| [Production monitoring](monitoring.md) | CI and production: a sampled judge on live traffic, quality with 95% intervals and alerts on the bound, and what monitoring finds going into CI |
 | [Guardrail candidates](guardrails.md) | Which evaluators could run in the request path: latency, cost, false positives and negatives against people's labels, against thresholds you set |
 | [Sensitive data](sensitive.md) | Consented traces, experts with raw access, claim-level reviews, checking redaction and that edited traces still behave |
 | [Synthetic data](synthetic.md) | `assay synth`: dimensions, tuples, queries, runs through the app, kept apart from production and compared with it |

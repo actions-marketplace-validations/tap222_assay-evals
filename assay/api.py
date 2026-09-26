@@ -669,6 +669,37 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, f"No trajectories in run '{run_id}' for {source}.")
         return out
 
+    @app.post("/v1/production/judge", tags=["operate"],
+              summary="Judge a sample of ended production runs, in the background of the request path (model calls)")
+    def production_judge(source: str, hours: float = 24, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        from assay import monitor
+        now = datetime.utcnow()
+        out = monitor.judge_window(engine, _tenant(source), settings, now - timedelta(hours=hours), now)
+        return {k: v for k, v in out.items()}
+
+    @app.get("/v1/production/quality", tags=["results"],
+             summary="Production quality per check, per day, with 95% intervals against their targets")
+    def production_quality(source: str, days: float = 7, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        from assay import monitor
+        return monitor.quality(engine, _tenant(source), days)
+
+    class TargetIn(BaseModel):
+        metric: str = Field(..., max_length=160, description='e.g. "judge.consistency", "check.tool_errors", '
+                                                            '"category.Answers the policy, not the question"')
+        target: Optional[float] = Field(None, ge=0, le=1, description="A pass rate's floor, or a failure share's "
+                                                                      "ceiling; null removes it")
+
+    @app.put("/v1/production/targets", tags=["operate"], summary="A target for a production quality metric")
+    def production_target(source: str, body: TargetIn, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        from assay import monitor
+        monitor.set_target(engine, _tenant(source), body.metric, body.target)
+        q = monitor.quality(engine, _tenant(source))
+        monitor.alert(engine, _tenant(source), q)
+        return next((m for m in q["metrics"] if m["metric"] == body.metric), {"metric": body.metric, "target": body.target})
+
     @app.get("/v1/agents/matrix", tags=["results"],
              summary="Transition failure matrix: the last state that went right against the first that failed")
     def agents_matrix(source: str, run: Optional[str] = None, baseline: Optional[str] = None,

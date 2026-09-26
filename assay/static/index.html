@@ -409,8 +409,8 @@ function alertRow(a,{actions=true}={}){
   const m=S.catalog[a.measure_id]||{name:a.measure_id};
   const since=a.state==="resolved"?`resolved ${ago(a.resolved_at)} · lasted ${dur(a.opened_at,a.resolved_at)}`:`${a.state==="pending"?"pending since":"open for"} ${dur(a.opened_at)} · last seen ${ago(a.last_seen_at)}`;
   return `<div class="alert ${a.kind} ${a.state}"><span class="stripe"></span>
-    <div><div class="msg">${esc(a.message)}</div><div class="meta">${a.kind==="slo"?"SLO breach":a.kind==="regression"?`Prompt regression · <a href="#prompts">compare versions</a>`:a.kind==="contract"?"Path contract broken":"Anomaly"} · ${esc(since)}${a.n?` · n=${a.n}`:""}</div></div>
-    ${!actions?"":a.kind==="contract"?`<a class="link" href="#workflow">Investigate</a>`:`<button class="link" type="button" data-open="${esc(a.measure_id)}" data-dim="${esc(a.dimension||"")}" data-val="${esc(a.slice_value||"")}">Investigate</button>`}</div>`;
+    <div><div class="msg">${esc(a.message)}</div><div class="meta">${a.kind==="quality"?`Production quality: ${a.slice_value==="breach"?"breach":"investigate"}`:a.kind==="slo"?"SLO breach":a.kind==="regression"?`Prompt regression · <a href="#prompts">compare versions</a>`:a.kind==="contract"?"Path contract broken":"Anomaly"} · ${esc(since)}${a.n?` · n=${a.n}`:""}</div></div>
+    ${!actions?"":a.kind==="quality"?`<a class="link" href="#learn">Investigate</a>`:a.kind==="contract"?`<a class="link" href="#workflow">Investigate</a>`:`<button class="link" type="button" data-open="${esc(a.measure_id)}" data-dim="${esc(a.dimension||"")}" data-val="${esc(a.slice_value||"")}">Investigate</button>`}</div>`;
 }
 // One line per measure and dimension, however many slices breach it.
 function sloGroups(list){
@@ -1520,6 +1520,15 @@ async function renderReview(){
     $("#rv-reject").onclick=()=>{$("#rv-note").value="";$("#rv-note").focus();$("#rv-msg").textContent="Rejected; write your own note, or mark it fine."}}
 }
 
+async function productionQuality(el){
+  const Q=await api(`/v1/production/quality?${q({source:src(),days:7})}`).catch(()=>null);
+  if(!Q||!Q.metrics.length){el.hidden=true;return}
+  el.hidden=false;
+  const tone={breach:"worse",investigate:"worse",ok:"better"};
+  el.innerHTML=`<div class="panel-head"><div><h2>Production quality</h2><p class="sub">Every ended production run's reference-free checks, the sampled judge's verdicts, and each failure category's share of what was read, over 7 days with a 95% interval. With a target, the lower bound under it (over it, for a failure share) means investigate; the whole interval, a breach. <span class="mono">PUT /v1/production/targets</span> sets one.</p></div></div>
+    <div class="scroll"><table><tr><th>metric</th><th>value</th><th>95% interval</th><th>n</th><th>target</th><th></th></tr>
+    ${Q.metrics.map(m=>`<tr><td class="mono">${esc(m.metric)}</td><td>${pct(m.value,1)}</td><td class="ref">${pct(m.low,1)} to ${pct(m.high,1)}</td><td>${m.n}</td><td>${m.target==null?"—":(m.kind==="share"?"≤ ":"≥ ")+pct(m.target,1)}</td><td class="${tone[m.state]||""}">${m.state||""}</td></tr>`).join("")}</table></div>`;
+}
 async function renderLearn(){
   const box=$("#tab-learn"),days=+(store.get("assay-learn-days")||7);
   box.innerHTML=`<div class="panel"><p class="note">Scanning production traces…</p></div>`;
@@ -1529,7 +1538,7 @@ async function renderLearn(){
   try{[P,C,Su]=await Promise.all([api(`/v1/learn/patterns?${q({source:src(),days})}`),api(`/v1/learn/candidates?${q({source:src(),status:"proposed"})}`),
     api(`/v1/learn/suites?${q({source:src()})}`)])}catch(e){box.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
   const L=P.loop,open=P.patterns.filter(p=>p.status==="open"&&p.kind==="failure");
-  box.innerHTML=`<div class="panel stack">
+  box.innerHTML=`<div class="panel stack" id="prod-quality"></div><div class="panel stack">
     <div class="panel-head"><div><h2>Learn from production</h2><p class="sub">Every production trace is scored from signals that need no label: broken contracts, reported errors, user feedback, failed or looping steps, and runs far outside the usual for their task. Anomalous traces are grouped into patterns, and a pattern's most typical and most different traces become draft test cases. You approve each one into a regression suite.</p></div>
       <select id="learn-days" aria-label="Window">${[1,7,30].map(x=>`<option value="${x}" ${x===days?"selected":""}>last ${x} day${x>1?"s":""}</option>`).join("")}</select></div>
     <div class="loopbar">
@@ -1550,6 +1559,7 @@ async function renderLearn(){
     ${Su.suites.length?Su.suites.map(x=>`<details data-suite="${esc(x.suite)}"><summary><b class="mono">${esc(x.suite)}</b> · ${x.cases} cases guarding ${x.patterns} pattern${x.patterns===1?"":"s"} <span class="ref">last added ${esc(ago(x.last_added))}</span>
       · download ${["json","csv"].map(f=>`<button class="link" type="button" data-dl="/v1/learn/suites/${encodeURIComponent(x.suite)}/export?${q({source:src(),format:f})}" data-name="${esc(x.suite)}.${f}">${f.toUpperCase()}</button>`).join(" / ")}</summary><div class="suite-body"><p class="note">Loading…</p></div></details>`).join(""):`<p class="note">No suites yet.</p>`}</div>`;
   $("#learn-days").onchange=e=>{store.set("assay-learn-days",e.target.value);renderLearn()};
+  productionQuality($("#prod-quality"));
   box.querySelectorAll("[data-propose]").forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent="Drafting…";
     try{const made=await api(`/v1/learn/patterns/candidates?${q({source:src(),key:b.dataset.propose,days})}`,{method:"POST"});
       if(!made.length){b.textContent="No new traces to draft from";return}await renderLearn();$("#learn-review")?.scrollIntoView({behavior:"smooth"})}catch(e){b.textContent=e.message}});

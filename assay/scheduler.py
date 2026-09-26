@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional
 
 from sqlalchemy.engine import Engine
@@ -27,6 +27,7 @@ class Scheduler:
         self.last: Dict[str, dict] = {}
         self.last_sweep: Optional[dict] = None
         self.reviewed: Dict[str, str] = {}  # source: the day its conversations were last read
+        self.monitored: Dict[str, datetime] = {}  # source: when the sampled judge last ran
 
     @property
     def enabled(self) -> bool:
@@ -74,6 +75,7 @@ class Scheduler:
                     alert_after_runs=self.settings.alert_after_runs)
                 self.last[name] = {"at": started.isoformat(), "ok": True, "run_id": run_id}
                 self._review(name, source, started)
+                self._monitor(name, started)
             except Exception as exc:
                 log.exception("Scheduled run failed for %s", name)
                 self.last[name] = {"at": started.isoformat(), "ok": False, "error": str(exc)}
@@ -93,6 +95,23 @@ class Scheduler:
         except Exception:
             log.exception("The daily review failed for %s", name)
         self.reviewed[name] = day
+
+    def _monitor(self, name: str, started: datetime) -> None:
+        """Each run, per events source: the sampled judge on production runs that ended since the last
+        one (within the day's budget), then quality alerts against their targets (assay/monitor.py)."""
+        if not name.startswith("events:"):
+            return
+        from assay import monitor
+        tenant = name.split(":", 1)[1]
+        try:
+            if self.settings.production_judge_sample:
+                since = self.monitored.get(name) or started - timedelta(minutes=max(self.settings.schedule_minutes, 60))
+                self.last[name]["production_judge"] = {k: v for k, v in monitor.judge_window(
+                    self.engine, tenant, self.settings, since, started).items() if k != "summary"}
+                self.monitored[name] = started
+            monitor.alert(self.engine, tenant, monitor.quality(self.engine, tenant, 7, started), started)
+        except Exception:
+            log.exception("Production monitoring failed for %s", name)
 
     def _loop(self) -> None:
         while not self._stop.is_set():

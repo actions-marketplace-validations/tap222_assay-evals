@@ -68,7 +68,66 @@ def audit(engine, tenant: str, days: float, golden_items: Dict[str, int]) -> dic
         out.append({"field": f, "results": len(rs), "failures": len(failed), "labels": labels,
                     "calibrated_days_ago": x.get("age"), "trust": x["state"], "issues": issues,
                     "models": sorted({r.judge_model for r in rs if getattr(r, "judge_model", None)})})
-    return {"days": days, "code_checks": len(code), "code_results": sum(code.values()), "judges": out}
+    return {"days": days, "code_checks": len(code), "code_results": sum(code.values()), "judges": out,
+            "suite": suite(engine, tenant, rows)}
+
+
+def suite(engine, tenant: str, rows) -> dict:
+    """What the CI suite costs per run: its size, the evaluators' time, the model cost (the app's own calls
+    and the judges'), the share of cases a judge has to read, and the most expensive cases."""
+    t, st = store.agent_trajectories, store.agent_steps
+    runs = defaultdict(list)
+    for r in rows:
+        runs[r.run_id].append(r)
+    if not runs:
+        return {"runs": 0}
+    with engine.connect() as conn:
+        latest = max(runs, key=lambda k: max(r.ts for r in runs[k]))
+        heads = conn.execute(select(t.c.trajectory_id, t.c.run_id, t.c.case_id).where(
+            (t.c.tenant == tenant) & t.c.run_id.in_(list(runs)))).all()
+        case_of = {h.trajectory_id: (h.run_id, h.case_id or h.trajectory_id) for h in heads}
+        app_cost = defaultdict(float)
+        ids = list(case_of)
+        for i in range(0, len(ids), 500):
+            for s in conn.execute(select(st.c.trajectory_id, st.c.cost_usd).where(
+                    (st.c.tenant == tenant) & st.c.trajectory_id.in_(ids[i:i + 500]))):
+                if s.cost_usd:
+                    app_cost[case_of[s.trajectory_id]] += s.cost_usd
+    per_run = []
+    for run, rs in runs.items():
+        cases = {r.case_id for r in rs}
+        judged = {r.case_id for r in rs if is_judge(r)}
+        per_run.append({"run": run, "cases": len(cases), "judged_cases": len(judged),
+                        "evaluator_seconds": sum(r.duration_ms or 0 for r in rs) / 1000,
+                        "judge_cost": sum(r.cost_usd or 0 for r in rs),
+                        "app_cost": sum(v for (rn, _), v in app_cost.items() if rn == run)})
+    last = next(x for x in per_run if x["run"] == latest)
+    cost = defaultdict(float)
+    for r in runs[latest]:
+        cost[r.case_id] += r.cost_usd or 0
+    for (rn, case), v in app_cost.items():
+        if rn == latest:
+            cost[case] += v
+    avg = lambda k: sum(x[k] for x in per_run) / len(per_run)
+    return {"runs": len(per_run), "latest": last, "average_cost": avg("judge_cost") + avg("app_cost"),
+            "judged_share": last["judged_cases"] / last["cases"] if last["cases"] else None,
+            "costliest": [{"case": c, "cost_usd": v} for c, v in sorted(cost.items(), key=lambda kv: -kv[1])[:5] if v]}
+
+
+def suite_text(s: dict) -> List[str]:
+    if not s.get("runs"):
+        return []
+    x = s["latest"]
+    lines = ["", f"The suite, latest run {x['run']}: {x['cases']} cases, {x['judged_cases']} read by a judge "
+                 f"({s['judged_share']:.0%}), {x['evaluator_seconds']:.1f} s in evaluators, "
+                 f"${x['app_cost'] + x['judge_cost']:.4f} in model calls (${x['app_cost']:.4f} the app's, "
+                 f"${x['judge_cost']:.4f} the judges'). Over {s['runs']} run{'s' * (s['runs'] != 1)}: "
+                 f"${s['average_cost']:.4f} a run."]
+    if s["costliest"]:
+        lines.append("  Costliest cases: " + ", ".join(f"{c['case']} ${c['cost_usd']:.4f}" for c in s["costliest"]))
+    if s["judged_share"] and s["judged_share"] > 0.5:
+        lines.append("  Most cases need a judge: CI runs often, so check deterministically where you can (assay triage).")
+    return lines
 
 
 def text(a: dict) -> str:
@@ -76,7 +135,7 @@ def text(a: dict) -> str:
     head = (f"Evaluators in the last {a['days']:g} days: {a['code_checks']} code check{'s' * (a['code_checks'] != 1)}, "
             f"{len(j)} judge{'s' * (len(j) != 1)}.")
     if not j:
-        return head + " No judges: nothing to label, calibrate or keep up."
+        return "\n".join([head + " No judges: nothing to label, calibrate or keep up."] + suite_text(a.get("suite") or {}))
     lines = [head, "", f"  {'judge':<24} {'labels':>8}  {'calibrated':<14} trust"]
     for x in j:
         when = "never" if x["calibrated_days_ago"] is None else \
@@ -88,7 +147,7 @@ def text(a: dict) -> str:
         lines += [f"  - {f}: {i}" for f, i in due]
     else:
         lines += ["", "Every judge has its labels, a calibration this week, and a trust label that holds."]
-    return "\n".join(lines)
+    return "\n".join(lines + suite_text(a.get("suite") or {}))
 
 
 def cli(root: Path, days: float, fmt: str) -> int:
