@@ -388,7 +388,8 @@ def test_pytest_assay_compares_the_session_like_assay_test(project, monkeypatch)
 
     assert main(["accept"]) == 0  # known now: the same failure doesn't fail the session
     known = run()
-    assert known.returncode == 0 and "also failed in the baseline" in known.stdout and "1 failed" in known.stdout
+    assert known.returncode == 0 and "3 checks acknowledged (1 case), quiet until worse" in known.stdout \
+        and "1 failed" in known.stdout
 
     (project / "tests" / "ai" / "test_plain.py").write_text("def test_bug():\n    assert 1 == 2\n")
     plain = run()  # a failing test Assay knows nothing about still fails the session

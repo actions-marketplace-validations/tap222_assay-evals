@@ -152,7 +152,8 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
     results; changes nothing. cfg: "tolerance" and "behavior" ({"fail", "ratios"})."""
     from assay import local
     from assay.failures import eval_runs
-    result = local.compare(engine, current, baseline, cfg["tolerance"], cfg["behavior"], tenant, source)
+    result = local.compare(engine, current, baseline, cfg["tolerance"], cfg["behavior"], tenant, source,
+                           acks=cfg.get("acks"))
     if result is None:
         return {"error": f"Run {current} recorded nothing to compare."}
     result["behavior_fails"] = cfg["behavior"]["fail"]
@@ -209,7 +210,8 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
             "scenarios": s["cases"],
             "counts": {"unchanged": unchanged, "improved": len(improved), "regressed": len(b["regressed"]),
                        "flaky": len(b["flaky"]), "changed": len(changed), "new_failures": len(b["new failure"]),
-                       "not_judged": len(b["couldn't be judged"]), "known_failures": len(b["known failure"])},
+                       "not_judged": len(b["couldn't be judged"]), "known_failures": len(b["known failure"]),
+                       "acknowledged": len(b.get("acknowledged") or [])},
             "regressions": regressions, "new_failures": [entry(c) for c in b["new failure"]],
             "changed": changed, "flaky": flaky, "improved": [local._short(c) for c in sorted(improved)],
             "not_judged": [{"name": local._short(x["case_id"]), "field": x["field"], "reason": x["reason"]}
@@ -248,7 +250,8 @@ def text(d: dict) -> str:
                                  (k["changed"], "~", "changed, still passing", "yellow"),
                                  (k["regressed"], "✗", "regressed", "red"), (k["new_failures"], "✗", "new failing", "red"),
                                  (k["flaky"], "⚠", "flaky", "yellow"), (k["not_judged"], "?", "couldn't be judged", "yellow"),
-                                 (k["known_failures"], "·", "failing before too", "dim")):
+                                 (k["known_failures"], "·", "failing before too", "dim"),
+                                 (k.get("acknowledged", 0), "·", "acknowledged, quiet until worse", "dim")):
         if n or word in ("unchanged", "regressed"):
             out.append(f"{paint(mark, color)} {n} {word}")
     for title, items in (("REGRESSIONS", d["regressions"]), ("NEW FAILING", d["new_failures"]),

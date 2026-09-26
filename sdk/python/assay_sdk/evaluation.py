@@ -5,6 +5,7 @@
     result = evaluate(my_judge, question, answer, schema=VERDICT, threshold=0.7, run=run, field="helpful")
     result.status            # PASS, FAIL, INVALID, ERROR, TIMEOUT or RATE_LIMITED
     result.score, result.reason, result.error, result.attempts, result.raw_judge_output
+    result.category          # the kind of failure, when the judge names one ("category" in its verdict)
 
 A judge that answered but not with a verdict is INVALID, not a score of 0: an unparseable
 answer, one that doesn't fit `schema`, a score that is None, NaN, infinite or outside
@@ -50,6 +51,7 @@ class Result:
     attempts: int = 0  # how many times the judge was called
     raw_judge_output: Any = None  # what it returned last, as it returned it
     history: list = dc_field(default_factory=list)  # (status, error) of each attempt
+    category: Optional[str] = None  # the judge's name for the kind of failure (grounding, policy_refusal, ...)
 
     @property
     def valid(self) -> bool:
@@ -124,6 +126,18 @@ def _check_schema(value: Any, schema: dict, path: str = "") -> Optional[str]:
     return None
 
 
+def category_of(out: Any) -> Optional[str]:
+    """The kind of failure a verdict names: category (or failure_category, failure_mode)."""
+    try:
+        v = _as_dict(out)
+    except ValueError:
+        return None
+    if not isinstance(v, dict):
+        return None
+    return next((v[k].strip() for k in ("category", "failure_category", "failure_mode")
+                 if isinstance(v.get(k), str) and v[k].strip()), None)
+
+
 def _as_dict(out: Any) -> Any:
     if isinstance(out, str):
         text = out.strip()
@@ -183,7 +197,8 @@ def _record(result: Result, run, field: Optional[str], evaluator: Optional[str],
     raw = raw if raw is None or isinstance(raw, str) else json.dumps(raw, default=str)
     run.check(field or "evaluation", status, score=result.score if result.valid else None,
               reason=result.reason if result.valid else result.error, evaluator=evaluator, inputs=inputs,
-              error_kind=None if result.valid else result.error_kind, tries=result.attempts, raw_output=raw)
+              error_kind=None if result.valid else result.error_kind, tries=result.attempts, raw_output=raw,
+              **({"category": result.category} if result.category else {}))
 
 
 def _step(result: Result, out: Any, schema, threshold, score_range) -> bool:
@@ -197,6 +212,7 @@ def _step(result: Result, out: Any, schema, threshold, score_range) -> bool:
             return (out.error_kind or "error") not in _TRANSIENT
         out = out.structured if out.structured is not None else out.text
     status, score, reason, problem = verdict_of(out, schema, threshold, score_range)
+    result.category = category_of(out) if status == FAIL else None
     result.raw_judge_output, result.history = out, result.history + [(status, problem)]
     if status == INVALID:
         result.status, result.score, result.reason, result.error, result.error_kind = INVALID, None, reason, problem, "invalid"

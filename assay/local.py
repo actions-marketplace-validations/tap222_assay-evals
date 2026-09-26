@@ -226,7 +226,11 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
             "prices": _prices_config(cfg.get("prices"))}
     if out["prices"] and "prices" not in out["judge"]:
         out["judge"]["prices"] = out["prices"]
-
+    from assay import acks
+    try:
+        out["acks"] = acks.load(path)
+    except acks.AckError as exc:
+        raise SetupError(str(exc))
     return with_trusted_policy(out) if policy else out
 
 
@@ -321,7 +325,16 @@ def policy_changes(base: dict, pr: dict) -> List[dict]:
         add(f"removes the limit on {what} ({a:g})" if b is None else f"sets a limit on {what} ({b:g})" if a is None
             else f"{'raises' if b > a else 'lowers'} the limit on {what} from {a:g} to {b:g}",
             b is None or (a is not None and b > a))
-
+    was = {(a["case"], a["check"]): a for a in base.get("acks") or []}
+    for a in pr.get("acks") or []:
+        b = was.get((a["case"], a["check"]))
+        if b is None:
+            add(f"acknowledges {a['case']} {_label(a['check'])} until {a['until']:%Y-%m-%d} ({a['by']}: "
+                f"{a['reason']})", True)
+        elif a["until"] > b["until"] or a.get("classes") != b.get("classes") or a.get("band") != b.get("band"):
+            add(f"extends or changes the acknowledgement of {a['case']} {_label(a['check'])}", True)
+    for k in was.keys() - {(a["case"], a["check"]) for a in pr.get("acks") or []}:
+        add(f"removes the acknowledgement of {k[0]} {_label(k[1])}", False)
     if pr["tolerance"] != base["tolerance"]:
         add(f"raises the tolerated pass-rate drop from {base['tolerance']:g} to {pr['tolerance']:g}"
             if pr["tolerance"] > base["tolerance"] else
@@ -339,7 +352,9 @@ def strictest(base: dict, pr: dict) -> dict:
            "allow": {t: bp["allow"][t] & pp["allow"][t] for t in bp["allow"].keys() & pp["allow"].keys()},
            "answer_allow": set(bp.get("answer_allow") or ()) & set(pp.get("answer_allow") or ())}
     ratios = {k: _stricter_ratio(_ratio(base, k), _ratio(pr, k)) for k in behavior.NUMBERS}
-    return {**pr, "contracts": rules, "pii": pii, "tolerance": min(base["tolerance"], pr["tolerance"]),
+    mine = {(a["case"], a["check"]) for a in pr.get("acks") or []}
+    held = [a for a in base.get("acks") or [] if (a["case"], a["check"]) in mine]  # removals count; additions don't
+    return {**pr, "acks": held, "contracts": rules, "pii": pii, "tolerance": min(base["tolerance"], pr["tolerance"]),
             "pytest": {**pr["pytest"], "checks": base["pytest"]["checks"] or pr["pytest"]["checks"]},
             "behavior": {"fail": base["behavior"]["fail"] or pr["behavior"]["fail"], "ratios": ratios,
                          "suite": _stricter_ratio(base["behavior"].get("suite", behavior.SUITE_RATIO),
@@ -438,7 +453,7 @@ def _behavior_config(b: dict) -> dict:
 
 DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
                   "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True},
-                  "prices": None, "behavior": {"fail": True, "ratios": {}, "suite": behavior.SUITE_RATIO, "limits": {}},
+                  "prices": None, "acks": [], "behavior": {"fail": True, "ratios": {}, "suite": behavior.SUITE_RATIO, "limits": {}},
                   "judge": {"enabled": False, "model": "claude-opus-5", "redact": True, "provider": "anthropic"}}
 
 
@@ -707,7 +722,7 @@ def case_behavior(engine, run_id: str, tenant: str = TENANT) -> Dict[str, dict]:
 
 def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
              pii: Optional[dict] = None, behavior_cfg: Optional[dict] = None,
-             abandoned_why: Optional[str] = None) -> Optional[dict]:
+             abandoned_why: Optional[str] = None, acks: Optional[List[dict]] = None) -> Optional[dict]:
     """Check the run and compare it with the baseline. None if the run recorded nothing to check.
     For a run whose command has exited: what it left open is closed and evaluated first."""
     source = EventsSource(engine, TENANT)
@@ -723,14 +738,15 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
             check_pii(engine, source, run_id, pii)
         if (behavior_cfg or {}).get("limits"):
             check_limits(engine, source, run_id, behavior_cfg["limits"])
-    out = compare(engine, run_id, baseline, tolerance, behavior_cfg)
+    out = compare(engine, run_id, baseline, tolerance, behavior_cfg, acks=acks)
     return out and {**out, "left_open": left_open}
 
 
 def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, behavior_cfg: Optional[dict] = None,
-            tenant: str = TENANT, source=None) -> Optional[dict]:
+            tenant: str = TENANT, source=None, acks: Optional[List[dict]] = None) -> Optional[dict]:
     """Compare a run's results with the baseline's, changing nothing: what `assay test`, `assay
-    diff` and the server's diff read. None if the run has no results."""
+    diff` and the server's diff read. None if the run has no results. acks: assay.acks.toml's
+    acknowledgements (assay/acks.py), decided for this run into result["acks"]."""
     source = source or EventsSource(engine, tenant)
     # "" means no baseline: failures.evaluation would otherwise pick the run before this one.
     a = failures.evaluation(engine, source, tenant, run_id, baseline or "", tolerance)
@@ -747,9 +763,12 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     # Listed apart, and out of every count: judged on the wrong data, or not judged at all.
     rows = [r for r in rows if r.result_id not in found and flaky.check_key(r) not in skip]
     base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, tenant, base_rows)]
-    return {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
-            "attempts": attempts(rows), "base_attempts": attempts(base_rows),
-            "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg, tenant)}
+    out = {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
+           "attempts": attempts(rows), "base_attempts": attempts(base_rows),
+           "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg, tenant)}
+    from assay import acks as acks_
+    acks_.apply(engine, tenant, run_id, out, acks or [])
+    return out
 
 
 def _behavior_changes(engine, run_id: str, baseline: Optional[str], ran: set, cfg: Optional[dict],
@@ -765,7 +784,8 @@ def _behavior_changes(engine, run_id: str, baseline: Optional[str], ran: set, cf
              if (ch := behavior.compare(now[case], before[case], ratios))]
     ratio = (cfg or {}).get("suite", behavior.SUITE_RATIO)
     suite = behavior.suite_totals(now, before, compared, ratio)
-    return {"behavior": worse, "behavior_compared": compared, "behavior_suite": suite}
+    return {"behavior": worse, "behavior_compared": compared, "behavior_suite": suite,
+            "_suite": (now, before, compared, ratio)}  # for acknowledgements to take their cases out
 
 
 def _rows(engine, run_id: str, tenant: str = TENANT) -> list:
@@ -816,22 +836,31 @@ def classify(result: dict, has_baseline: bool) -> dict:
     st = result["stability"]
     flaky_keys = {(i["case_id"], i["field"] or "result") for i in st["flaky"]}
     unsure_keys = {(i["case_id"], i["field"] or "result") for i in st["reruns"]}
-    out = {"problems": [], "flaky": [], "still": []}
+    out = {"problems": [], "flaky": [], "still": [], "acked": []}
+    decided = result.get("acks") or {}
+    quiet, woke = decided.get("quiet") or {}, decided.get("woke") or {}
     for key, a in sorted(cur.items()):
         if all(a):
             continue
         item = {"case_id": key[0], "field": key[1], "rate": sum(a) / len(a), "base_rate": None, "kind": "failing"}
         b = base.get(key)
+        if key in woke:  # acknowledged, but worse than it was: it says so, and blocks
+            out["problems"].append({**item, "kind": "worse than acknowledged", "base_rate": sum(b) / len(b) if b else None,
+                                    "ack": woke[key][0], "woke": woke[key][1]})
+            continue
         if has_baseline and b is None:
             item["kind"] = "new"
         elif has_baseline and not any(b):
-            out["still"].append(item)
+            out["acked" if key in quiet else "still"].append({**item, "ack": quiet[key]} if key in quiet else item)
             continue
         elif has_baseline:
             item.update(kind="regression", base_rate=sum(b) / len(b), unsure=key in unsure_keys)
-            if key in flaky_keys:
+            if key in flaky_keys:  # flaky as before: said as such, acknowledged or not
                 out["flaky"].append(item)
                 continue
+        if key in quiet:  # someone knows, and it's no worse than they saw: quiet, not blocking
+            out["acked"].append({**item, "ack": quiet[key]})
+            continue
         out["problems"].append(item)
     return out
 
@@ -865,6 +894,9 @@ def _n(k: int, word: str) -> str:
 
 
 def _label(field: str) -> str:
+    if field.startswith("behavior."):
+        m = field[len("behavior."):]
+        return f"behavior ({'retrieved context' if m == 'retrieved_context' else behavior.LABELS.get(m, m).lower()})"
     return CHECK_NAMES.get(field, field)
 
 
@@ -894,6 +926,9 @@ def _explain(ps: List[dict], fails: dict, repeat: int) -> List[str]:
     """Each distinct reason once (at most 3), and pass rates where they say something."""
     lines, seen = [], set()
     for p in ps:
+        if p.get("woke"):
+            lines.append(_paint(f"Acknowledged by {p['ack']['by']} ({p['ack']['reason']}), but worse: {p['woke']}",
+                                "yellow"))
         f = fails.get((p["case_id"], p["field"]), {})
         why = f.get("reason") or (f"{_label(p['field'])}: expected {f.get('expected')}, got {f.get('actual')}"
                                   if f.get("expected") is not None or f.get("actual") is not None else None)
@@ -962,6 +997,9 @@ def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
         unjudged[x["case_id"]].append(f"{verdicts.VERDICTS[x['verdict']]}: {_label(x['field'] or 'result')}"
                                       f"{' (' + x['evaluator'] + ')' if x['evaluator'] else ''}: {x['reason']}")
     flaky = {p["case_id"] for p in c["flaky"]}
+    acked = {}
+    for p in c.get("acked") or []:
+        acked.setdefault(p["case_id"], p["ack"])
     suite = ET.Element("testsuite", name=f"assay {run_id}", tests=str(len(states)),
                        failures=str(sum(1 for v in states.values() if v == "failed")),
                        errors=str(sum(1 for k, v in states.items() if v != "failed" and k in unjudged)),
@@ -982,8 +1020,17 @@ def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
         elif case in unjudged:  # JUnit's "couldn't run", not a failure
             ET.SubElement(tc, "error", message=unjudged[case][0][:500]).text = "\n".join(unjudged[case])
         elif st == "known":
+            a = acked.get(case)
             ET.SubElement(tc, "skipped", message=("flaky: passes some attempts, as before" if case in flaky else
-                                                  "failing in the baseline too") + (f": {why[0]}"[:500] if why else ""))
+                                                  f"acknowledged by {a['by']} until {a['until']:%Y-%m-%d} "
+                                                  f"({a['reason']})" if a else "failing in the baseline too")
+                          + (f": {why[0]}"[:500] if why else ""))
+    totals = result.get("behavior_suite") if result.get("behavior_fails", True) else []
+    if totals:  # the whole run grew: not one case's doing, so a line of its own
+        tc = ET.SubElement(suite, "testcase", classname="assay", name="whole-run totals")
+        ET.SubElement(tc, "failure", message=totals[0]["text"][:500]).text = "\n".join(x["text"] for x in totals)
+        suite.set("tests", str(len(states) + 1))
+        suite.set("failures", str(int(suite.get("failures")) + 1))
     ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
 
 
@@ -999,7 +1046,8 @@ CATEGORIES = [  # (name, which checks): the first that matches a check's field t
     ("Output quality", lambda f: True),  # the answer, the end state, your asserts, your own fields
 ]
 BUCKETS = [("regressed", "✗", "red"), ("new failure", "✗", "red"), ("couldn't be judged", "?", "yellow"),
-           ("flaky", "⚠", "yellow"), ("known failure", "·", "dim"), ("passed", "✓", "green")]
+           ("flaky", "⚠", "yellow"), ("known failure", "·", "dim"), ("acknowledged", "·", "dim"),
+           ("passed", "✓", "green")]
 
 
 def _grew(metric: str, m: dict) -> str:
@@ -1013,14 +1061,15 @@ def summarize(result: dict, c: dict, baseline: Optional[str]) -> dict:
     cases = {case for case, _ in att} | {x["case_id"] for x in result["not_judged"]}
     fails_behavior = result.get("behavior_fails", True)
     worse_behavior = {b["case_id"] for b in result.get("behavior") or []}
-    regressed = {p["case_id"] for p in c["problems"] if p["kind"] == "regression"} | \
+    regressed = {p["case_id"] for p in c["problems"] if p["kind"] in ("regression", "worse than acknowledged")} | \
         (worse_behavior if fails_behavior else set())
-    new = {p["case_id"] for p in c["problems"] if p["kind"] != "regression"} - regressed
+    new = {p["case_id"] for p in c["problems"] if p["kind"] not in ("regression", "worse than acknowledged")} - regressed
     unjudged = {x["case_id"] for x in result["not_judged"]} - regressed - new
     flaky = {p["case_id"] for p in c["flaky"]} - regressed - new - unjudged
     known = {p["case_id"] for p in c["still"]} - regressed - new - unjudged - flaky
+    acked = {p["case_id"] for p in c.get("acked") or []} - regressed - new - unjudged - flaky - known
     buckets = {"regressed": regressed, "new failure": new, "couldn't be judged": unjudged, "flaky": flaky,
-               "known failure": known}
+               "known failure": known, "acknowledged": acked}
     buckets["passed"] = cases - set().union(*buckets.values())
     by_case = defaultdict(dict)
     for (case, field), a in att.items():
@@ -1045,7 +1094,8 @@ def summary_block(s: dict) -> List[str]:
     for name, mark, color in BUCKETS:
         n = len(s["buckets"][name])
         if n or name == "passed":
-            label = name if n == 1 or name in ("passed", "flaky", "regressed", "couldn't be judged") else name + "s"
+            label = name if n == 1 or name in ("passed", "flaky", "regressed", "couldn't be judged", "acknowledged") \
+                else name + "s"
             out.append(_paint(mark, color) + f" {n} {label}")
     if s["improved"]:
         out.append(_paint("↑", "green") + f" {len(s['improved'])} improved "
@@ -1106,13 +1156,56 @@ def _tidy(line: str) -> str:
     return f"{label}: {why.rstrip('.')}" if why else line.rstrip(".")
 
 
+def _ack_parts(result: dict) -> Tuple[list, list, list, int]:
+    from assay import acks
+    d = result.get("acks") or {}
+    quiet = sorted({(a["case"], a["check"]): a for a in (d.get("quiet") or {}).values()}.values(), key=acks.key)
+    return quiet, d.get("expired") or [], d.get("spent") or [], sum(1 for a in quiet if acks.soon(a))
+
+
+def ack_lines(result: dict) -> List[str]:
+    """The terminal's lines on acknowledgements: the quiet ones in one line, the ended ones each."""
+    quiet, expired, spent, soon = _ack_parts(result)
+    out = []
+    if quiet:
+        out.append(_paint(f"· {_n(len(quiet), 'check')} acknowledged ({_n(len({a['case'] for a in quiet}), 'case')}), "
+                          f"quiet until worse"
+                          + (f" ({soon} expire{'s' * (soon == 1)} within 3 days)" if soon else "")
+                          + ": `assay acks` lists them", "dim"))
+    for a in expired:
+        out.append(_paint(f"⚠ Acknowledgement ended: {a['case']} {_label(a['check'])}, {a['why']}. It's reported as "
+                          f"it is again.", "yellow"))
+    for a in spent:
+        out.append(_paint(f"· {a['case']} {_label(a['check'])} {a['why']}: its acknowledgement no longer applies "
+                          f"(`assay acks --prune`)", "dim"))
+    return out + ([""] if out else [])
+
+
+def ack_markdown(result: dict) -> List[str]:
+    quiet, expired, spent, soon = _ack_parts(result)
+    out = []
+    for a in expired:
+        out.append(f"- Acknowledgement ended: {_code(_short(a['case']))} {_md(_label(a['check']))}, {_md(a['why'])}")
+    if out:
+        out.append("")
+    if quiet:
+        out += [f"<details><summary>{_n(len(quiet), 'check')} acknowledged, quiet until worse"
+                f"{f' ({soon} expiring within 3 days)' if soon else ''}</summary>", ""]
+        out += [f"- {_code(_short(a['case']))} {_md(_label(a['check']))}: {_md(a['reason'])} (by {_md(a['by'])}, "
+                f"until {a['until']:%Y-%m-%d})" for a in quiet[:30]]
+        out += ["", "</details>", ""]
+    if spent:
+        out += [f"<sub>{_n(len(spent), 'acknowledgement')} no longer apply: the check passed since</sub>", ""]
+    return out
+
+
 def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str]) -> str:
     """The run for a PR comment or a CI job summary: the verdict, the counts, and each change in a line."""
     s = result["summary"]
     b = s["buckets"]
     counts = [f"**{_n(s['cases'], 'case')}**", f"{len(b['passed'])} passed"]
-    for name in ("regressed", "new failure", "flaky", "couldn't be judged", "known failure"):
-        if b[name]:
+    for name in ("regressed", "new failure", "flaky", "couldn't be judged", "known failure", "acknowledged"):
+        if b.get(name):
             counts.append(f"{len(b[name])} {name}")
     if s["improved"]:
         counts.append(f"{len(s['improved'])} improved")
@@ -1130,6 +1223,9 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
                 reasons[case].append(line)
     for x in result.get("behavior") or []:
         reasons[x["case_id"]] += [ch["text"] for ch in x["changes"]]
+    for (case, check), (a, why) in ((result.get("acks") or {}).get("woke") or {}).items():
+        if not check.startswith("behavior."):
+            reasons[case].insert(0, f"Worse than acknowledged ({_label(check)}, by {a['by']}): {why}")
     for case in sorted(reasons, key=lambda c: (min(_rank(x) for x in reasons[c]), c)):
         lines = sorted(dict.fromkeys(_tidy(x) for x in reasons[case]), key=_rank)
         changes.append(f"- {_code(_short(case))} → " + "; ".join(_md(x) for x in lines[:2])
@@ -1162,6 +1258,7 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     if s["categories"]:
         out += ["| Category | Passed |", "|---|---|"] + [f"| {_md(k)} | {ok}/{n} |" for k, (ok, n) in s["categories"].items()]
         out.append("")
+    out += ack_markdown(result)
     nj = result["not_judged"]
     if nj:
         out += [f"<details><summary>{_n(len(nj), 'result')} couldn't be judged</summary>", ""]
@@ -1252,6 +1349,7 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
             out.append(_paint(f"  {p['case_id']}  {_label(p['field'])}  "
                               f"{p['base_rate']:.0%} → {p['rate']:.0%}", "dim"))
         out.append("")
+    out += ack_lines(result)
     if c["still"]:
         out.append(_paint(f"{_n(len(c['still']), 'check')} also failed in the baseline, so they don't count "
                           "against this change.", "dim"))
@@ -1382,7 +1480,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
             return 2, f"{CONFIG}, [judge]: {exc}"
         judged = judge.judge_run(engine, TENANT, run_id, cfg["judge"]["model"], redact=cfg["judge"]["redact"],
                                  provider=cfg["judge"].get("provider", "anthropic"), rt=rt)
-    result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"], cfg["behavior"], abandoned_why)
+    result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"], cfg["behavior"], abandoned_why, cfg.get("acks"))
     if result is None:
         return 2, ("Nothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "
                    "should do with assay.expect(), or send results with assay.check().")
@@ -1390,7 +1488,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     known = {c: r for c, r in (state.get("baseline_cases") or {}).items() if c in ran}
     if baseline == BASELINE and not known:
         baseline = None  # none of these cases has a baseline yet
-        result = evaluate(engine, run_id, None, cfg["tolerance"], cfg["pii"], cfg["behavior"], abandoned_why)
+        result = evaluate(engine, run_id, None, cfg["tolerance"], cfg["pii"], cfg["behavior"], abandoned_why, cfg.get("acks"))
     against = None if baseline is None else f"compared with the baseline, {baseline}" if explicit else \
         (f"compared with each case's last passing run ({len(known)} of {len(ran)} cases have one, from "
          f"{_n(len(set(known.values())), 'run')})")
@@ -1446,9 +1544,143 @@ def _migrate(engine, home: Path, state: dict) -> dict:
     return state
 
 
-def accept(root: Path, run_id: Optional[str]) -> int:
+def _open(root: Path):
+    home = root / HOME
+    if not (home / "assay.db").exists():
+        return None, None
+    engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
+    return engine, _migrate(engine, home, _state(home))
+
+
+def _failing(engine, run_id: str, case: Optional[str] = None) -> Dict[str, List[str]]:
+    """{case: the checks it fails in the run}, behavior changes as behavior.<metric>."""
+    out: Dict[str, List[str]] = defaultdict(list)
+    for r in _rows(engine, run_id):
+        if r.status == "fail" and (case is None or r.case_id == case) and (r.field or "result") not in out[r.case_id]:
+            out[r.case_id].append(r.field or "result")
+    return {c: sorted(fs) for c, fs in out.items() if fs}
+
+
+def _behavior_failing(engine, run_id: str, state: dict) -> Dict[str, List[str]]:
+    base = BASELINE if state.get("baseline_cases") else None
+    if not base:
+        return {}
+    ran = {r.case_id for r in _rows(engine, run_id)}
+    out = _behavior_changes(engine, run_id, base, ran, None)
+    return {b["case_id"]: [f"behavior.{ch['metric']}" for ch in b["changes"] if ch["metric"] in behavior.NUMBERS
+                           or ch["metric"] == "retrieved_context"] for b in out["behavior"]}
+
+
+def _make_acks(engine, run_id: str, wanted: Dict[str, List[str]], reason: str, for_: str, by: Optional[str]):
+    from assay import acks
+    span = acks.duration(for_)
+    at = acks._now()
+    made = []
+    for case, checks in wanted.items():
+        for check in checks:
+            snap = acks.snapshot(engine, TENANT, run_id, case, check)
+            made.append({"case": case, "check": check, "reason": reason, "by": by or acks.who(), "at": at,
+                         "until": at + span, **snap})
+    return made
+
+
+def _merge_acks(root: Path, made: List[dict]) -> Path:
+    from assay import acks
+    config = root / CONFIG
+    keep = [a for a in acks.load(config) if acks.key(a) not in {acks.key(m) for m in made}]
+    return acks.save(config, keep + made)
+
+
+def _describe_ack(a: dict) -> str:
+    parts = []
+    band = a.get("band")
+    if band:
+        parts.append(f"its score stays within {band['min']:g}–{band['max']:g}"
+                     + (f" (from {band['n']} scores)" if band["n"] > 1 else " (one score so far)"))
+    parts += [f"{behavior.LABELS[k].lower()} stays at or under {behavior.NUMBERS[k][2](v)}"
+              for k, v in (a.get("values") or {}).items()]
+    if a.get("classes") and not a.get("values"):
+        parts.append(f"it fails the way it does now ({', '.join(a['classes'])})")
+    return f"{a['case']} {_label(a['check'])}, until {a['until']:%Y-%m-%d}: quiet while {' and '.join(parts)}"
+
+
+def ack(root: Path, case: str, checks: List[str], reason: str, for_: str, by: Optional[str],
+        run_id: Optional[str]) -> int:
+    """`assay ack CASE [CHECK...]`: acknowledge failing checks, with the band they show now."""
+    from assay import acks
+    engine, state = _open(root)
+    if engine is None or not (run_id or state.get("last")):
+        print("No test run yet. Run `assay test` first.", file=sys.stderr)
+        return 2
+    run_id = run_id or state["last"]
+    fails = _failing(engine, run_id)
+    for c, ms in _behavior_failing(engine, run_id, state).items():
+        fails.setdefault(c, []).extend(m for m in ms if m not in fails.get(c, []))
+    known = sorted({r.case_id for r in _rows(engine, run_id)})
+    match = [c for c in known if c == case] or [c for c in known if c.endswith(case) or f"::{case}" in c]
+    if len(match) != 1:
+        print(f"No case {case!r} in {run_id}." if not match else
+              f"{case!r} matches {len(match)} cases: {', '.join(match[:5])}. Give more of its id.", file=sys.stderr)
+        return 2
+    case = match[0]
+    checks = checks or fails.get(case) or []
+    if not checks:
+        print(f"{case} passes in {run_id}: there's nothing to acknowledge.", file=sys.stderr)
+        return 2
+    try:
+        made = _make_acks(engine, run_id, {case: checks}, reason, for_, by)
+        path = _merge_acks(root, made)
+    except acks.AckError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    for a in made:
+        print(f"Acknowledged {_describe_ack(a)}.")
+    print(f"Written to {path.name}: commit it, so CI and reviewers see it.")
+    return 0
+
+
+def list_acks(root: Path, prune: bool = False) -> int:
+    """`assay acks`: each acknowledgement and where it stands in the latest run."""
+    from assay import acks
+    try:
+        items = acks.load(root / CONFIG)
+    except acks.AckError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    if not items:
+        print("Nothing is acknowledged. `assay ack CASE --reason ...` acknowledges a failing check.")
+        return 0
+    engine, state = _open(root)
+    run_id = (state or {}).get("last")
+    metrics = case_behavior(engine, run_id) if engine is not None and run_id else {}
+    rows, ended = [], []
+    now = acks._now()
+    for a in items:
+        if engine is None or not run_id:
+            st, why = ("expired", None) if now >= a["until"] else ("unknown", "no test run here to judge it against")
+        else:
+            st, why = acks.decide(engine, TENANT, run_id, a, now, metrics.get(a["case"]))
+        if st in ("expired", "spent", "passing"):
+            ended.append(a)
+        label = {"quiet": "quiet", "woke": "WORSE", "expired": "ended", "spent": "passing since", "passing": "passing",
+                 "unknown": "?"}[st] + (" (expires soon)" if st == "quiet" and acks.soon(a, now) else "")
+        rows.append((a, label, why))
+    for a, label, why in rows:
+        print(f"{label:<22} {a['case']} {_label(a['check'])}  by {a['by']} until {a['until']:%Y-%m-%d}: {a['reason']}")
+        if why and label not in ("quiet",):
+            print(_paint(f"{'':<22} {why}", "dim"))
+    if prune and ended:
+        acks.save(root / CONFIG, [a for a in items if a not in ended])
+        print(f"\nRemoved {_n(len(ended), 'acknowledgement')} that ended.")
+    elif ended:
+        print(f"\n{_n(len(ended), 'acknowledgement')} ended: `assay acks --prune` removes them.")
+    return 0
+
+
+def accept(root: Path, run_id: Optional[str], reason: str = "accepted with `assay accept`",
+           for_: str = "14d") -> int:
     """`assay accept`: make a run (the latest, by default) the baseline of each of its cases,
-    failures and all."""
+    failures and all. Its failures are acknowledged for `for_`, not for ever."""
     home = root / HOME
     if not (home / "assay.db").exists():
         print("No test run yet. Run `assay test` first.", file=sys.stderr)
@@ -1462,11 +1694,24 @@ def accept(root: Path, run_id: Optional[str]) -> int:
     if not (home / "runs" / f"{run_id}.jsonl").exists():
         print(f"No run {run_id} in {home / 'runs'}.", file=sys.stderr)
         return 2
+    from assay import acks
+    try:
+        acks.duration(for_)
+    except acks.AckError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     cases = promote(engine, run_id)
     state["baseline_cases"] = {**(state.get("baseline_cases") or {}), **{c: run_id for c in cases}}
     _save_state(home, state)
     print(f"{run_id} is now the baseline of its {_n(len(cases), 'case')}. `assay test` fails only on what "
           "gets worse than it.")
+    failing = _failing(engine, run_id)
+    if failing:
+        made = _make_acks(engine, run_id, failing, reason, for_, None)
+        path = _merge_acks(root, made)
+        print(f"Its {_n(len(made), 'failing check')} {'is' if len(made) == 1 else 'are'} acknowledged until "
+              f"{made[0]['until']:%Y-%m-%d} in {path.name}: quiet while no worse, then reported again. "
+              f"`assay acks` lists them.")
     return 0
 
 

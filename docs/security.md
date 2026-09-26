@@ -18,7 +18,8 @@ them, as with any test suite. What Assay adds:
   branch's `assay.toml` (`trusted-policy`, on by default), and the contracts, `[pii]`,
   `[behavior]`, `[pytest] checks` and `tolerance` are held to it. The PR can tighten them: an
   added contract applies at once. Loosening them (removing a contract, turning a check off,
-  allowing a tool more personal data, raising a limit) is listed, isn't applied, and fails the
+  allowing a tool more personal data, raising a limit, acknowledging a failure in
+  `assay.acks.toml` or extending an acknowledgement) is listed, isn't applied, and fails the
   run. The PR comment says so: "Checks weakened: this PR loosens the checks that judge it". A
   maintainer accepts the change with the `assay-policy-change` label (add `labeled` to the
   workflow's `pull_request` types, so labelling re-runs it). Outside the action, set

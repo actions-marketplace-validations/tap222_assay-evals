@@ -78,7 +78,8 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
 - **Baseline:** kept per case: each case's last passing run. A failing run never becomes
   a baseline, and running a subset (`assay test -- pytest tests/ai/test_security.py`) only
   moves the baselines of the cases it ran. If your suite has known failures, `assay accept`
-  makes the latest run their baseline, and later runs then fail only on what got worse.
+  makes the latest run their baseline, and acknowledges its failures for two weeks
+  ([below](#acknowledging-a-failure)): later runs fail only on what got worse.
 - **Report:** with pytest, the report opens with each test file (`✗ tests/ai/test_tools.py
   9/10`), then each check. `assay test --junit report.xml` writes JUnit XML for CI: a
   regression is a failure, a known failure is skipped, and a flaky test passes.
@@ -87,3 +88,56 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
   could be chance says so.
 - **Where things live:** everything goes in `.assay/` (recordings, the store, the baseline),
   which ignores itself in git. `assay test -- pytest -q tests/ai` overrides the command.
+
+## Acknowledging a failure
+
+"I already know about this one" is an acknowledgement, not a mute. It covers one check of one
+case, it ends on its own, and it speaks up again as soon as the failure has something new to
+say.
+
+```
+assay ack test_refund_policy consistency --reason "judge disagrees, #412" --for 14d
+Acknowledged tests/ai/test_support.py::test_refund_policy Consistency, until 2026-10-10: quiet while its
+score stays within 2–3 (from 6 scores) and it fails the way it does now (Reasoning · low score).
+Written to assay.acks.toml: commit it, so CI and reviewers see it.
+```
+
+With no check named, every check the case fails is acknowledged. `behavior.cost_usd`,
+`behavior.context_tokens`, `behavior.retrieved_context` and the other behavior numbers can be
+acknowledged too.
+
+**What it remembers is a band, not a score.** A judge that scores a case 2 or 3 on its own
+would wake anyone keyed on "3". So the acknowledgement stores the case's score over its last
+10 runs (lowest to highest), how many attempts passed, and how it failed: the kind of check and
+the mechanism (`Output quality · Wrong answer`, `Security · Personal data leaked (email)`,
+`Your asserts · AssertionError`), never the reason's raw text.
+
+**Quiet until worse.** While it holds, the check doesn't fail the run and is one line in the
+report (`· 3 checks acknowledged (2 cases), quiet until worse`). It fails the run again, saying
+why, when:
+
+- its score falls below the band. A dip inside the band is the noise it already showed;
+- fewer attempts pass than did, beyond chance;
+- it fails a different way: the same case going from a wrong answer to an unsafe action is a
+  new failure, even at the same score. For a judge's score, the kind comes from the judge: a
+  `category` in its verdict (`evaluate()` reads it), `run.check(..., category="grounding")`, or
+  the built-in judge's (grounding, contradiction, incomplete, policy_refusal, unworkable,
+  inefficient). So a grounding miss that becomes a policy refusal wakes it at the same score. A
+  judge that names no category is "low score", and only the band wakes it;
+- for a behavior number, it goes past the highest value it showed, by more than the metric's
+  minimum.
+
+A different check failing on the same case was never acknowledged, so it fails as usual. A
+flaky check is still reported as flaky.
+
+**It ends.** At `--for` (14 days by default, 90 at most: nothing is acknowledged for ever), the
+report says `Acknowledgement ended` and the failure is reported as it would be without one. When
+the check passes in a later run, the acknowledgement is spent, so a failure that comes back is
+news. `assay acks` lists each one: quiet, worse, expiring soon, or ended. `assay acks --prune`
+removes the ended ones.
+
+**It's in the repository.** `assay.acks.toml` sits next to `assay.toml`, so CI applies it and a
+reviewer sees who acknowledged what, why, and until when. In CI on a pull request, an
+acknowledgement the PR adds or extends counts as loosening the checks. It's listed, and held
+back unless the `assay-policy-change` label accepts it, so a PR can't acknowledge away its own
+regression.

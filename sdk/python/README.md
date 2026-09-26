@@ -176,7 +176,10 @@ result.reason, result.error, result.attempts, result.raw_judge_output
   and never count against the AI.
 
 The judge may return a bool, a number, a dict (`score`, `passed` or `pass`, `reason`), JSON
-text, or an object with those attributes. `aevaluate()` is the same for an async judge.
+text, or an object with those attributes. `aevaluate()` is the same for an async judge. A
+`category` in the verdict (`{"score": 0.2, "category": "grounding"}`) names the kind of failure:
+it's `result.category`, it's recorded with the check, and an acknowledged failure wakes when it
+changes.
 
 ## Many samples at once: `EvalRuntime`
 

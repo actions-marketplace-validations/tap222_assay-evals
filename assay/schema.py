@@ -205,6 +205,7 @@ class Check(_E):
         None, description="status error: why it couldn't be judged. invalid (the evaluator answered, but not with a verdict: unparseable, off-schema, a score that isn't a number), timeout, rate_limited, unavailable (connection error, 5xx), error (anything else)")
     tries: Optional[int] = Field(None, ge=1, description="How many times the evaluator was asked")
     raw_output: Optional[str] = Field(None, max_length=16384, description="What the evaluator returned, as it did")
+    category: Optional[str] = Field(None, max_length=64, pattern=r"^[A-Za-z0-9 _./-]+$", description="fail: the kind of failure, as the evaluator names it (grounding, policy_refusal, ...). An acknowledged failure wakes when it changes")
     run_id: Optional[str] = Field(None, max_length=128, description="The run that produced the output")
     field: Optional[str] = Field(None, max_length=256)
     expected: Optional[str] = Field(None, max_length=4096)
@@ -383,7 +384,7 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                                        "field": e.field, "expected": e.expected, "actual": e.actual,
                                        "status": e.status, "evaluator": e.evaluator, "score": e.score,
                                        "reason": e.reason, "ts": e.ts, "inputs": e.inputs, "error_kind": e.error_kind,
-                                       "tries": e.tries, "raw_output": e.raw_output,
+                                       "tries": e.tries, "raw_output": e.raw_output, "category": e.category,
                                        "lineage": e.version or (known.get(e.run_id) or {}).get("version")})
             elif isinstance(e, Correction):
                 rows["errors"].append({"tenant": tenant, "error_id": e.id, "document_id": e.run_id, "field": e.field,

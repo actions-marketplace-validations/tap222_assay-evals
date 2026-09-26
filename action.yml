@@ -67,6 +67,9 @@ runs:
         git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF" >/dev/null 2>&1 || true
         if git show "FETCH_HEAD:$CONFIG" > "$RUNNER_TEMP/assay.base.toml" 2>/dev/null; then
           echo "ASSAY_POLICY=$RUNNER_TEMP/assay.base.toml" >> "$GITHUB_ENV"
+          # Its acknowledged failures too: one the PR adds is held back unless the label accepts it.
+          git show "FETCH_HEAD:${CONFIG%.toml}.acks.toml" > "$RUNNER_TEMP/assay.base.acks.toml" 2>/dev/null \
+            || rm -f "$RUNNER_TEMP/assay.base.acks.toml"
         else
           echo "::notice::No $CONFIG on $BASE_REF yet: this PR's checks are used as they are."
           echo "ASSAY_POLICY=$RUNNER_TEMP/assay.none.toml" >> "$GITHUB_ENV"

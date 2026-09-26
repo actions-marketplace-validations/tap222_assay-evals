@@ -100,8 +100,24 @@ def main(argv=None) -> int:
     d.add_argument("baseline", nargs="?", help="A run id or a version (default: each case's last passing run)")
     d.add_argument("current", nargs="?", help="A run id or a version (default: the latest run)")
     d.add_argument("--format", choices=["text", "markdown", "json"], default="text")
-    a = sub.add_parser("accept", help="Make the latest test run the baseline, known failures and all")
+    a = sub.add_parser("accept", help="Make the latest test run the baseline, known failures and all; its "
+                                      "failures are acknowledged for a while (assay acks)")
     a.add_argument("run", nargs="?", help="A run id instead of the latest")
+    a.add_argument("--reason", default="accepted with `assay accept`", help="Why its failures are known")
+    a.add_argument("--for", dest="for_", default="14d", metavar="DURATION",
+                   help="How long its failures stay acknowledged: 36h, 14d, 2w (at most 90 days)")
+    ak = sub.add_parser("ack", help="Acknowledge a failing check: quiet until it gets worse than it is now, "
+                                    "and only for a while")
+    ak.add_argument("case", help="The test case (a pytest id, or a unique part of one)")
+    ak.add_argument("checks", nargs="*", help="Its checks (answer, consistency, behavior.cost_usd, ...); "
+                                              "default: every check it fails")
+    ak.add_argument("--reason", required=True, help="Why it's known: a ticket, a decision")
+    ak.add_argument("--for", dest="for_", default="14d", metavar="DURATION",
+                    help="How long: 36h, 14d, 2w (default 14d, at most 90 days)")
+    ak.add_argument("--by", help="Who (default: git config user.name)")
+    ak.add_argument("--run", help="The run to take its state from (default: the latest)")
+    al = sub.add_parser("acks", help="What's acknowledged, what expires soon, and what woke up")
+    al.add_argument("--prune", action="store_true", help="Remove the ones that ended (expired, or passing since)")
     sub.add_parser("schema", help="Print the v1 event schema as JSON Schema")
 
     args = p.parse_args(argv)
@@ -131,14 +147,19 @@ def main(argv=None) -> int:
         from pathlib import Path
         from assay import diff
         return diff.main(Path.cwd(), args.baseline, args.current, args.format)
-    if args.cmd in ("init", "test", "accept", "upload"):
+    if args.cmd in ("init", "test", "accept", "upload", "ack", "acks"):
         from pathlib import Path
         from assay import local
         root = Path.cwd()
         if args.cmd == "upload":
             return local.upload(root, args.run, args.url, args.key, args.send_tenant)
         if args.cmd == "accept":
-            return local.accept(root, args.run)
+            return local.accept(root, args.run, args.reason, args.for_)
+        if args.cmd == "ack":
+            return local.ack(root, args.case, args.checks, args.reason, args.for_, args.by, args.run)
+        if args.cmd == "acks":
+            return local.list_acks(root, args.prune)
+
         if args.cmd == "test":
             send = {"url": args.url, "key": args.key, "tenant": args.send_tenant} if args.upload else None
             return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,
