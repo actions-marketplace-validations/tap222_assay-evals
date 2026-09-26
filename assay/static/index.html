@@ -460,7 +460,7 @@ async function renderMeasureGrid(){
       ${on?`<div class="val"><b>${esc(fmt(r.overall.value,m.unit))}</b><small>n = ${r.overall.n.toLocaleString()}</small></div>${tr}${spark(hist[id])}`:`<p class="reason">${esc(r.reason)}</p>`}
     </button>`};
   $("#tab-measures").innerHTML=Object.entries(S.groups).map(([g,ids])=>`<div><div class="group-title">${esc(g)}</div><div class="grid">${ids.filter(i=>S.catalog[i]).map(card).join("")}</div></div>`).join("")
-    +`<p class="note">Run ${L.run_id} · window ${L.window[0].slice(0,16).replace("T"," ")} → ${L.window[1].slice(0,16).replace("T"," ")} UTC</p>`;
+    +`<p class="note">Run ${esc(L.run_id)} · window ${L.window[0].slice(0,16).replace("T"," ")} → ${L.window[1].slice(0,16).replace("T"," ")} UTC</p>`;
 }
 async function renderMeasureDetail(){
   const id=S.measure,m=S.catalog[id],r=S.latest?.measures[id];if(!m)return;
@@ -921,7 +921,7 @@ async function renderErrors(){
     <div class="panel-head"><div><h2>Where errors start</h2><p class="sub">Each reported wrong value, traced back through the document's steps to where it first went wrong. Steps in pipeline order.</p></div>
       <select id="err-days" aria-label="Window">${[7,30,90].map(d=>`<option value="${d}" ${d===days?"selected":""}>${d} days</option>`).join("")}</select></div>
     <div>${rows.map(st=>{const c=cell[st],tot=Object.values(c).reduce((a,b)=>a+b,0);
-      return `<div class="bar-row" style="grid-template-columns:170px 1fr 60px" onclick="location.hash='workflow/'+encodeURIComponent('${esc(st==="(none)"?"(done)":st)}')" title="Open this step in the workflow"><span class="lbl mono" title="${esc(st==="(none)"?"After the pipeline, or not traced":st)}">${esc(st==="(none)"?"after pipeline":st)}</span>
+      return `<div class="bar-row" style="grid-template-columns:170px 1fr 60px" data-st="${esc(st==="(none)"?"(done)":st)}" onclick="location.hash='workflow/'+encodeURIComponent(this.dataset.st)" title="Open this step in the workflow"><span class="lbl mono" title="${esc(st==="(none)"?"After the pipeline, or not traced":st)}">${esc(st==="(none)"?"after pipeline":st)}</span>
         <span class="costbar" style="width:${tot/max*100}%;height:14px">${Object.keys(VERDICT).filter(v=>c[v]).map(v=>`<i style="width:${c[v]/tot*100}%;background:${VERDICT[v][1]}" title="${esc(VERDICT[v][0])}: ${c[v]}"></i>`).join("")}</span>
         <span class="num">${tot}</span></div>`}).join("")}</div>
     <div class="legend">${Object.entries(VERDICT).filter(([v])=>s.by_verdict.some(([x])=>x===v)).map(([v,[l,c,d]])=>`<span title="${esc(d)}"><i style="background:${c}"></i>${esc(l)} · ${s.by_verdict.find(([x])=>x===v)[1]}</span>`).join("")}</div>
@@ -1257,7 +1257,7 @@ async function renderLearn(){
         <td>${r.latest?`<span class="chip ${r.latest.fail?"bad":"good"}">${r.latest.fail?"failing":"passing"}</span> <span class="ref">${esc(r.latest.run_id)}</span>`:`<span class="ref">not run yet</span>`}</td></tr>`).join("")}</table></div>`});
 }
 function patternCard(p){
-  const [sc,sl]=PSTATUS[p.status]||["neutral",p.status],[kc,kl]=PKIND[p.kind];
+  const [sc,sl]=PSTATUS[p.status]||["neutral",esc(p.status)],[kc,kl]=PKIND[p.kind]||["neutral",esc(p.kind)];
   const col=p.kind==="failure"?(p.status==="open"||p.status==="recurred"?"var(--bad)":"var(--good)"):p.kind==="infrastructure"?"var(--c-fb)":"var(--line-strong)";
   return `<div class="cause ${p.status==="dismissed"?"decided":""}"><span class="stripe" style="background:${col}"></span><div>
     <div class="head"><span class="chip ${kc}">${kl}</span><span class="chip ${sc}">${sl}</span>${p.cases?`<span class="chip good">${p.cases} test${p.cases>1?"s":""}</span>`:""}
