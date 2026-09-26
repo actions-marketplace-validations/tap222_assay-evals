@@ -58,6 +58,7 @@ CONFIG_TEMPLATE = '''\
 command = "pytest -q tests/ai"   # what `assay test` runs
 repeat = 1        # attempts per case; 3 or more lets Assay tell a flaky case from a broken one
 tolerance = 0.01  # a drop in the pass rate smaller than this doesn't fail the run
+timeout = 900     # seconds per attempt; a command still running then is stopped (0: no limit)
 
 # Safety rules every agent run must keep. Kinds: never, must_include, before, only_after,
 # max_runs, allowed_steps. `where` narrows a rule to calls with certain arguments.
@@ -180,6 +181,7 @@ def load_config(root: Path) -> dict:
         if not isinstance(allowed, list) or set(allowed) - kinds:
             raise SetupError(f"{CONFIG}, [pii] allow.{tool}: a list of kinds from {', '.join(learn.PII)}.")
     return {"command": test.get("command"), "repeat": int(test.get("repeat", 1)),
+            "timeout": float(test["timeout"]) if test.get("timeout") else None,
             "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
             "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()}},
             "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
@@ -194,7 +196,7 @@ def _behavior_config(b: dict) -> dict:
     return {"fail": bool(b.get("fail", True)), "ratios": {k: float(v) for k, v in b.items() if k != "fail"}}
 
 
-DEFAULT_CONFIG = {"command": None, "repeat": 1, "tolerance": 0.01, "contracts": [],  # no assay.toml
+DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
                   "pii": {"check": True, "allow": {}}, "pytest": {"checks": True},
                   "behavior": {"fail": True, "ratios": {}}}
 
@@ -304,14 +306,33 @@ def load_file(engine, path: str, tenant: str) -> Tuple[Dict[str, int], List[str]
 
 # ---------- a test run ----------
 
-def run_command(command: str, events: Path, run_id: str, repeat: int) -> List[int]:
-    """Run the command once per attempt, with the SDK recording to `events`. Returns the exit codes."""
+TIMED_OUT = 124  # the exit code `timeout` uses
+
+
+def run_command(command: str, events: Path, run_id: str, repeat: int, timeout: Optional[float] = None,
+                rerun_failed: bool = False) -> List[int]:
+    """Run the command once per attempt, with the SDK recording to `events`. Returns the exit codes;
+    TIMED_OUT for an attempt stopped at `timeout` seconds (with everything it started)."""
+    import signal
     env = {k: v for k, v in os.environ.items() if k != "ASSAY_URL"}  # record locally, never to a server
     env.update(ASSAY_PATH=str(events), ASSAY_TEST_RUN=run_id)
+    if rerun_failed:
+        env["ASSAY_RERUN"] = "failed"  # the pytest plugin runs only what didn't pass last time
     codes = []
     for attempt in range(repeat):
         env["ASSAY_TEST_ATTEMPT"] = str(attempt)
-        codes.append(subprocess.run(command, shell=True, env=env).returncode)
+        proc = subprocess.Popen(command, shell=True, env=env, start_new_session=True)
+        try:
+            codes.append(proc.wait(timeout=timeout or None))
+        except subprocess.TimeoutExpired:
+            for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):  # the shell and all it started
+                try:
+                    os.killpg(proc.pid, sig)
+                    proc.wait(timeout=wait)
+                    break
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    continue
+            codes.append(TIMED_OUT)
     return codes
 
 
@@ -397,7 +418,8 @@ def case_behavior(engine, run_id: str) -> Dict[str, dict]:
 
 
 def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
-             pii: Optional[dict] = None, behavior_cfg: Optional[dict] = None) -> Optional[dict]:
+             pii: Optional[dict] = None, behavior_cfg: Optional[dict] = None,
+             abandoned_why: Optional[str] = None) -> Optional[dict]:
     """Check the run and compare it with the baseline. None if the run recorded nothing to check."""
     source = EventsSource(engine, TENANT)
     heads = agents.run_trajectories(engine, TENANT, run_id)
@@ -405,7 +427,7 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
         # The command has exited: a run it left open will never end. Say so, instead of skipping it.
         lifecycle.abandon(engine, tenant=TENANT, ids=[h["trajectory_id"] for h in heads if h["status"] == "running"])
         lifecycle.evaluate(engine, lifecycle.pending(engine, TENANT, [h["trajectory_id"] for h in heads]),
-                           abandoned_why="the command exited first")
+                           abandoned_why=abandoned_why or "the command exited first")
         if pii and pii["check"]:
             check_pii(engine, source, run_id, pii["allow"])
     # "" means no baseline: failures.evaluation would otherwise pick the run before this one.
@@ -425,21 +447,20 @@ def evaluate(engine, run_id: str, baseline: Optional[str], tolerance: float,
     base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, TENANT, base_rows)]
     return {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
             "attempts": attempts(rows), "base_attempts": attempts(base_rows),
-            "not_judged": not_judged, "behavior": _behavior_changes(engine, run_id, baseline, ran, behavior_cfg)}
+            "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg)}
 
 
-def _behavior_changes(engine, run_id: str, baseline: Optional[str], ran: set, cfg: Optional[dict]) -> List[dict]:
-    """Cases whose behavior got worse than their baseline's: [{"case_id", "changes"}]."""
+def _behavior_changes(engine, run_id: str, baseline: Optional[str], ran: set, cfg: Optional[dict]) -> dict:
+    """{"behavior": cases whose behavior got worse than their baseline's, [{"case_id", "changes"}],
+    "behavior_compared": the cases that could be compared}."""
     if not baseline:
-        return []
+        return {"behavior": [], "behavior_compared": []}
     ratios = (cfg or {}).get("ratios") or {}
     now, before = case_behavior(engine, run_id), case_behavior(engine, baseline)
-    out = []
-    for case in sorted(ran & set(now) & set(before)):
-        changes = behavior.compare(now[case], before[case], ratios)
-        if changes:
-            out.append({"case_id": case, "changes": changes})
-    return out
+    compared = sorted(ran & set(now) & set(before))
+    worse = [{"case_id": case, "changes": ch} for case in compared
+             if (ch := behavior.compare(now[case], before[case], ratios))]
+    return {"behavior": worse, "behavior_compared": compared}
 
 
 def _rows(engine, run_id: str) -> list:
@@ -661,6 +682,145 @@ def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
     ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
 
 
+CATEGORIES = [  # (name, which checks): the first that matches a check's field takes it
+    ("Tool selection", lambda f: f == "tool_calls" or f.startswith(("expect.must_call", "expect.must_not_call"))),
+    ("Security", lambda f: f in ("safety", "pii") or f.startswith("expect.must_get_approval")),
+    ("Completion", lambda f: f in ("completed", "efficiency")
+     or f.startswith(("expect.must_resolve", "expect.max_steps", "expect.must_answer"))),
+    ("Behavior", lambda f: f.startswith(("expect.max_cost", "expect.max_latency", "expect.max_tools",
+                                         "expect.max_context"))),
+    ("Output quality", lambda f: True),  # the answer, the end state, your asserts, your own fields
+]
+BUCKETS = [("regressed", "✗", "red"), ("new failure", "✗", "red"), ("couldn't be judged", "?", "yellow"),
+           ("flaky", "⚠", "yellow"), ("known failure", "·", "dim"), ("passed", "✓", "green")]
+
+
+def summarize(result: dict, c: dict, baseline: Optional[str]) -> dict:
+    """The one-glance view: each case in one bucket, cases that improved, and each category."""
+    att, base = result["attempts"], result["base_attempts"]
+    cases = {case for case, _ in att} | {x["case_id"] for x in result["not_judged"]}
+    fails_behavior = result.get("behavior_fails", True)
+    worse_behavior = {b["case_id"] for b in result.get("behavior") or []}
+    regressed = {p["case_id"] for p in c["problems"] if p["kind"] == "regression"} | \
+        (worse_behavior if fails_behavior else set())
+    new = {p["case_id"] for p in c["problems"] if p["kind"] != "regression"} - regressed
+    unjudged = {x["case_id"] for x in result["not_judged"]} - regressed - new
+    flaky = {p["case_id"] for p in c["flaky"]} - regressed - new - unjudged
+    known = {p["case_id"] for p in c["still"]} - regressed - new - unjudged - flaky
+    buckets = {"regressed": regressed, "new failure": new, "couldn't be judged": unjudged, "flaky": flaky,
+               "known failure": known}
+    buckets["passed"] = cases - set().union(*buckets.values())
+    by_case = defaultdict(dict)
+    for (case, field), a in att.items():
+        by_case[case][field] = all(a)
+    improved = sorted(case for case, fs in by_case.items() if all(fs.values()) and any(
+        not all(base[(case, f)]) for f in fs if (case, f) in base))
+    cats = {}
+    for name, match in CATEGORIES:
+        mine = {case: all(ok for f, ok in fs.items() if next(n for n, m in CATEGORIES if m(f)) == name)
+                for case, fs in by_case.items() if any(next(n for n, m in CATEGORIES if m(f)) == name for f in fs)}
+        if name == "Behavior":  # and how each case behaved against its baseline
+            for case in result.get("behavior_compared") or []:
+                mine[case] = mine.get(case, True) and case not in worse_behavior
+        if mine:
+            cats[name] = (sum(mine.values()), len(mine))
+    return {"cases": len(cases), "buckets": {k: sorted(v) for k, v in buckets.items()}, "improved": improved,
+            "categories": cats}
+
+
+def summary_block(s: dict) -> List[str]:
+    out = []
+    for name, mark, color in BUCKETS:
+        n = len(s["buckets"][name])
+        if n or name == "passed":
+            label = name if n == 1 or name in ("passed", "flaky", "regressed", "couldn't be judged") else name + "s"
+            out.append(_paint(mark, color) + f" {n} {label}")
+    if s["improved"]:
+        out.append(_paint("↑", "green") + f" {len(s['improved'])} improved "
+                   + _paint("(failing in their baseline, passing now)", "dim"))
+    out.append("")
+    if s["categories"]:
+        width = max(len(k) for k in s["categories"])
+        for name, (ok, n) in s["categories"].items():
+            out.append(f"{name:<{width}}  {ok}/{n}")
+        out.append("")
+    return out
+
+
+MARKER = "<!-- assay-regression -->"  # finds the PR comment to update (assay/github.py)
+HEADLINES = {0: "No AI regression", 1: "AI regression detected",
+             3: "Inconclusive: some results couldn't be judged"}
+
+
+def _short(case: str) -> str:
+    return case.split("::", 1)[1] if "::" in case else case
+
+
+# What a reviewer should read first: safety, then what the agent decided, then what it did, then cost.
+RANK = ("Safety", "PII", "expect.must_get_approval", "Approval for", "Outcome", "expect.must_resolve", "Finished",
+        "Tool usage", "expect.must_call", "expect.must_not_call", "End state", "Answer", "Your asserts")
+
+
+def _rank(line: str) -> int:
+    return next((i for i, p in enumerate(RANK) if line.startswith(p)), len(RANK))
+
+
+def _tidy(line: str) -> str:
+    """One change as a reviewer reads it: no boilerplate, no trailing full stop."""
+    label, _, why = line.partition(": ")
+    why = re.sub(r"^(Unsafe action|Wrong tool|Wrong arguments|Looped|Stopped early|Wrong answer|Wrong end state|"
+                 r"Tool error, not recovered|Ignored a tool result): ", "", why)
+    return f"{label}: {why.rstrip('.')}" if why else line.rstrip(".")
+
+
+def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str]) -> str:
+    """The run for a PR comment or a CI job summary: the verdict, the counts, and each change in a line."""
+    s = result["summary"]
+    b = s["buckets"]
+    counts = [f"**{_n(s['cases'], 'case')}**", f"{len(b['passed'])} passed"]
+    for name in ("regressed", "new failure", "flaky", "couldn't be judged", "known failure"):
+        if b[name]:
+            counts.append(f"{len(b[name])} {name}")
+    if s["improved"]:
+        counts.append(f"{len(s['improved'])} improved")
+    changes = []
+    shown = set(b["regressed"]) | set(b["new failure"])
+    reasons: Dict[str, List[str]] = defaultdict(list)
+    for (case, field), f in result["failing"].items():
+        if case in shown:
+            line = f"{_label(field)}: {_reason(f).splitlines()[0][:160]}"
+            if line not in reasons[case]:
+                reasons[case].append(line)
+    for x in result.get("behavior") or []:
+        reasons[x["case_id"]] += [ch["text"] for ch in x["changes"]]
+    for case in sorted(reasons, key=lambda c: (min(_rank(x) for x in reasons[c]), c)):
+        lines = sorted(dict.fromkeys(_tidy(x) for x in reasons[case]), key=_rank)
+        changes.append(f"- `{_short(case)}` → " + "; ".join(lines[:2])
+                       + (f" (+{len(lines) - 2} more)" if len(lines) > 2 else ""))
+    for f in result["fields"]:  # your own fields whose accuracy dropped, e.g. extraction
+        if f["field"] not in CHECK_NAMES and not f["field"].startswith("expect.") and f["base_total"] and \
+                f["passed"] / f["total"] < f["base_passed"] / f["base_total"]:
+            changes.append(f"- `{f['label']}` accuracy {_pct(f['base_passed'], f['base_total'])} → "
+                           f"{_pct(f['passed'], f['total'])}")
+    out = [MARKER, f"## {HEADLINES.get(code, 'AI regression detected')}", "", " · ".join(counts), ""]
+    if changes:
+        out += [f"**{_n(len(changes), 'change')} in behavior**", "", *changes[:30], ""]
+        if len(changes) > 30:
+            out += [f"…and {len(changes) - 30} more", ""]
+    if s["categories"]:
+        out += ["| Category | Passed |", "|---|---|"] + [f"| {k} | {ok}/{n} |" for k, (ok, n) in s["categories"].items()]
+        out.append("")
+    nj = result["not_judged"]
+    if nj:
+        out += [f"<details><summary>{_n(len(nj), 'result')} couldn't be judged</summary>", ""]
+        out += [f"- `{_short(x['case_id'])}` {_label(x['field'] or 'result')}: {verdicts.VERDICTS[x['verdict']]}, "
+                f"{x['reason']}" for x in nj[:20]]
+        out += ["", "</details>", ""]
+    out.append(f"<sub>{against or 'no baseline yet'} · run `{run_id}` · "
+               f"[Assay](https://github.com/tap222/docai-eval)</sub>")
+    return "\n".join(out) + "\n"
+
+
 def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, codes: List[int],
            against: Optional[str] = None) -> Tuple[str, bool]:
     passed, c = verdict(result, bool(baseline))
@@ -670,8 +830,11 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     against = (against or f"compared with the baseline, {baseline}") if baseline else \
         "no baseline yet: every failing check counts"
     out += [f"{_n(cases, 'case')} · {_n(repeat, 'attempt')} each · {against}", ""]
+    result["summary"] = summarize(result, c, baseline)
+    out += summary_block(result["summary"])
     out += files_block(case_states(result, c))
     width = max((len(f["label"]) for f in fields), default=0)
+    out.append(_paint("Checks", "bold"))
     for f in fields:
         mark = _paint("✓", "green") if f["passed"] == f["total"] else _paint("✗", "red")
         line = f"{mark} {f['label']:<{width}}  {f['passed']}/{f['total']}"
@@ -731,8 +894,12 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     if not baseline and not passed:
         out.append(_paint("If these failures are known, make this run the baseline with `assay accept`: "
                           "later runs then fail only on what gets worse.", "dim"))
-    if any(codes):
-        out.append(_paint(f"Your command exited with {', '.join(str(x) for x in codes if x)}.", "yellow"))
+    if TIMED_OUT in codes:
+        out.append(_paint(f"Your command timed out ({codes.count(TIMED_OUT)} of {len(codes)} attempts) and was "
+                          "stopped; what it recorded is above.", "yellow"))
+    if any(x and x != TIMED_OUT for x in codes):
+        out.append(_paint(f"Your command exited with {', '.join(str(x) for x in codes if x and x != TIMED_OUT)}.",
+                          "yellow"))
     if passed and nj:
         out.append(_paint(f"Inconclusive: nothing got worse, but {_n(len(nj), 'result')} couldn't be judged. "
                           "Fix or rerun the evaluation; the baseline stays as it was.", "yellow"))
@@ -763,7 +930,8 @@ def new_run_id() -> str:
 
 
 def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Optional[str],
-         send: Optional[dict] = None, junit: Optional[str] = None) -> int:
+         send: Optional[dict] = None, junit: Optional[str] = None, timeout: Optional[float] = None,
+         failed: bool = False) -> int:
     """`assay test`. Prints the report; returns the exit code."""
     try:
         cfg = load_config(root)
@@ -784,12 +952,25 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     (home / "runs").mkdir(exist_ok=True)
     run_id = new_run_id()
     events = home / "runs" / f"{run_id}.jsonl"
-    codes = run_command(command, events, run_id, repeat)
+    timeout = timeout or cfg["timeout"]
+    if failed:
+        rerun = _state(home).get("rerun")
+        if rerun is None:
+            print("Nothing to rerun yet: run `assay test` first.", file=sys.stderr)
+            return 2
+        if not rerun:
+            print("Nothing to rerun: every case passed last time.")
+            return 0
+        if "pytest" not in command:
+            print("--failed reruns through the pytest plugin; this command isn't pytest, so it runs whole.",
+                  file=sys.stderr)
+    codes = run_command(command, events, run_id, repeat, timeout, failed)
     if not events.exists():
         print(f"\n`{command}` recorded nothing. Does it call assay.init() and record runs with "
               "assay.run(..., test=\"<case>\")?", file=sys.stderr)
         return 2
-    code, text = finish(root, cfg, run_id, repeat, codes, baseline, junit)
+    why = f"the command timed out after {timeout:g}s" if TIMED_OUT in codes else None
+    code, text = finish(root, cfg, run_id, repeat, codes, baseline, junit, why)
     print("\n" + text, file=sys.stderr if code == 2 else sys.stdout)
     if send is not None and code != 2:
         print()
@@ -799,7 +980,7 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
 
 
 def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], baseline: Optional[str],
-           junit: Optional[str] = None) -> Tuple[int, str]:
+           junit: Optional[str] = None, abandoned_why: Optional[str] = None) -> Tuple[int, str]:
     """Load a recorded test run, check it, compare it with the baseline, and move the baseline on
     if it passed. (exit code, report): 0 passed, 1 failed, 2 nothing to check, 3 inconclusive.
     Shared by `assay test` and `pytest --assay`."""
@@ -816,7 +997,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     _, bad = load_file(engine, str(events), TENANT)
     if bad:
         return 2, "\n  ".join([f"{len(bad)} bad line(s) in {events}:", *bad[:20]])
-    result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"], cfg["behavior"])
+    result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"], cfg["behavior"], abandoned_why)
     if result is None:
         return 2, ("Nothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "
                    "should do with assay.expect(), or send results with assay.check().")
@@ -824,7 +1005,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     known = {c: r for c, r in (state.get("baseline_cases") or {}).items() if c in ran}
     if baseline == BASELINE and not known:
         baseline = None  # none of these cases has a baseline yet
-        result = evaluate(engine, run_id, None, cfg["tolerance"], cfg["pii"], cfg["behavior"])
+        result = evaluate(engine, run_id, None, cfg["tolerance"], cfg["pii"], cfg["behavior"], abandoned_why)
     against = None if baseline is None else f"compared with the baseline, {baseline}" if explicit else \
         (f"compared with each case's last passing run ({len(known)} of {len(ran)} cases have one, from "
          f"{_n(len(set(known.values())), 'run')})")
@@ -836,8 +1017,16 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     inconclusive = passed and bool(result["not_judged"])
     if passed and not inconclusive:
         state["baseline_cases"] = {**(state.get("baseline_cases") or {}), **{c: run_id for c in promote(engine, run_id)}}
+    code = 1 if not passed else 3 if inconclusive else 0
+    # What's left to rerun (`--failed`): everything that didn't simply pass.
+    state["rerun"] = sorted(set().union(*(v for k, v in result["summary"]["buckets"].items() if k != "passed")))
     _save_state(home, state)
-    return (1 if not passed else 3 if inconclusive else 0), text
+    md = summary_markdown(run_id, result, code, against)
+    (home / "summary.md").write_text(md)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):  # GitHub Actions: the job's summary page
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write(md + "\n")
+    return code, text
 
 
 def _migrate(engine, home: Path, state: dict) -> dict:

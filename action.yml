@@ -1,0 +1,84 @@
+name: Assay AI regression test
+description: >-
+  Run your AI tests with Assay, compare every test with its last passing run on the default branch,
+  and say what changed on the pull request.
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  command:
+    description: The test command. `pytest --assay` compares each test with its baseline.
+    default: pytest --assay
+  install:
+    description: Installs what the tests need, Assay included (skip it if an earlier step does).
+    default: pip install assay-server pytest
+  comment:
+    description: Post the summary on the pull request, updating Assay's earlier comment.
+    default: "true"
+  fail-on-inconclusive:
+    description: Fail the job when nothing got worse but some results couldn't be judged.
+    default: "true"
+  token:
+    description: "For the PR comment: needs `pull-requests: write`."
+    default: ${{ github.token }}
+
+outputs:
+  result:
+    description: passed, regressed, inconclusive or error
+    value: ${{ steps.test.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    # Baselines live in .assay/, which isn't in git. The default branch saves them to the cache;
+    # a pull request restores its base branch's latest, so it's compared with what's on main.
+    - uses: actions/cache/restore@v4
+      with:
+        path: |
+          .assay/assay.db
+          .assay/state.json
+        key: assay-baseline-${{ github.base_ref || github.ref_name }}-${{ github.run_id }}
+        restore-keys: assay-baseline-${{ github.base_ref || github.ref_name }}-
+
+    - if: inputs.install != ''
+      shell: bash
+      run: ${{ inputs.install }}
+
+    - id: test
+      shell: bash
+      run: |
+        set +e
+        ${{ inputs.command }}
+        code=$?
+        case $code in
+          0) result=passed ;;
+          1) result=regressed ;;
+          3|6) result=inconclusive ;;
+          *) result=error ;;
+        esac
+        echo "code=$code" >> "$GITHUB_OUTPUT"
+        echo "result=$result" >> "$GITHUB_OUTPUT"
+
+    - if: github.event_name == 'pull_request' && inputs.comment == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+      # A PR from a fork gets a read-only token: say so, don't fail the job over the comment.
+      run: assay pr-comment || echo "::warning::Assay couldn't comment on the PR (a fork's token is read-only)."
+
+    - if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          .assay/assay.db
+          .assay/state.json
+        key: assay-baseline-${{ github.ref_name }}-${{ github.run_id }}
+
+    - shell: bash
+      run: |
+        case "${{ steps.test.outputs.result }}" in
+          passed) exit 0 ;;
+          inconclusive) [ "${{ inputs.fail-on-inconclusive }}" = "true" ] && exit 1 || exit 0 ;;
+          *) exit 1 ;;
+        esac

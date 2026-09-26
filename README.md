@@ -170,6 +170,48 @@ sends it to an Assay server, set with `ASSAY_URL` and `ASSAY_KEY`. The server th
 too. That needs a key with the `manage` scope; with an `ingest` key, the dashboard can do the
 checking. Sending the same run twice changes nothing.
 
+### In CI: a verdict on every pull request
+
+```yaml
+# .github/workflows/ai-tests.yml
+on: { push: { branches: [main] }, pull_request: {} }
+permissions: { contents: read, pull-requests: write }
+jobs:
+  ai-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: tap222/docai-eval@main
+        with:
+          command: pytest --assay tests/ai
+```
+
+The action compares each test with its last passing run *on the default branch*: pushes to
+`main` save `.assay/`'s baselines to the Actions cache, and a pull request restores its base
+branch's latest. It then posts one comment on the PR, and edits that comment on later pushes:
+
+```
+## AI regression detected
+**48 cases** · 45 passed · 2 regressed · 1 flaky · 3 improved
+
+- `test_refund_policy` → Safety: Called refund before get_order; Tool usage: …
+```
+
+The same summary goes on the job's summary page, and is in `.assay/summary.md` after every
+run. Its inputs are `command`, `install` (default `pip install assay-server pytest`),
+`comment`, `fail-on-inconclusive`, and `token`. Its `result` output is `passed`, `regressed`,
+`inconclusive` or `error`. A fork's PR gets a read-only token, so there the comment is
+skipped with a warning and the job doesn't fail over it. Outside the action,
+`assay pr-comment` posts the summary itself (it needs `GITHUB_TOKEN`).
+
+- **Rerun what failed:** `pytest --assay --assay-rerun failed` (or `assay test --failed`)
+  runs only the tests that didn't pass last time: regressions, new failures, flaky tests,
+  tests that couldn't be judged, and known failures. If none are left, that counts as a pass.
+- **Timeouts:** `timeout = 900` in `assay.toml` (or `assay test --timeout 900`) stops an
+  attempt that runs longer, along with everything it started. What it recorded is still
+  checked, and a run it left open is reported as never finished. `0` means no limit.
 ## Setup guide
 
 Setting up Assay has two stages. Installing it is done once by someone technical and takes

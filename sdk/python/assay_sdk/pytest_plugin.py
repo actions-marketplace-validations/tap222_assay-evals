@@ -22,7 +22,9 @@ usual. Exit 6 means inconclusive: nothing got worse, but some results couldn't b
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+from typing import Optional
 
 import pytest
 
@@ -59,6 +61,39 @@ def pytest_addoption(parser):
                      "whether anything got worse")
     g.addoption("--assay-baseline", metavar="RUN", help="Compare with this run instead; 'none' for no baseline")
     g.addoption("--assay-upload", action="store_true", help="Also send the run to ASSAY_URL (with ASSAY_KEY)")
+    g.addoption("--assay-rerun", choices=["failed"],
+                help="failed: run only the tests that didn't pass last time (regressed, new failures, flaky, "
+                     "couldn't be judged, known failures)")
+
+
+def _rerun_list(config) -> Optional[set]:
+    """The tests to rerun, from the last run's .assay/state.json; None when not rerunning."""
+    if (config.getoption("assay_rerun", None) or os.environ.get("ASSAY_RERUN")) != "failed":
+        return None
+    path = config.rootpath / ".assay" / "state.json"
+    try:
+        return set(json.loads(path.read_text()).get("rerun") or [])
+    except (OSError, ValueError):
+        raise pytest.UsageError("--assay-rerun failed needs a run to rerun: nothing in .assay/state.json yet")
+
+
+def pytest_collection_modifyitems(config, items):
+    wanted = _rerun_list(config)
+    if wanted is None:
+        return
+    keep = [i for i in items if case_id(i.nodeid) in wanted]
+    drop = [i for i in items if case_id(i.nodeid) not in wanted]
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+    items[:] = keep
+    config._assay_rerun_nothing = not keep
+
+
+def pytest_report_header(config):
+    wanted = _rerun_list(config) if config.getoption("assay_rerun", None) or os.environ.get("ASSAY_RERUN") else None
+    if wanted is not None:
+        return f"assay: rerunning the {len(wanted)} test(s) that didn't pass last time" if wanted else \
+            "assay: nothing to rerun, the last run passed"
 
 
 _pytest_config = None  # the session's config, for hooks that aren't given it
@@ -107,6 +142,9 @@ def _session(config):
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
+    if getattr(session.config, "_assay_rerun_nothing", False):
+        session.exitstatus = 0  # nothing failed last time: that's a pass, not "no tests collected"
+        return
     s = _session(session.config)
     if not s:
         return

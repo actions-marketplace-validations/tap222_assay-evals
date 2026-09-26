@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from sqlalchemy import select
@@ -62,6 +63,9 @@ def main(argv=None) -> int:
                                                      "'none' for no baseline")
     t.add_argument("--upload", action="store_true", help="Also send the run to a server (ASSAY_URL, ASSAY_KEY)")
     t.add_argument("--junit", metavar="PATH", help="Also write JUnit XML, for CI to show each case")
+    t.add_argument("--timeout", type=float, metavar="SECONDS", help="Stop an attempt that runs longer (overrides "
+                                                                     "assay.toml)")
+    t.add_argument("--failed", action="store_true", help="Run only the cases that didn't pass last time (pytest)")
     t.add_argument("command", nargs=argparse.REMAINDER, help="-- <command> (overrides assay.toml)")
     u = sub.add_parser("upload", help="Send a test run (the latest, by default) to an Assay server")
     u.add_argument("run", nargs="?", help="A run id instead of the latest")
@@ -70,11 +74,38 @@ def main(argv=None) -> int:
         q.add_argument("--key", help="API key with the ingest scope (default: ASSAY_KEY)")
         q.add_argument("--tenant", dest="send_tenant", metavar="TENANT",
                        help="Tenant to send to (a tenant key's own is used otherwise)")
+    pc = sub.add_parser("pr-comment", help="Post the latest run's summary on the pull request (GitHub Actions), "
+                                           "updating Assay's earlier comment")
+    pc.add_argument("--summary", default=".assay/summary.md")
+    pc.add_argument("--pr", type=int, help="The PR number (default: from the GitHub Actions event)")
+    pc.add_argument("--repo", help="owner/name (default: GITHUB_REPOSITORY)")
     a = sub.add_parser("accept", help="Make the latest test run the baseline, known failures and all")
     a.add_argument("run", nargs="?", help="A run id instead of the latest")
     sub.add_parser("schema", help="Print the v1 event schema as JSON Schema")
 
     args = p.parse_args(argv)
+    if args.cmd == "pr-comment":
+        from assay import github, local
+        repo, pr, token = args.repo or os.environ.get("GITHUB_REPOSITORY"), args.pr or github.pr_number(), \
+            os.environ.get("GITHUB_TOKEN")
+        if not pr:
+            print("Not a pull request: nothing to comment on.")
+            return 0
+        if not (repo and token):
+            print("Set GITHUB_TOKEN and GITHUB_REPOSITORY (GitHub Actions sets the second; pass the first "
+                  "from secrets.GITHUB_TOKEN).", file=sys.stderr)
+            return 2
+        try:
+            body = open(args.summary, encoding="utf-8").read()
+        except OSError:
+            print(f"No summary at {args.summary}: run `pytest --assay` or `assay test` first.", file=sys.stderr)
+            return 2
+        try:
+            print(f"{github.comment(body, repo, pr, token, local.MARKER).capitalize()} the comment on PR #{pr}.")
+        except (RuntimeError, OSError) as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        return 0
     if args.cmd in ("init", "test", "accept", "upload"):
         from pathlib import Path
         from assay import local
@@ -86,7 +117,7 @@ def main(argv=None) -> int:
         if args.cmd == "test":
             send = {"url": args.url, "key": args.key, "tenant": args.send_tenant} if args.upload else None
             return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,
-                              args.junit)
+                              args.junit, args.timeout, args.failed)
         made = local.init(root)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
         try:
