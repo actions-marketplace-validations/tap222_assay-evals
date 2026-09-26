@@ -967,6 +967,39 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         from assay import review
         return review.personas(engine, _tenant(source), category_id)
 
+    # ---------- the report (assay/report.py) ----------
+
+    @app.get("/v1/report", tags=["results"],
+             summary="What the evaluation found: issues caught before users, failure modes, fixes, the log")
+    def evaluation_report(source: str, days: float = 7, format: str = "markdown", p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        from assay import report
+        r = report.build(engine, _tenant(source), days, source=runner.CachedSource(resolve(p, source)))
+        if format == "json":
+            return report.as_json(r)
+        return Response(report.markdown(r), media_type="text/markdown")
+
+    class NoteIn(BaseModel):
+        text: str = Field(..., max_length=2000)
+        by: Optional[str] = Field(None, max_length=256)
+
+    @app.post("/v1/report/log", tags=["operate"], summary="Add to the running log: what you found, learned, fixed")
+    def report_note(source: str, body: NoteIn, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        from assay import report, sso
+        report.note(engine, _tenant(source), body.text, by=body.by or sso.actor_of(p))
+        return {"logged": True}
+
+    @app.post("/v1/report/send", tags=["operate"], summary="Post the report to the alert webhook (Slack)")
+    def report_send(source: str, days: float = 7, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        if not settings.webhook_url:
+            raise HTTPException(400, "Set ASSAY_WEBHOOK_URL to post the report.")
+        from assay import integrations, report
+        md = report.markdown(report.build(engine, _tenant(source), days, source=runner.CachedSource(resolve(p, source))))
+        integrations._post(settings.webhook_url, {"text": md})
+        return {"sent": True}
+
     @app.get("/v1/learn/candidates", tags=["results"], summary="Drafted test cases: proposed, approved, rejected")
     def learn_candidates(source: str, status: Optional[str] = None, p: Principal = Depends(require("read"))):
         check_source(p, source)

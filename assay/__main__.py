@@ -143,6 +143,16 @@ def main(argv=None) -> int:
     cb.add_argument("--second-judge", help="Another judge over the same items, to see where they disagree "
                                            "(default: [calibrate] second_judge)")
     cb.add_argument("--format", choices=["text", "json"], default="text")
+    rp = sub.add_parser("report", help="What the evaluation found this week: issues caught before users saw them, "
+                                       "failure modes, fixes, the log")
+    rp.add_argument("--days", type=float, default=7)
+    rp.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    rp.add_argument("--out", help="Write it to a file too")
+    lg = sub.add_parser("log", help="The running log of findings: add what you learned")
+    lgs = lg.add_subparsers(dest="log_cmd", required=True)
+    la = lgs.add_parser("add", help="Add a note: an error found, what was learned, the fix, the impact avoided")
+    la.add_argument("text")
+    la.add_argument("--by", help="Who (default: git config user.name)")
     al = sub.add_parser("acks", help="What's acknowledged, what expires soon, and what woke up")
     al.add_argument("--prune", action="store_true", help="Remove the ones that ended (expired, or passing since)")
     sub.add_parser("schema", help="Print the v1 event schema as JSON Schema")
@@ -174,7 +184,7 @@ def main(argv=None) -> int:
         from pathlib import Path
         from assay import diff
         return diff.main(Path.cwd(), args.baseline, args.current, args.format)
-    if args.cmd in ("init", "test", "accept", "upload", "ack", "acks", "golden", "calibrate"):
+    if args.cmd in ("init", "test", "accept", "upload", "ack", "acks", "golden", "calibrate", "report", "log"):
         from pathlib import Path
         from assay import local
         root = Path.cwd()
@@ -186,6 +196,10 @@ def main(argv=None) -> int:
             return local.ack(root, args.case, args.checks, args.reason, args.for_, args.by, args.run)
         if args.cmd == "acks":
             return local.list_acks(root, args.prune)
+        if args.cmd == "report":
+            return local.report_cmd(root, args.days, args.format, args.out)
+        if args.cmd == "log":
+            return local.log_add(root, args.text, args.by)
         if args.cmd == "calibrate":
             return local.calibrate_cmd(root, args.baseline, args.format, args.judge, args.repeat,
                                        second_judge=args.second_judge)

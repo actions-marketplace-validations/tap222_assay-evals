@@ -12,6 +12,7 @@
 | [Judge calibration](calibration.md) | A golden set a person scored, and whether the judge's scores track it: ranking, agreement, bias, consistency, per tag, on every change |
 | [Results you can trust](verdicts.md) | One verdict per check, and whether the judge was given the right data |
 | [Failure analysis](failures.md) | Where a wrong answer started, failure causes, path contracts |
+| [The report](report.md) | What the evaluation found: issues caught before users saw them, failure modes, fixes, the log |
 | [Learning from production](learning.md) | Production failures become regression tests, with the whole trace |
 | [Prompt versions](prompts.md) | The prompt registry, diffs, and results per version |
 | [Release gates](release-gates.md) | Advance, hold or roll back, and flaky checks that rerun instead of block |

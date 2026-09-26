@@ -301,6 +301,18 @@ agent_steps = Table(
     Column("settings", JSON),  # temperature, max tokens, reasoning effort, ...
 )
 
+# The running log of what the evaluation found (assay/report.py): findings as they happened, and notes.
+report_log = Table(
+    "report_log", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant", String(64), nullable=False, index=True),
+    Column("ts", DateTime, nullable=False, index=True),
+    Column("kind", String(16), nullable=False),  # caught | fixed | found | note
+    Column("text", String(2000), nullable=False),
+    Column("by", String(256)),
+    Column("key", String(512), index=True),  # a finding's, so it's logged once
+)
+
 # Reading production conversations (assay/review.py): one note per conversation read, the failure
 # categories they're grouped into, and each day's reading.
 review_notes = Table(

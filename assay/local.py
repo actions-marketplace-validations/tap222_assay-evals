@@ -2677,6 +2677,33 @@ def calibrate_cmd(root: Path, baseline: Optional[str] = None, fmt: str = "text",
     return 0 if passed else 1
 
 
+# ---------- the report (assay/report.py) ----------
+
+def report_cmd(root: Path, days: float = 7, fmt: str = "markdown", out: Optional[str] = None) -> int:
+    """`assay report`: what the tests caught this week, and the running log. The server's report
+    (GET /v1/report) adds production: failure modes, fixes that held, surprising usage."""
+    from assay import report
+    engine, state = _open(root)
+    if engine is None:
+        print("No test runs yet: run `assay test` first.", file=sys.stderr)
+        return 2
+    r = report.build(engine, TENANT, days, revisions=(state or {}).get("revisions"))
+    text = json.dumps(report.as_json(r), indent=1, default=str) if fmt == "json" else report.markdown(r)
+    print(text)
+    if out:
+        Path(out).write_text(text)
+    return 0
+
+
+def log_add(root: Path, text: str, by: Optional[str] = None) -> int:
+    from assay import acks, report
+    home = ensure_home(root)
+    engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
+    report.note(engine, TENANT, text, by=by or acks.who())
+    print("Added to the log. `assay report` shows it with this week's findings.")
+    return 0
+
+
 # ---------- sending a run to a server ----------
 
 def _http(method: str, url: str, body: Optional[dict], headers: Dict[str, str]) -> Tuple[int, object]:
