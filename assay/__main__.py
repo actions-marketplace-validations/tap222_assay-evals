@@ -66,6 +66,8 @@ def main(argv=None) -> int:
     t.add_argument("--timeout", type=float, metavar="SECONDS", help="Stop an attempt that runs longer (overrides "
                                                                      "assay.toml)")
     t.add_argument("--failed", action="store_true", help="Run only the cases that didn't pass last time (pytest)")
+    t.add_argument("--judge", action="store_true", help="Also have an LLM judge plan quality and consistency "
+                                                        "(needs `pip install anthropic`; a model call per run)")
     t.add_argument("command", nargs=argparse.REMAINDER, help="-- <command> (overrides assay.toml)")
     u = sub.add_parser("upload", help="Send a test run (the latest, by default) to an Assay server")
     u.add_argument("run", nargs="?", help="A run id instead of the latest")
@@ -117,7 +119,7 @@ def main(argv=None) -> int:
         if args.cmd == "test":
             send = {"url": args.url, "key": args.key, "tenant": args.send_tenant} if args.upload else None
             return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,
-                              args.junit, args.timeout, args.failed)
+                              args.junit, args.timeout, args.failed, args.judge)
         made = local.init(root)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
         try:

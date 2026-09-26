@@ -73,6 +73,8 @@ def pytest_addoption(parser):
     g.addoption("--assay-timeout", type=float, metavar="SECONDS",
                 help="Stop a session still running after this long, and report what it recorded "
                      "(default: timeout in assay.toml, or ASSAY_TIMEOUT; 0: no limit)")
+    g.addoption("--assay-judge", action="store_true",
+                help="Also have an LLM judge each test's plan quality and consistency (needs anthropic)")
     g.addoption("--assay-rerun", choices=["failed"],
                 help="failed: run only the tests that didn't pass last time (regressed, new failures, flaky, "
                      "couldn't be judged, known failures)")
@@ -253,6 +255,8 @@ def _finish(session, s, exitstatus):
         s["report"] = "Nothing was recorded: no test took the assay_case fixture."
         return
     cfg = local.find_config(session.config.rootpath)
+    if session.config.getoption("assay_judge", False):
+        cfg = {**cfg, "judge": {**cfg["judge"], "enabled": True}}
     code, text = local.finish(session.config.rootpath, cfg, s["run_id"], 1, [],
                               session.config.getoption("assay_baseline"))
     if session.config.getoption("assay_upload") and code != 2:

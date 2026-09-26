@@ -40,6 +40,7 @@ class Settings:
     abandon_minutes: float = 30.0
     evaluate_seconds: int = 60  # how often the sweep looks for abandoned and unevaluated runs (0 = off)
     backlog_minutes: float = 10.0  # ended runs waiting longer than this for evaluation open an alert
+    judge_model: str = "claude-opus-5"  # the LLM judge (assay/judge.py), run on request
 
     # built-in scheduler (0 = off)
     schedule_minutes: int = 0
@@ -67,6 +68,7 @@ class Settings:
             abandon_minutes=float(e("ASSAY_ABANDON_MINUTES", "30")),
             evaluate_seconds=int(e("ASSAY_EVALUATE_SECONDS", "60")),
             backlog_minutes=float(e("ASSAY_BACKLOG_MINUTES", "10")),
+            judge_model=e("ASSAY_JUDGE_MODEL", "claude-opus-5"),
             schedule_minutes=int(e("ASSAY_SCHEDULE_MINUTES", "0")),
             schedule_sources=_list(e("ASSAY_SCHEDULE_SOURCES")),
             schedule_window_days=float(e("ASSAY_SCHEDULE_WINDOW_DAYS", "1")),

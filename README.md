@@ -846,6 +846,39 @@ or stopped early is reported by **finished**, not here as well. In `pytest --ass
 `assay test` the check is reported as "Plan adherence", under Planning. Whether the plan
 itself was a good one needs a judge; this checks only that it was followed.
 
+### An LLM judge: was the plan a good one, and does the run hang together?
+
+Rules can check that a plan was followed. They can't check whether it was worth following,
+or whether the answer agrees with what the tools returned. An LLM judge scores both, 1 to 5,
+with a reason that names the step it rests on:
+
+| Check | What the judge looks at |
+|---|---|
+| **Plan quality** | whether the plan, given the request and the tools offered, addresses what was asked, in a workable order, without steps it didn't need. Only for runs that record a plan |
+| **Consistency** | whether the reasoning, the tool results and the answer agree: nothing contradicted, nothing stated as fact that no step established |
+
+```bash
+pip install anthropic                       # and ANTHROPIC_API_KEY, or `ant auth login`
+assay test --judge                          # or: pytest --assay --assay-judge
+curl -X POST "$ASSAY_URL/v1/agents/runs/nightly-0924/judge?source=events:acme" -H "Authorization: Bearer $ASSAY_KEY"
+```
+
+It costs a model call per run, so it runs only when asked. `[judge] enabled = true` in
+`assay.toml` turns it on for every run. The model is `claude-opus-5` by default (`[judge]
+model`, or `ASSAY_JUDGE_MODEL` on the server). A score of 3 or more passes.
+
+The judge's results are ordinary evaluation results (evaluator `assay.judge@1`). So:
+- a case whose consistency drops from its baseline is a regression, and a judge that disagrees
+  with itself across attempts is flaky;
+- what the judge was given is recorded, and checked against the trace like any evaluator's;
+- a judge that couldn't judge isn't a failure. A rate limit, timeout, 5xx or connection error
+  is `INFRA_ERROR`. A refusal, a rejected request, or an answer that isn't the JSON asked for
+  is `EVALUATOR_ERROR`.
+
+Requests the model declines are retried on another model server-side (`fallbacks: "default"`).
+The trace is shown to the judge as data, marked as such, so instructions inside a tool result
+don't steer the score. Long tool results are cut, and the cut is marked.
+
 ### Conversations and MCP
 
 A chat is several runs, one per turn. `assay.run(..., conversation="chat-1", turn=2)` (or

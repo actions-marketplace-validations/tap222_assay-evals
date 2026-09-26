@@ -45,7 +45,7 @@ CONFIG = "assay.toml"
 HOME = ".assay"
 TENANT = "local"
 EXAMPLE = "tests/ai/test_support.py"
-CHECK_NAMES = {"completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state",
+CHECK_NAMES = {"plan_quality": "Plan quality", "consistency": "Consistency", "completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state",
                "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts",
                "plan": "Plan adherence"}
 PII_EVALUATOR = "assay.pii@1"
@@ -91,6 +91,13 @@ seconds = 1.5
 context_tokens = 1.5
 tools_exposed = 1.5
 steps = 1.5
+
+# An LLM judge for what rules can't check: whether each run's plan was a good one, and whether
+# its reasoning, tool results and answer agree. A model call per run, so off unless asked
+# (`assay test --judge`, `pytest --assay --assay-judge`). Needs `pip install anthropic`.
+[judge]
+enabled = false
+model = "claude-opus-5"
 '''
 
 EXAMPLE_TEMPLATE = '''\
@@ -186,7 +193,12 @@ def load_config(root: Path) -> dict:
             "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
             "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()}},
             "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
-            "behavior": _behavior_config(cfg.get("behavior") or {})}
+            "behavior": _behavior_config(cfg.get("behavior") or {}), "judge": _judge_config(cfg.get("judge") or {})}
+
+
+def _judge_config(j: dict) -> dict:
+    from assay import judge
+    return {"enabled": bool(j.get("enabled", False)), "model": str(j.get("model") or judge.MODEL)}
 
 
 def _behavior_config(b: dict) -> dict:
@@ -199,7 +211,7 @@ def _behavior_config(b: dict) -> dict:
 
 DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
                   "pii": {"check": True, "allow": {}}, "pytest": {"checks": True},
-                  "behavior": {"fail": True, "ratios": {}}}
+                  "behavior": {"fail": True, "ratios": {}}, "judge": {"enabled": False, "model": "claude-opus-5"}}
 
 
 def find_config(start: Path) -> dict:
@@ -694,7 +706,8 @@ CATEGORIES = [  # (name, which checks): the first that matches a check's field t
     ("Security", lambda f: f in ("safety", "pii") or f.startswith("expect.must_get_approval")),
     ("Completion", lambda f: f in ("completed", "efficiency")
      or f.startswith(("expect.must_resolve", "expect.max_steps", "expect.must_answer"))),
-    ("Planning", lambda f: f == "plan"),
+    ("Planning", lambda f: f in ("plan", "plan_quality")),
+    ("Reasoning", lambda f: f == "consistency"),
     ("Behavior", lambda f: f.startswith(("expect.max_cost", "expect.max_latency", "expect.max_tools",
                                          "expect.max_context"))),
     ("Output quality", lambda f: True),  # the answer, the end state, your asserts, your own fields
@@ -766,7 +779,7 @@ def _short(case: str) -> str:
 
 # What a reviewer should read first: safety, then what the agent decided, then what it did, then cost.
 RANK = ("Safety", "PII", "expect.must_get_approval", "Approval for", "Outcome", "expect.must_resolve", "Finished",
-        "Tool usage", "Plan adherence", "expect.must_call", "expect.must_not_call", "End state", "Answer", "Your asserts")
+        "Tool usage", "Plan adherence", "Consistency", "Plan quality", "expect.must_call", "expect.must_not_call", "End state", "Answer", "Your asserts")
 
 
 def _rank(line: str) -> int:
@@ -943,13 +956,15 @@ def new_run_id() -> str:
 
 def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Optional[str],
          send: Optional[dict] = None, junit: Optional[str] = None, timeout: Optional[float] = None,
-         failed: bool = False) -> int:
+         failed: bool = False, judge: bool = False) -> int:
     """`assay test`. Prints the report; returns the exit code."""
     try:
         cfg = load_config(root)
     except SetupError as exc:
         print(exc, file=sys.stderr)
         return 2
+    if judge:
+        cfg["judge"] = {**cfg["judge"], "enabled": True}
     problem = sdk_problem()
     if problem:
         print(problem, file=sys.stderr)
@@ -1010,6 +1025,10 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     _, bad = load_file(engine, str(events), TENANT)
     if bad:
         return 2, "\n  ".join([f"{len(bad)} bad line(s) in {events}:", *bad[:20]])
+    judged = None
+    if (cfg.get("judge") or {}).get("enabled"):  # plan quality and consistency, by an LLM (assay/judge.py)
+        from assay import judge
+        judged = judge.judge_run(engine, TENANT, run_id, cfg["judge"]["model"])
     result = evaluate(engine, run_id, baseline, cfg["tolerance"], cfg["pii"], cfg["behavior"], abandoned_why)
     if result is None:
         return 2, ("Nothing to check: record runs with assay.run(..., test=\"<case>\"), and say what each case "
@@ -1024,6 +1043,10 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
          f"{_n(len(set(known.values())), 'run')})")
     result["behavior_fails"] = cfg["behavior"]["fail"]
     text, passed = report(run_id, baseline, result, repeat, codes, against)
+    if judged is not None:
+        text += _paint(f"\nJudged {_n(judged['judged'], 'run')} with {cfg['judge']['model']} (plan quality, "
+                       f"consistency)" + (f"; {judged['errors']} result(s) couldn't be judged" if judged["errors"]
+                                          else "") + ".", "dim")
     if junit:
         write_junit(junit, run_id, result, verdict(result, bool(baseline))[1])
     state["last"] = run_id
