@@ -1080,14 +1080,17 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     nj = result["not_judged"]
     if nj:
         out.append(_paint(f"? {_n(len(nj), 'result')} couldn't be judged (not counted)", "yellow"))
-        for v in ("EVALUATOR_ERROR", "INFRA_ERROR", "MISSING"):
+        for v in verdicts.NOT_JUDGED:
             items = [x for x in nj if x["verdict"] == v]
             if not items:
                 continue
             out.append(f"  {verdicts.VERDICTS[v].capitalize()}: {len(items)}")
             for x in items[:5]:
                 out.append(f"    {x['case_id']}  {_label(x['field'] or 'result')}" +
-                           (f"  {x['evaluator']}" if x["evaluator"] else "") + _paint(f"  {x['reason']}", "dim"))
+                           (f"  {x['evaluator']}" if x["evaluator"] else "") + _paint(f"  {x['reason']}", "dim") +
+                           (_paint(f" after {x['tries']} tries", "dim") if x.get("tries", 1) > 1 else ""))
+                if x.get("raw_output") and v == "INVALID":  # what it said instead of a verdict
+                    out.append(_paint(f"      it returned: {x['raw_output'][:160]!r}", "dim"))
             if len(items) > 5:
                 out.append(f"    … and {len(items) - 5} more")
         out.append("")

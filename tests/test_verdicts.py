@@ -44,8 +44,8 @@ def test_each_check_gets_one_verdict(app):
             ev.append(check(i, "r", c, "pass"))
     assert app.post("/v1/ingest", json=ev, headers=H).status_code == 200
     out = app.get("/v1/evals/runs/r/verdicts", params=SRC).json()
-    assert out["counts"] == {"PASS": 14, "FAIL": 1, "FLAKY": 1, "INCONCLUSIVE": 0, "EVALUATOR_ERROR": 1,
-                             "INFRA_ERROR": 1, "MISSING": 2}
+    assert out["counts"] == {"PASS": 14, "FAIL": 1, "FLAKY": 1, "INCONCLUSIVE": 0, "INVALID": 0, "TIMEOUT": 0,
+                             "RATE_LIMITED": 0, "EVALUATOR_ERROR": 1, "INFRA_ERROR": 1, "MISSING": 2}
     by = {(c["case_id"], c["evaluator"]): c for c in out["checks"]}
     assert by[("c1", "helpful@1")]["verdict"] == "INFRA_ERROR" and "503" in by[("c1", "helpful@1")]["reason"]
     assert by[("c2", "helpful@1")]["verdict"] == "EVALUATOR_ERROR"

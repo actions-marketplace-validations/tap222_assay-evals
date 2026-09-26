@@ -213,6 +213,9 @@ eval_results = Table(
     Column("attempt", Integer),  # repeated judgements of the same output
     Column("lineage", JSON),  # {"prompt": "extract_fields@v13", "model": ..., "build": ...}
     Column("inputs", JSON),  # what the evaluator saw: {"query", "output", "context", ...}; see assay/audit.py
+    Column("error_kind", String(16)),  # status error: invalid | timeout | rate_limited | unavailable | error
+    Column("tries", Integer),  # how many times the evaluator was asked for this verdict
+    Column("raw_output", Text),  # what the evaluator returned, as it returned it
 )
 
 # --- Agents: one trajectory per run of an agent on a task, its steps, and what a case expects ---

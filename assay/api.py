@@ -879,7 +879,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                         media_type="text/markdown" if format == "markdown" else "text/plain")
 
     @app.get("/v1/evals/runs/{run_id}/verdicts", tags=["results"],
-             summary="Every check's verdict: PASS, FAIL, FLAKY, INCONCLUSIVE, EVALUATOR_ERROR, INFRA_ERROR, MISSING")
+             summary="Every check's verdict: PASS, FAIL, FLAKY, INCONCLUSIVE, INVALID, TIMEOUT, RATE_LIMITED, "
+                     "EVALUATOR_ERROR, INFRA_ERROR, MISSING")
     def eval_verdicts(run_id: str, source: str, verdict: Optional[str] = None, baseline: Optional[str] = None,
                       p: Principal = Depends(require("read"))):
         out = failures.evaluation(engine, resolve(p, source), _tenant(source), run_id, baseline)

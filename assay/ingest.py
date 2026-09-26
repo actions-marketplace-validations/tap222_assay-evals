@@ -117,6 +117,18 @@ class EvalResultEvent(Event):
                           '"instructions", "messages"}. Checked against the trace (assay/audit.py).')
     lineage: Optional[Dict[str, str]] = Field(
         None, description='What produced the output: {"prompt": "extract_fields@v13", "model": "...", "build": "..."}')
+    error_kind: Optional[str] = Field(None, pattern="^(invalid|timeout|rate_limited|unavailable|error)$",
+                                      description="status error: why it couldn't be judged. invalid (the evaluator answered, but not with a verdict: unparseable, off-schema, a score that isn't a number), timeout, rate_limited, unavailable (connection error, 5xx), error (anything else)")
+    tries: Optional[int] = Field(None, ge=1, description="How many times the evaluator was asked")
+    raw_output: Optional[str] = Field(None, max_length=16384, description="What the evaluator returned, as it did")
+
+    @model_validator(mode="after")
+    def _validity(self):
+        if self.error_kind and self.status != "error":
+            raise ValueError("error_kind is for status error: a result that couldn't be judged")
+        if self.score is not None and (self.score != self.score or abs(self.score) == float("inf")):
+            raise ValueError("score is NaN or infinite: send status error with error_kind invalid instead")
+        return self
 
 
 class StepEvent(Event):

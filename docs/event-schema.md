@@ -126,7 +126,9 @@ no events, then evaluated. The SDK sends it when the `with assay.run(...)` block
 | `run_id` | string | the run that produced the output, so failures can be traced |
 | `field`, `expected`, `actual` | string | what was checked |
 | `evaluator` | string | `name@version`, e.g. `exact_match@2`, `llm_judge@1` |
-| `score`, `reason` | number, string | |
+| `score`, `reason` | number, string | a score can't be `NaN` or infinite: send `status` `error`, `error_kind` `invalid` |
+| `error_kind` | `invalid` \| `timeout` \| `rate_limited` \| `unavailable` \| `error` | with `status` `error`: why it couldn't be judged. `invalid`: the evaluator answered, but not with a verdict |
+| `tries`, `raw_output` | int, string | how many times the evaluator was asked, and what it returned |
 | `version` | {string: string} | what produced the output, when there's no linked run |
 
 Send passes too: they're what failures are compared against.

@@ -14,11 +14,20 @@ Every check in an evaluation run gets one verdict:
 | `FAIL` | judged, and failed: the only verdict that says something about the AI |
 | `FLAKY` | passes some attempts and fails others, the way it did before |
 | `INCONCLUSIVE` | plausibly worse but too few attempts to tell, or an intended change nobody has accepted |
+| `INVALID` | couldn't be judged: the evaluator answered, but not with a verdict (unparseable, off its schema, a score that's missing, `NaN` or out of range). Never a score of 0 |
+| `TIMEOUT` | couldn't be judged: the evaluator timed out |
+| `RATE_LIMITED` | couldn't be judged: the evaluator was rate limited |
 | `EVALUATOR_ERROR` | couldn't be judged: the evaluator errored, fails values that differ only in format, contradicts itself, or was given the wrong data |
-| `INFRA_ERROR` | couldn't be judged: a timeout, rate limit, 5xx or connection error |
+| `INFRA_ERROR` | couldn't be judged: a 5xx or connection error (or a timeout or rate limit said only in the reason) |
 | `MISSING` | no result: the evaluator reported on this case in the baseline, or on most of the run's cases, but not on this one now |
 
-Send a check the evaluator couldn't make as `status="error"` with the reason. The failure-cause
+Send a check the evaluator couldn't make as `status="error"` with the reason, and say why with
+`error_kind`: `invalid`, `timeout`, `rate_limited`, `unavailable` (a 5xx or connection error)
+or `error`. Without it, the reason's words decide between `INFRA_ERROR` and
+`EVALUATOR_ERROR`. `tries` (how many times the evaluator was asked) and `raw_output` (what it
+returned) are kept with the result, shown by `/verdicts` and in `assay test`'s report, so an
+`INVALID` result shows what the judge said instead of a verdict. A score that's `NaN` or
+infinite is refused at ingest: it's an `invalid` error, not a number. The failure-cause
 analysis decides the rest, so the verdicts agree with the release call. Missing results keep a
 release from advancing ("rerun"). An evaluator job that didn't trigger at all is caught against
 the baseline: "faithful@2 reported on 48 of these cases in the baseline, none in this run". A new
