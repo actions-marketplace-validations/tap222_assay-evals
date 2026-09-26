@@ -210,3 +210,19 @@ def test_refund(assay_case):
     assert out.returncode == 1
     assert "Plan adherence: Strayed from its plan: called get_order (step 2) after refund, though the plan put it " \
            "first." in out.stdout
+
+
+def test_the_pr_comment_is_text_never_markdown(project):
+    from assay import local
+    bad = "@octocat <img src=x onerror=alert(1)> ![p](http://t/i.png) [x](http://e) `x` | # h"
+    md = local.summary_markdown("r1", {
+        "summary": {"cases": 1, "buckets": {"passed": [], "regressed": ["t::test_`evil`"], "new failure": [],
+                                            "flaky": [], "couldn't be judged": [], "known failure": []},
+                    "improved": [], "categories": {}},
+        "failing": {("t::test_`evil`", "pytest"): {"reason": bad, "expected": None, "actual": None}},
+        "fields": [], "not_judged": [], "behavior": []}, 1, None)
+    line = next(x for x in md.splitlines() if x.startswith("- "))
+    assert "@​octocat" in line and "<img" not in line and "&lt;img" in line
+    assert "![p](" not in line and "[x](" not in line and "\\[x\\]" in line  # link syntax escaped
+    assert "`test_'evil'`" in line  # a backtick can't end the code span
+

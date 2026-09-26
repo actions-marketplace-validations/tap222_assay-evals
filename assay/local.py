@@ -777,6 +777,25 @@ def _short(case: str) -> str:
     return case.split("::", 1)[1] if "::" in case else case
 
 
+# Text in a PR comment comes from the run: test names, assertion messages, field names, all
+# under the PR author's control. It goes in as text, never as Markdown or HTML: no @-mentions
+# (they'd notify people), no links or images, no raw HTML, nothing that ends a code span.
+_MD_SPECIAL = re.compile(r"([\\`*_\[\]~|#])")
+MAX_COMMENT = 60_000  # GitHub's limit is 65,536 characters
+
+
+def _md(text) -> str:
+    t = re.sub(r"\s+", " ", str(text)).strip()
+    t = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return _MD_SPECIAL.sub(r"\\\1", t).replace("@", "@\u200b")
+
+
+def _code(text, n: int = 120) -> str:
+    """Text inside a code span: nothing in it can close the span."""
+    t = re.sub(r"\s+", " ", str(text)).strip().replace("`", "'")
+    return "`" + (t[:n] + "…" if len(t) > n else t) + "`"
+
+
 # What a reviewer should read first: safety, then what the agent decided, then what it did, then cost.
 RANK = ("Safety", "PII", "expect.must_get_approval", "Approval for", "Outcome", "expect.must_resolve", "Finished",
         "Tool usage", "Plan adherence", "Consistency", "Plan quality", "expect.must_call", "expect.must_not_call", "End state", "Answer", "Your asserts")
@@ -816,12 +835,12 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         reasons[x["case_id"]] += [ch["text"] for ch in x["changes"]]
     for case in sorted(reasons, key=lambda c: (min(_rank(x) for x in reasons[c]), c)):
         lines = sorted(dict.fromkeys(_tidy(x) for x in reasons[case]), key=_rank)
-        changes.append(f"- `{_short(case)}` → " + "; ".join(lines[:2])
+        changes.append(f"- {_code(_short(case))} → " + "; ".join(_md(x) for x in lines[:2])
                        + (f" (+{len(lines) - 2} more)" if len(lines) > 2 else ""))
     for f in result["fields"]:  # your own fields whose accuracy dropped, e.g. extraction
         if f["field"] not in CHECK_NAMES and not f["field"].startswith("expect.") and f["base_total"] and \
                 f["passed"] / f["total"] < f["base_passed"] / f["base_total"]:
-            changes.append(f"- `{f['label']}` accuracy {_pct(f['base_passed'], f['base_total'])} → "
+            changes.append(f"- {_code(f['label'])} accuracy {_pct(f['base_passed'], f['base_total'])} → "
                            f"{_pct(f['passed'], f['total'])}")
     out = [MARKER, f"## {HEADLINES.get(code, 'AI regression detected')}", "", " · ".join(counts), ""]
     if changes:
@@ -829,17 +848,20 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         if len(changes) > 30:
             out += [f"…and {len(changes) - 30} more", ""]
     if s["categories"]:
-        out += ["| Category | Passed |", "|---|---|"] + [f"| {k} | {ok}/{n} |" for k, (ok, n) in s["categories"].items()]
+        out += ["| Category | Passed |", "|---|---|"] + [f"| {_md(k)} | {ok}/{n} |" for k, (ok, n) in s["categories"].items()]
         out.append("")
     nj = result["not_judged"]
     if nj:
         out += [f"<details><summary>{_n(len(nj), 'result')} couldn't be judged</summary>", ""]
-        out += [f"- `{_short(x['case_id'])}` {_label(x['field'] or 'result')}: {verdicts.VERDICTS[x['verdict']]}, "
-                f"{x['reason']}" for x in nj[:20]]
+        out += [f"- {_code(_short(x['case_id']))} {_md(_label(x['field'] or 'result'))}: "
+                f"{verdicts.VERDICTS[x['verdict']]}, {_md(x['reason'])[:300]}" for x in nj[:20]]
         out += ["", "</details>", ""]
-    out.append(f"<sub>{against or 'no baseline yet'} · run `{run_id}` · "
+    out.append(f"<sub>{_md(against or 'no baseline yet')} · run {_code(run_id)} · "
                f"[Assay](https://github.com/tap222/docai-eval)</sub>")
-    return "\n".join(out) + "\n"
+    md = "\n".join(out) + "\n"
+    if len(md) > MAX_COMMENT:  # cut whole lines, and say so
+        md = md[:md.rfind("\n", 0, MAX_COMMENT - 200)] + "\n\n…the rest is in the job's summary.\n"
+    return md
 
 
 def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, codes: List[int],
