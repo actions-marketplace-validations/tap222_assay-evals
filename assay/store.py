@@ -277,6 +277,8 @@ agent_steps = Table(
     Column("parent_seq", Integer),  # a step nested inside another
     Column("tokens_in", Integer),  # a model call's input: how big the context has grown
     Column("tools", JSON),  # the tools a model call was offered
+    Column("tokens_out", Integer),  # a model call's output
+    Column("prompt", String(192)),  # the prompt a model call used, id@version
 )
 
 # Runs as the v1 event schema describes them (assay/schema.py): what run.start and run.end
@@ -372,6 +374,7 @@ suite_cases = Table(
     Column("input_ref", String(1024)),
     Column("reference", JSON),
     Column("properties", JSON),
+    Column("trajectory", JSON),  # the origin trace in full, as it was when the case was added (learn.snapshot)
     Column("added_at", DateTime, nullable=False),
     Column("added_by", String(128)),
 )

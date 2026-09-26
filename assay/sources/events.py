@@ -64,7 +64,7 @@ class EventsSource:
                 continue
             start = s["started_at"] or s["t_start"] + timedelta(seconds=s["seq"])
             lin = s.get("lineage") or {}
-            pid, _, ver = (lin.get("prompt") or "").partition("@")
+            pid, _, ver = (s.get("prompt") or lin.get("prompt") or "").partition("@")  # the call's own, else the run's
             out.append(CallRecord(call_id=f"{s['trajectory_id']}#{s['seq']}", stage=s["kind"], ts=start,
                                   document_id=s["trajectory_id"], model_declared=s["model"], model_served=s["model"],
                                   cost_usd=s["cost_usd"], status="error" if s["error"] else "success",

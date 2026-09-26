@@ -271,7 +271,7 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                         "kind": "reason" if e.kind == "llm" else e.kind, "name": e.name,
                         "args": {"op": e.op or "update"} if e.kind == "state" else
                         {"decision": e.decision, "by": e.by} if e.kind == "approval" else e.args,
-                        "tokens_in": e.tokens_in, "tools": e.tools,
+                        "tokens_in": e.tokens_in, "tokens_out": e.tokens_out, "prompt": e.prompt, "tools": e.tools,
                         "result": e.value if e.kind == "state" else e.result,
                         "error": e.error if e.status == "error" else None, "text": e.text, "model": e.model,
                         "tokens": tokens or None, "cost_usd": e.cost_usd, "started_at": e.ts,

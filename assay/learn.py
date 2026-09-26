@@ -632,6 +632,62 @@ def candidates(engine: Engine, source: str, status: Optional[str] = None) -> Lis
     return [{k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in r._mapping.items()} for r in rows]
 
 
+CONTENT = ("text", "args", "result", "value")  # step fields that can hold personal data
+
+
+def _step(r: dict) -> dict:
+    """A stored step in the event schema's shape (docs/event-schema.md): what was sent, back."""
+    kind = "llm" if r["kind"] == "reason" else r["kind"]
+    out = {"seq": r["seq"], "kind": kind, "name": r.get("name"), "parent_seq": r.get("parent_seq"),
+           "status": "error" if r.get("error") else "ok", "error": r.get("error"),
+           "started_at": r.get("started_at"), "ended_at": r.get("finished_at"), "text": r.get("text")}
+    if kind == "llm":
+        tokens_out = r.get("tokens_out")
+        if tokens_out is None and r.get("tokens") is not None:  # recorded before tokens_out was kept
+            tokens_out = r["tokens"] - (r.get("tokens_in") or 0) or None
+        out |= {"model": r.get("model"), "prompt": r.get("prompt"), "tokens_in": r.get("tokens_in"),
+                "tokens_out": tokens_out, "cost_usd": r.get("cost_usd"), "tools": r.get("tools")}
+    elif kind == "tool":
+        out |= {"args": r.get("args"), "result": r.get("result")}
+    elif kind == "state":
+        out |= {"op": (r.get("args") or {}).get("op"), "value": r.get("result")}
+    elif kind == "approval":
+        out |= {"decision": (r.get("args") or {}).get("decision"), "by": (r.get("args") or {}).get("by")}
+    ser = lambda v: v.isoformat() if isinstance(v, datetime) else v
+    return {k: ser(v) for k, v in out.items() if v is not None}
+
+
+def snapshot(engine: Engine, source: str, trace_id: str, redact_pii: bool = True) -> Optional[dict]:
+    """The trace in full, to keep with a test case: its input, every step (model calls with their
+    model, prompt, tokens and the tools they were offered; tool calls with arguments and results;
+    approvals; state changes), its answer, and the run's metadata. A saved case then doesn't lose
+    what the agent did, even once the trace itself is gone. None if the trace isn't an agent run."""
+    from assay.sources.events import EventsSource
+    tenant = source.split(":", 1)[1] if source.startswith("events:") else source
+    traj = EventsSource(engine, tenant).trajectories([trace_id]).get(trace_id)
+    if traj is None:
+        return None
+    r = store.runs
+    with engine.connect() as conn:
+        run = conn.execute(select(r.c.tags, r.c.segment, r.c.parent_run_id, r.c.error).where(
+            and_(r.c.tenant == tenant, r.c.run_id == trace_id))).first()
+    inp = _inputs(engine, tenant, [trace_id]).get(trace_id) or {}
+    clean = redact if redact_pii else (lambda v: v)
+    steps = [_step(x) for x in traj["steps"]]
+    for st in steps:
+        for k in CONTENT:
+            if k in st:
+                st[k] = clean(st[k])
+    ser = lambda v: v.isoformat() if isinstance(v, datetime) else v
+    out = {"trace_id": trace_id, "task": traj.get("task"), "input": clean(inp.get("input")),
+           "input_ref": inp.get("input_ref"), "steps": steps, "output": clean(traj.get("answer")),
+           "status": traj.get("status"), "outcome": traj.get("outcome"), "error": run.error if run else None,
+           "version": traj.get("lineage"), "tags": run.tags if run else None,
+           "segment": run.segment if run else None, "parent_run_id": run.parent_run_id if run else None,
+           "started_at": ser(traj.get("started_at")), "finished_at": ser(traj.get("finished_at"))}
+    return {k: v for k, v in out.items() if v is not None}
+
+
 def approve(engine: Engine, source: str, candidate_id: int, suite: str, case: Optional[dict] = None,
             redact_pii: bool = True, by: Optional[str] = None) -> Optional[dict]:
     """Add a candidate to a suite (with the developer's edits), and for agents store its reference."""
@@ -648,6 +704,7 @@ def approve(engine: Engine, source: str, candidate_id: int, suite: str, case: Op
         conn.execute(sc.insert().values(source=source, case_id=c["case_id"], suite=suite, candidate_id=candidate_id,
                                         pattern=row.pattern, origin_trace=row.trace_id, task=row.task, input=inp,
                                         input_ref=c.get("input_ref"), reference=ref, properties=props,
+                                        trajectory=snapshot(engine, source, row.trace_id, redact_pii),
                                         added_at=datetime.utcnow(), added_by=by))
         conn.execute(t.update().where(t.c.id == candidate_id).values(
             status="approved", decided_at=datetime.utcnow(), decided_by=by, case=c | {"input": inp}))
@@ -721,12 +778,14 @@ def guards(engine: Engine, source: str) -> Dict[str, dict]:
 
 
 def export(cases: List[dict], fmt: str = "json") -> tuple:
-    """A suite as a file a test tool can run: one case per entry, with input and expectations."""
+    """A suite as a file a test tool can run: one case per entry, with input and expectations, and
+    for an agent the trace it came from in full (`trajectory`): every step, not just input and output."""
     import csv
     import io
     rows = [{"case_id": c["case_id"], "task": c.get("task"), "input": c.get("input"), "input_ref": c.get("input_ref"),
              "expected": c.get("reference") or {}, "must_hold": c.get("properties") or [],
-             "guards": c.get("pattern"), "from_trace": c.get("origin_trace")} for c in cases]
+             "guards": c.get("pattern"), "from_trace": c.get("origin_trace"),
+             **({"trajectory": c["trajectory"]} if c.get("trajectory") else {})} for c in cases]
     if fmt == "jsonl":
         return "\n".join(json.dumps(r, default=str) for r in rows) + "\n", "application/x-ndjson"
     if fmt == "csv":

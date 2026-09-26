@@ -35,7 +35,11 @@ def test_request_values_fill_expected_arguments():
 
 @pytest.fixture
 def client(tmp_path):
-    return TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path / 'store.db'}")))
+    url = f"sqlite:///{tmp_path / 'store.db'}"
+    c = TestClient(create_app(Settings(store_url=url)))
+    from assay import store
+    c.engine = store.make_engine(url)
+    return c
 
 
 def trace(i, ts, looped=False, deleted=False):
@@ -112,3 +116,74 @@ def test_dismissing_a_pattern(client):
     client.put("/v1/learn/patterns/status", json={"source": src, "key": key, "status": "dismissed"})
     p = client.get("/v1/learn/patterns", params={"source": src}).json()
     assert p["patterns"][-1]["status"] == "dismissed" and p["loop"]["patterns"] == 0
+
+
+RICH = [  # an agent run with every kind of step, and metadata
+    {"type": "run.start", "task": "support", "input": {"message": "Refund O-17, I'm ana@example.com"},
+     "tags": {"channel": "web", "tier": "gold"}, "segment": "eu", "version": {"model": "m1", "prompt": "support@3"}},
+    {"type": "step", "seq": 0, "kind": "llm", "model": "claude-x", "prompt": "support@3", "tokens_in": 900,
+     "tokens_out": 40, "cost_usd": 0.01, "text": "Looking up the customer", "tools": ["search_customer", "refund"]},
+    {"type": "step", "seq": 1, "kind": "tool", "name": "search_customer", "args": {"email": "ana@example.com"},
+     "result": {"id": "C-1", "orders": ["O-17"]}, "parent_seq": 0},
+    {"type": "step", "seq": 2, "kind": "tool", "name": "get_order", "args": {"id": "O-17"}, "status": "error",
+     "error": "503 upstream"},
+    {"type": "step", "seq": 3, "kind": "approval", "name": "refund", "decision": "approved", "by": "policy",
+     "text": "under $50"},
+    {"type": "step", "seq": 4, "kind": "state", "name": "order:O-17", "op": "update", "value": {"status": "refunded"}},
+    {"type": "step", "seq": 5, "kind": "answer", "text": "Refunded O-17."},
+    {"type": "run.end", "outcome": "resolved"},
+]
+
+
+def _send(client, tenant, run_id, events):
+    evs = [{"v": 1, "id": f"{run_id}-{i}", "ts": "2026-09-25T10:00:00Z", "run_id": run_id, **e}
+           for i, e in enumerate(events)]
+    assert client.post("/v1/ingest", json=evs, headers={"X-Tenant": tenant}).status_code == 200
+
+
+def _as_events(t: dict) -> list:
+    """A saved trajectory as v1 events again: what a test tool would replay."""
+    start = {"type": "run.start", **{k: t[k] for k in ("task", "input", "tags", "segment", "version",
+                                                       "conversation_id", "turn") if k in t}}
+    steps = [{"type": "step", **{k: v for k, v in s.items() if k not in ("started_at",)}} for s in t["steps"]]
+    return [start, *steps, {"type": "run.end", **({"outcome": t["outcome"]} if "outcome" in t else {})}]
+
+
+def test_a_saved_case_keeps_the_whole_trace(client):
+    _send(client, "p", "r1", RICH)
+    snap = learn.snapshot(client.engine, "events:p", "r1", redact_pii=False)
+    assert [s["kind"] for s in snap["steps"]] == ["llm", "tool", "tool", "approval", "state", "answer"]
+    llm, tool, failed, approval, state, _ = snap["steps"]
+    assert (llm["model"], llm["prompt"], llm["tokens_in"], llm["tokens_out"], llm["tools"]) == \
+        ("claude-x", "support@3", 900, 40, ["search_customer", "refund"])
+    assert tool["args"] == {"email": "ana@example.com"} and tool["result"]["orders"] == ["O-17"] and \
+        tool["parent_seq"] == 0
+    assert failed["status"] == "error" and failed["error"] == "503 upstream"
+    assert (approval["decision"], approval["by"], approval["text"]) == ("approved", "policy", "under $50")
+    assert (state["op"], state["value"]) == ("update", {"status": "refunded"})
+    assert (snap["output"], snap["outcome"], snap["tags"], snap["segment"]) == \
+        ("Refunded O-17.", "resolved", {"channel": "web", "tier": "gold"}, "eu")
+
+    # Saved again from its own export, into another tenant: nothing lost on the way.
+    _send(client, "copy", "r1", _as_events(snap))
+    again = learn.snapshot(client.engine, "events:copy", "r1", redact_pii=False)
+    strip = lambda t: {k: v for k, v in t.items() if k not in ("started_at", "finished_at")}
+    assert strip(again) == strip(snap)
+
+
+def test_the_suite_export_carries_the_trace_with_personal_data_redacted(client):
+    from assay import store
+    _send(client, "p", "r1", RICH)
+    with client.engine.begin() as conn:
+        cid = conn.execute(store.regression_candidates.insert().values(
+            source="events:p", pattern="tool_error:get_order", trace_id="r1", task="support", status="proposed",
+            case={"case_id": "prod-r1", "input": RICH[0]["input"], "reference": {"answer": "Refunded"}},
+            provenance=[], created_at=datetime.utcnow())).inserted_primary_key[0]
+    client.post(f"/v1/learn/candidates/{cid}/approve", json={"source": "events:p", "suite": "prod"})
+    out = client.get("/v1/learn/suites/prod/export", params={"source": "events:p", "format": "jsonl"}).text
+    import json
+    case = json.loads(out.splitlines()[0])
+    t = case["trajectory"]
+    assert [s["kind"] for s in t["steps"]] == ["llm", "tool", "tool", "approval", "state", "answer"]
+    assert t["steps"][1]["args"] == {"email": "<email>"} and "ana@" not in out  # redacted everywhere
+    assert t["steps"][0]["tools"] == ["search_customer", "refund"] and t["tags"]["tier"] == "gold"

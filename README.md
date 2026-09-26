@@ -683,6 +683,26 @@ otherwise. Personal data never becomes an expected argument.
 **4. Review.** Edit the expected values and approve into a named suite, or reject with a
 reason. For agents, the reference is stored, so the next evaluation run checks the case.
 
+A saved agent case keeps the trace it came from in full, not just its input and output:
+
+```json
+{"case_id": "prod-3f2a", "input": {"message": "Refund O-17, I'm <email>"}, "expected": {...},
+ "trajectory": {"task": "support", "version": {"model": "m1"}, "tags": {"channel": "web"},
+   "steps": [{"seq": 0, "kind": "llm", "model": "claude-x", "prompt": "support@3", "tokens_in": 900,
+              "tokens_out": 40, "tools": ["search_customer", "refund"], "text": "Looking up the customer"},
+             {"seq": 1, "kind": "tool", "name": "search_customer", "args": {"email": "<email>"},
+              "result": {"id": "C-1"}},
+             {"seq": 2, "kind": "approval", "name": "refund", "decision": "approved", "by": "policy"},
+             {"seq": 3, "kind": "answer", "text": "Refunded O-17."}],
+   "output": "Refunded O-17.", "outcome": "resolved"}}
+```
+
+The steps are in the event schema's own shape, so a case sent back as events comes out the
+same. That covers model calls (model, prompt, tokens, the tools offered), tool calls
+(arguments, results, errors), approvals, state changes and nesting. The trace is saved when
+the case is approved, so it outlives the trace itself. Personal data is redacted in the steps
+too, as in the input. `GET /v1/learn/suites/{name}/export?format=json|jsonl|csv` includes it.
+
 **5. Watch the loop.** Each pattern moves open → **protected** (a test guards it) →
 **fixed** (a protected pattern stops appearing) → **recurred** (seen again after being
 fixed). When a suite case that passed before fails in an evaluation run, Failure causes
@@ -701,6 +721,7 @@ say "Production bug back", and the release call holds. The loop reports:
 | `GET /v1/learn/candidates?source=…&status=proposed` | drafts to review |
 | `POST /v1/learn/candidates/{id}/approve`, `…/reject` | decide |
 | `GET /v1/learn/suites?source=…`, `GET /v1/learn/suites/{name}?source=…` | suites, and each case's origin and latest result |
+| `GET /v1/learn/suites/{name}/export?source=…&format=json` | a suite as a file, each agent case with its trace in full |
 
 In the demo, `events:demo-agent` has a week of live traffic. It includes a pattern only
 thumbs-down feedback reveals (policy answers ignoring the knowledge base), and two patterns

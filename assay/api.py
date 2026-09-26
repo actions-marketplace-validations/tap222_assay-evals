@@ -741,9 +741,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
              summary="A suite as a file your test tool can run: json, jsonl or csv")
     def learn_export(name: str, source: str, format: str = "json", p: Principal = Depends(require("read"))):
         check_source(p, source)
-        cases = learn.suite(engine, source, name)
         if format not in ("json", "jsonl", "csv"):
             raise HTTPException(422, "format is json, jsonl or csv.")
+        cases = learn.suite(engine, source, name)
+        for c in cases:  # added before cases kept their trace: take it from the trace, if it's still there
+            if not c.get("trajectory") and c.get("origin_trace"):
+                c["trajectory"] = learn.snapshot(engine, source, c["origin_trace"])
         body, media = learn.export(cases, format)
         return Response(body, media_type=media,
                         headers={"Content-Disposition": f'attachment; filename="{name}.{format}"'})
