@@ -165,3 +165,21 @@ with assay.run("support", test="refund") as r:
     out = capsys.readouterr().out
     assert "Consistency" in out and "2/5: Says refunded" in out
     assert "Judged 1 run with claude-opus-5 (plan quality, consistency)." in out
+
+
+def test_personal_data_is_redacted_before_it_reaches_the_judge():
+    traj = {"answer": "Sent the refund confirmation to ana@example.com.", "status": "completed", "steps": [
+        {"seq": 0, "kind": "tool", "name": "lookup", "args": {"email": "ana@example.com"},
+         "result": {"card": "4111 1111 1111 1111"}},
+        {"seq": 1, "kind": "answer", "text": "Sent the refund confirmation to ana@example.com."}]}
+    fake = Fake(verdict(consistency=(5, "ok")))
+    out = judge.judge(traj, "I'm ana@example.com, refund me", client=fake)
+    sent = json.dumps(fake.calls[0]["messages"])
+    assert "ana@example.com" not in sent and "4111" not in sent and "<email>" in sent and "<card>" in sent
+    # The judge's inputs are what was sent, and the audit still matches them to the trace.
+    run = {"input": "I'm ana@example.com, refund me", "outputs": [traj["answer"]],
+           "retrieved": [{"card": "4111 1111 1111 1111"}]}
+    assert audit.findings(out["consistency"]["inputs"], run) == []
+    raw = Fake(verdict(consistency=(5, "ok")))
+    judge.judge(traj, "I'm ana@example.com", client=raw, redact=False)
+    assert "ana@example.com" in json.dumps(raw.calls[0]["messages"])  # only when asked for

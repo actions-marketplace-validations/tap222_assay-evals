@@ -45,6 +45,7 @@ ROLES = {
     "instructions": ("instructions", "rubric", "criteria", "evaluator_prompt"),
     "messages": ("messages",),
 }
+_PLACEHOLDER = re.compile(r"<(email|card|iban|ssn|phone)>")  # what assay.learn.redact puts in
 TEMPLATE = re.compile(r"\{\{\s*[\w.]+\s*\}\}|\$\{[\w.]+\}")
 MIN_TEXT = 12  # shorter texts match each other by chance
 SHOW = 80
@@ -143,6 +144,9 @@ def findings(inputs: Dict[str, Any], run: Optional[dict]) -> List[str]:
     if ctx and o and ctx == o:
         out.append("context and output are the same text")
 
+    if run and _PLACEHOLDER.search(_flat(inputs)):  # the evaluator was given redacted data: compare it redacted
+        from assay.learn import redact
+        run = {k: redact(v) for k, v in run.items()}
     if run:
         given_in, outputs = _norm(run.get("input")), [_norm(x) for x in run.get("outputs") or [] if _norm(x)]
         if o and outputs and not any(_same(o, x) for x in outputs):

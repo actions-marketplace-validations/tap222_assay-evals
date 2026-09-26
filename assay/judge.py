@@ -16,6 +16,10 @@ A judge that couldn't judge isn't a failure. Rate limits, timeouts, 5xx and conn
 are recorded as errors whose reason says so (INFRA_ERROR); a refusal, a rejected request or an
 answer that isn't the JSON asked for is the judge's own problem (EVALUATOR_ERROR).
 
+The trace leaves your infrastructure for the model API, so personal data in it (emails, cards,
+IBANs, SSNs, phone numbers) is redacted first, as it is in saved cases: redact=False sends it
+as recorded. What was sent is what's recorded as the judge's inputs.
+
 It costs a model call per run, so it runs only when asked: `assay test --judge`, `pytest
 --assay --assay-judge`, or POST /v1/agents/runs/{run}/judge. Needs `pip install anthropic`
 and credentials (ANTHROPIC_API_KEY, or an `ant auth login` profile).
@@ -140,10 +144,22 @@ def _error_reason(exc: Exception) -> str:
     return f"judge call failed: {type(exc).__name__}: {exc}"[:500]
 
 
+def _redacted(traj: dict, input_: Any, earlier: Optional[List[dict]]):
+    """The trajectory, request and earlier turns with personal data replaced by placeholders."""
+    from assay.learn import redact
+    steps = [{**s, **{k: redact(s[k]) for k in ("text", "args", "result") if s.get(k) is not None}}
+             for s in traj["steps"]]
+    turns = [{**t, "input": redact(t.get("input")), "output": redact(t.get("output") or t.get("answer"))}
+             for t in earlier or []]
+    return {**traj, "steps": steps, "answer": redact(traj.get("answer"))}, redact(input_), turns or None
+
+
 def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, model: str = MODEL,
-          client=None) -> Dict[str, dict]:
+          client=None, redact: bool = True) -> Dict[str, dict]:
     """{field: {"status": pass|fail|error, "score", "reason", "inputs"}} for one trajectory.
     Fields the judge found not applicable are left out."""
+    if redact:  # personal data doesn't leave for the model API
+        traj, input_, earlier = _redacted(traj, input_, earlier)
     has_plan = any(s["kind"] == "plan" for s in traj["steps"])
     trace = render(traj, input_, earlier)
     messages = [{"role": "user", "content": trace}]
@@ -195,7 +211,7 @@ def judge(traj: dict, input_: Any = None, earlier: Optional[List[dict]] = None, 
 
 
 def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
-              limit: Optional[int] = None) -> dict:
+              limit: Optional[int] = None, redact: bool = True) -> dict:
     """Judge every ended trajectory of a test run, and store the results with the run's others.
     {"judged": trajectories, "results": rows written, "errors": rows that couldn't be judged}."""
     from assay import agents, ingest, learn, store
@@ -211,10 +227,10 @@ def judge_run(engine, tenant: str, run_id: str, model: str = MODEL, client=None,
             continue
         earlier = None
         if traj.get("conversation_id"):
-            earlier = [learn.snapshot(engine, f"events:{tenant}", t["trajectory_id"], True, False)
+            earlier = [learn.snapshot(engine, f"events:{tenant}", t["trajectory_id"], redact, False)
                        for t in agents.conversation_turns(engine, tenant, traj["conversation_id"])
                        if t["trajectory_id"] != h["trajectory_id"] and learn._earlier(t, traj)]
-        found = judge(traj, (inputs.get(h["trajectory_id"]) or {}).get("input"), earlier, model, client)
+        found = judge(traj, (inputs.get(h["trajectory_id"]) or {}).get("input"), earlier, model, client, redact)
         case = h["case_id"] or h["trajectory_id"]
         for field, r in found.items():
             rows.append({"tenant": tenant, "result_id": ingest._derive(run_id, case, field, EVALUATOR, h["attempt"]),

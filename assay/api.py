@@ -565,7 +565,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def judge_run(run_id: str, source: str, limit: Optional[int] = None, p: Principal = Depends(require("manage"))):
         check_source(p, source)
         from assay import judge
-        out = judge.judge_run(engine, _tenant(source), run_id, settings.judge_model, limit=limit)
+        out = judge.judge_run(engine, _tenant(source), run_id, settings.judge_model, limit=limit,
+                              redact=settings.judge_redact)
         if not out["judged"]:
             raise HTTPException(404, f"No ended agent runs in test run '{run_id}' in {source}.")
         return out | {"model": settings.judge_model}
