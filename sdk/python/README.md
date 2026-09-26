@@ -85,6 +85,41 @@ assay serve           # http://127.0.0.1:8400, source events:local
 
 Loading the same file twice changes nothing, because every event has an id.
 
+## Your own evaluators: results whose validity is explicit
+
+An LLM judge that answers with something that isn't a verdict, or a metric that divides by
+zero, shouldn't become a score of 0: that reads as a real failure of your AI. `evaluate()`
+calls your evaluator and says whether what came back is a verdict at all:
+
+```python
+from assay_sdk import evaluate
+
+VERDICT = {"type": "object", "required": ["score", "reason"],
+           "properties": {"score": {"type": "number", "minimum": 0, "maximum": 1}, "reason": {"type": "string"}}}
+
+result = evaluate(my_judge, question, answer, schema=VERDICT, threshold=0.7, retries=2,
+                  run=assay_case, field="helpful", evaluator="helpful@2")
+result.status             # PASS, FAIL, INVALID, ERROR, TIMEOUT or RATE_LIMITED
+result.score              # only for PASS and FAIL: an invalid result has none
+result.reason, result.error, result.attempts, result.raw_judge_output
+```
+
+- **INVALID:** it answered, but not with a verdict: not JSON (a fenced JSON block is fine),
+  not the schema, a score that's `None`, `NaN`, infinite or outside `score_range` (0 to 1 by
+  default), or a score with no `threshold` to decide by.
+- **TIMEOUT, RATE_LIMITED, ERROR:** it raised. The kind comes from the exception's type, its
+  `status_code` (429, 5xx) or its message.
+- **Retries:** INVALID, timeouts, rate limits and an unavailable service (connection error,
+  5xx) are tried again, `retries` times, with a pause that doubles (`backoff` seconds first).
+  Any other exception is an ERROR at once: asking a bug again doesn't fix it.
+- **Recorded:** with `run=`, the result becomes a check. PASS and FAIL are passes and fails;
+  the rest are errors with their kind, what the judge said, and how many tries it took. So
+  they're `INVALID`, `TIMEOUT`, `RATE_LIMITED`, `INFRA_ERROR` or `EVALUATOR_ERROR` in Assay,
+  and never count against the AI.
+
+The judge may return a bool, a number, a dict (`score`, `passed` or `pass`, `reason`), JSON
+text, or an object with those attributes. `aevaluate()` is the same for an async judge.
+
 ## With pytest
 
 Take the `assay_case` fixture. It's a pytest plugin that comes with this package, so there's

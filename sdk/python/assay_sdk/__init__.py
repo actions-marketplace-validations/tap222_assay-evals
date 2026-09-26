@@ -492,3 +492,7 @@ def shutdown() -> None:
 
 
 atexit.register(lambda: _client and _client.close())
+
+
+# Your own evaluators, with results whose validity is explicit (assay_sdk/evaluation.py).
+from assay_sdk.evaluation import Result, aevaluate, evaluate  # noqa: E402

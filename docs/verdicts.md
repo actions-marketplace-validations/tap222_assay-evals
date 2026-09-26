@@ -27,7 +27,10 @@ or `error`. Without it, the reason's words decide between `INFRA_ERROR` and
 `EVALUATOR_ERROR`. `tries` (how many times the evaluator was asked) and `raw_output` (what it
 returned) are kept with the result, shown by `/verdicts` and in `assay test`'s report, so an
 `INVALID` result shows what the judge said instead of a verdict. A score that's `NaN` or
-infinite is refused at ingest: it's an `invalid` error, not a number. The failure-cause
+infinite is refused at ingest: it's an `invalid` error, not a number.
+
+`assay_sdk.evaluate()` does all of this for an evaluator of your own: see the
+[SDK](../sdk/python/README.md#your-own-evaluators-results-whose-validity-is-explicit). The failure-cause
 analysis decides the rest, so the verdicts agree with the release call. Missing results keep a
 release from advancing ("rerun"). An evaluator job that didn't trigger at all is caught against
 the baseline: "faithful@2 reported on 48 of these cases in the baseline, none in this run". A new
