@@ -196,3 +196,17 @@ def test_a_finished_session_whose_process_wont_exit_exits_with_its_result(projec
     assert out.returncode == 0 and "1 passed" in out.stdout
     assert "pytest finished, but its process was still running 2s later" in out.stderr
 
+
+def test_pytest_fails_a_test_whose_agent_strayed_from_its_plan(project):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_plan.py").write_text('''
+def test_refund(assay_case):
+    assay_case.plan(["get_order", "refund"], text="Check the order, then refund it")
+    assay_case.tool("refund", {"id": "O-17"}, {"ok": True})
+    assay_case.tool("get_order", {"id": "O-17"}, {"status": "delivered"})
+    assay_case.answer("Refunded.")
+''')
+    out = run(project)
+    assert out.returncode == 1
+    assert "Plan adherence: Strayed from its plan: called get_order (step 2) after refund, though the plan put it " \
+           "first." in out.stdout

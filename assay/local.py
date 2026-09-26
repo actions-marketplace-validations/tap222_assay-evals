@@ -46,7 +46,8 @@ HOME = ".assay"
 TENANT = "local"
 EXAMPLE = "tests/ai/test_support.py"
 CHECK_NAMES = {"completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state",
-               "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts"}
+               "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts",
+               "plan": "Plan adherence"}
 PII_EVALUATOR = "assay.pii@1"
 
 CONFIG_TEMPLATE = '''\
@@ -220,7 +221,8 @@ def as_trajectory(steps: List[dict], answer: Optional[str]) -> dict:
                     "parent_seq": s.get("parent_seq"), "server": s.get("server"),
                     "args": {"op": s.get("op") or "update"} if state else
                     {"decision": s.get("decision"), "by": s.get("by")} if kind == "approval" else
-                    {"uri": s.get("uri")} if resource else s.get("args"),
+                    {"uri": s.get("uri")} if resource else
+                    {"steps": s.get("plan")} if kind == "plan" else s.get("args"),
                     "tokens_in": s.get("tokens_in"), "tools": s.get("tools"),
                     "result": s.get("value") if state else s.get("result"), "error": s.get("error"),
                     "text": s.get("text"), "model": s.get("model"),
@@ -692,6 +694,7 @@ CATEGORIES = [  # (name, which checks): the first that matches a check's field t
     ("Security", lambda f: f in ("safety", "pii") or f.startswith("expect.must_get_approval")),
     ("Completion", lambda f: f in ("completed", "efficiency")
      or f.startswith(("expect.must_resolve", "expect.max_steps", "expect.must_answer"))),
+    ("Planning", lambda f: f == "plan"),
     ("Behavior", lambda f: f.startswith(("expect.max_cost", "expect.max_latency", "expect.max_tools",
                                          "expect.max_context"))),
     ("Output quality", lambda f: True),  # the answer, the end state, your asserts, your own fields
@@ -763,7 +766,7 @@ def _short(case: str) -> str:
 
 # What a reviewer should read first: safety, then what the agent decided, then what it did, then cost.
 RANK = ("Safety", "PII", "expect.must_get_approval", "Approval for", "Outcome", "expect.must_resolve", "Finished",
-        "Tool usage", "expect.must_call", "expect.must_not_call", "End state", "Answer", "Your asserts")
+        "Tool usage", "Plan adherence", "expect.must_call", "expect.must_not_call", "End state", "Answer", "Your asserts")
 
 
 def _rank(line: str) -> int:

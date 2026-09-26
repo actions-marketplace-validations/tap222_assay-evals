@@ -74,7 +74,7 @@ class Step(_E):
     type: Literal["step"]
     run_id: str = Field(..., max_length=128)
     seq: int = Field(..., ge=0)
-    kind: Literal["llm", "tool", "state", "answer", "stage", "approval", "resource", "mcp_prompt"]
+    kind: Literal["llm", "tool", "state", "answer", "stage", "approval", "resource", "mcp_prompt", "plan"]
     name: Optional[str] = Field(None, max_length=128)
     parent_seq: Optional[int] = Field(None, ge=0)
     ended_at: Optional[datetime] = None
@@ -94,6 +94,9 @@ class Step(_E):
     server: Optional[str] = Field(None, max_length=128, description="tool, resource, mcp_prompt: the MCP server")
     # resource: an MCP resource read; result is its contents
     uri: Optional[str] = Field(None, max_length=2048)
+    # plan: the tools the agent means to call, in order; text is the plan as it said it
+    plan: Optional[List[Union[str, Dict[str, Any]]]] = Field(
+        None, max_length=100, description='plan: ["search_customer", {"tool": "refund", "args": {"id": "O-17"}}]')
     # state
     op: Optional[Literal["create", "update", "delete"]] = None
     value: Optional[Any] = None
@@ -109,9 +112,10 @@ class Step(_E):
         allowed = {"llm": {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "tools"},
                    "tool": {"args", "result", "server"}, "state": {"op", "value"}, "answer": {"text"},
                    "stage": {"outputs", "did_work", "prompt"}, "approval": {"decision", "by", "text"},
-                   "resource": {"uri", "result", "server"}, "mcp_prompt": {"args", "result", "server"}}[self.kind]
+                   "resource": {"uri", "result", "server"}, "mcp_prompt": {"args", "result", "server"},
+                   "plan": {"plan", "text"}}[self.kind]
         specific = {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "args", "result", "op",
-                    "value", "outputs", "did_work", "tools", "decision", "by", "server", "uri"}
+                    "value", "outputs", "did_work", "tools", "decision", "by", "server", "uri", "plan"}
         wrong = [f for f in specific - allowed if getattr(self, f) is not None]
         if wrong:
             raise ValueError(f"a {self.kind} step doesn't take {', '.join(sorted(wrong))}")
@@ -119,6 +123,9 @@ class Step(_E):
             raise ValueError(f"a {self.kind} step needs a name")
         if self.kind == "resource" and not self.uri:
             raise ValueError("a resource step needs the uri it read")
+        if self.kind == "plan" and (not self.plan or not all(
+                isinstance(x, str) or (isinstance(x, dict) and isinstance(x.get("tool"), str)) for x in self.plan)):
+            raise ValueError('a plan step needs plan: tool names, or {"tool": name, "args": {...}}')
         if self.kind == "approval" and not self.decision:
             raise ValueError("an approval step needs a decision: approved, rejected or pending")
         return self
@@ -282,7 +289,8 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                         "name": e.name or (e.uri[:128] if e.kind == "resource" else None),
                         "args": {"op": e.op or "update"} if e.kind == "state" else
                         {"decision": e.decision, "by": e.by} if e.kind == "approval" else
-                        {"uri": e.uri} if e.kind == "resource" else e.args, "server": e.server,
+                        {"uri": e.uri} if e.kind == "resource" else
+                        {"steps": e.plan} if e.kind == "plan" else e.args, "server": e.server,
                         "tokens_in": e.tokens_in, "tokens_out": e.tokens_out, "prompt": e.prompt, "tools": e.tools,
                         "result": e.value if e.kind == "state" else e.result,
                         "error": e.error if e.status == "error" else None, "text": e.text, "model": e.model,

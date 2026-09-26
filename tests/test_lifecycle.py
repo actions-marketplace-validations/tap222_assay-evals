@@ -199,3 +199,45 @@ def test_otlp_turns_of_one_conversation(app):
     t = app.get("/v1/agents/trajectories/tr1", params=SRC).json()
     assert (t["conversation_id"], t["turn"]) == ("chat-9", 1)
     assert app.get("/v1/agents/conversations/chat-9", params=SRC).json()["turns"][0]["trajectory_id"] == "tr1"
+
+
+def plan(run_id, seq, steps, **kw):
+    return ev("step", run_id, seq=seq, kind="plan", plan=steps, **kw)
+
+
+def plan_check(app, run_id):
+    return next(c for c in evaluation(app, run_id)["checks"] if c["check"] == "plan")
+
+
+def test_a_run_is_checked_against_its_own_plan(app):
+    steps = ["search_customer", "get_order", {"tool": "refund", "args": {"id": "O-17"}}]
+    send(app, ev("run.start", "kept"), plan("kept", 0, steps, text="Find the customer, check the order, refund"),
+         tool("kept", 1, "search_customer"), tool("kept", 2, "lookup_faq"),  # unplanned, but harmless
+         tool("kept", 3, "get_order", error="503"), tool("kept", 4, "get_order"),  # an error, retried
+         tool("kept", 5, "refund", {"id": "O-17"}), ev("run.end", "kept"))
+    assert plan_check(app, "kept")["status"] == "pass"
+
+    send(app, ev("run.start", "strayed"), plan("strayed", 0, steps), tool("strayed", 1, "refund", {"id": "O-18"}),
+         tool("strayed", 2, "search_customer"), ev("run.end", "strayed"))
+    c = plan_check(app, "strayed")
+    assert c["status"] == "fail"
+    assert c["reason"] == ("Strayed from its plan: planned refund(id='O-17'), called refund(id='O-18') (step 1): "
+                           "id: expected 'O-17', got 'O-18' (+2 more).")
+
+    send(app, ev("run.start", "skipped"), plan("skipped", 0, steps), tool("skipped", 1, "search_customer"),
+         tool("skipped", 2, "get_order", error="timeout"), tool("skipped", 3, "refund", {"id": "O-17"}),
+         ev("run.end", "skipped"))
+    assert plan_check(app, "skipped")["reason"] == \
+        "Strayed from its plan: planned get_order, but it errored and was never made."
+
+
+def test_replanning_isnt_skipping(app):
+    send(app, ev("run.start", "re"), plan("re", 0, ["search_customer", "refund"]), tool("re", 1, "search_customer"),
+         plan("re", 2, ["escalate"], text="Not eligible for a refund: hand it to a person"),
+         tool("re", 3, "escalate"), ev("run.end", "re"))
+    assert plan_check(app, "re")["status"] == "pass"
+    send(app, ev("run.start", "died"), plan("died", 0, ["search_customer", "refund"]),
+         tool("died", 1, "search_customer"), ev("run.end", "died", status="failed", error="crashed"))
+    assert plan_check(app, "died")["status"] == "pass"  # "completed" fails it; not skipping twice
+    send(app, ev("run.start", "none"), tool("none", 0, "search_customer"), ev("run.end", "none"))
+    assert "plan" not in [c["check"] for c in evaluation(app, "none")["checks"]]  # no plan: nothing to adhere to

@@ -277,3 +277,18 @@ def test_the_sdk_records_mcp_steps_and_turns(tmp_path, monkeypatch):
     assert (start.conversation_id, start.turn) == ("chat-1", 2)
     assert (prompt.kind, resource.kind, resource.uri, tool.server) == \
         ("mcp_prompt", "resource", "file:///policies/refunds.md", "shop")
+
+
+def test_a_saved_case_keeps_the_plan(client):
+    steps = [{"type": "step", "seq": 0, "kind": "plan", "text": "Look up ana, then refund",
+              "plan": ["search_customer", {"tool": "refund", "args": {"email": "ana@example.com"}}]},
+             {"type": "step", "seq": 1, "kind": "tool", "name": "search_customer", "args": {"q": "ana"}}]
+    _send(client, "p", "pl", [{"type": "run.start", "task": "support"}, *steps, {"type": "run.end"}])
+    snap = learn.snapshot(client.engine, "events:p", "pl", redact_pii=False)
+    assert snap["steps"][0] == {"seq": 0, "kind": "plan", "status": "ok", "text": "Look up ana, then refund",
+                                "started_at": snap["steps"][0]["started_at"],
+                                "plan": ["search_customer", {"tool": "refund", "args": {"email": "ana@example.com"}}]}
+    _send(client, "copy", "pl", _as_events(snap))
+    assert learn.snapshot(client.engine, "events:copy", "pl", redact_pii=False)["steps"] == snap["steps"]
+    redacted = learn.snapshot(client.engine, "events:p", "pl")
+    assert redacted["steps"][0]["plan"][1]["args"]["email"] == "<email>"

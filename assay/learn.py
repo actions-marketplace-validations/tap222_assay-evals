@@ -632,7 +632,7 @@ def candidates(engine: Engine, source: str, status: Optional[str] = None) -> Lis
     return [{k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in r._mapping.items()} for r in rows]
 
 
-CONTENT = ("text", "args", "result", "value")  # step fields that can hold personal data
+CONTENT = ("text", "args", "result", "value", "plan")  # step fields that can hold personal data
 
 
 def _step(r: dict) -> dict:
@@ -649,6 +649,8 @@ def _step(r: dict) -> dict:
                 "tokens_out": tokens_out, "cost_usd": r.get("cost_usd"), "tools": r.get("tools")}
     elif kind in ("tool", "mcp_prompt"):
         out |= {"args": r.get("args"), "result": r.get("result"), "server": r.get("server")}
+    elif kind == "plan":
+        out |= {"plan": (r.get("args") or {}).get("steps")}
     elif kind == "resource":
         out |= {"uri": (r.get("args") or {}).get("uri"), "result": r.get("result"), "server": r.get("server")}
         if out["name"] == (out["uri"] or "")[:128]:  # named after its uri at ingest: don't repeat it

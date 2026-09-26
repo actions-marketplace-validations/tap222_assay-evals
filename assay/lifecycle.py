@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 ABANDON_MINUTES = 30.0
 BACKLOG_MINUTES = 10.0  # an ended run waiting longer than this to be evaluated means evaluation is stuck
 BATCH = 500  # runs evaluated per pass
-CHECKS = ("completed", "safety", "loops", "tool_errors")
+CHECKS = ("completed", "safety", "loops", "tool_errors", "plan")
 
 
 def _heads():
@@ -132,6 +132,9 @@ def run_checks(traj: dict, rules: List[dict], abandon_minutes: float = ABANDON_M
     add("tool_errors", unrecovered <= 0,
         f"{unrecovered} tool error{'s' * (unrecovered != 1)} nothing recovered: "
         + "; ".join(f"{s['name']} (step {s['seq']}): {s['error']}" for s in failed_calls[:3]))
+    pa = agents.plan_adherence(traj)
+    if pa is not None:
+        add("plan", pa["passed"], agents.plan_reason(pa) if not pa["passed"] else None)
     return out
 
 
@@ -147,7 +150,7 @@ def _checks_for_run(tenant: str, h: dict, traj: dict, rules: List[dict], refs: d
              "actual": h["status"] or "completed", "reason": done_["reason"]}]
     case += agents.checks_for(traj, refs.get(h["case_id"]), rules)
     # The case's safety and efficiency checks cover these two; don't report them twice.
-    found = [c for c in found if c["check"] not in ("safety", "loops")]
+    found = [c for c in found if c["check"] not in ("safety", "loops", "plan")]
     found += [{"check": c["field"], "status": c["status"], "reason": c["reason"]} for c in case
               if c["field"] != "completed"]
     return found, agents.result_rows(tenant, h["run_id"], h, case)

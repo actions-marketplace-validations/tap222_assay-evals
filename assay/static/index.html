@@ -1152,10 +1152,11 @@ function renderTrajectory(t){
   const fb=t.first_bad,world=t.world||{};
   const cls=st=>{const r=bySeq[st.seq];if(st.kind==="reason")return"reason";if(st.error)return"err";if(breaks[st.seq])return"bad";
     if(!r)return"";return r.status==="matched"?"matched":["wrong_tool","bad_arguments","extra"].includes(r.status)?"bad":r.status.startsWith("error")?"err":"extra"};
-  const label={reason:"think",tool:"tool",state:"state",answer:"answer",approval:"approval",resource:"resource",mcp_prompt:"prompt"};
+  const label={reason:"think",tool:"tool",state:"state",answer:"answer",approval:"approval",resource:"resource",mcp_prompt:"prompt",plan:"plan"};
   const srv=st=>st.server?` <span class="ref">${esc(st.server)}</span>`:"";
   const stepHtml=st=>{const r=bySeq[st.seq];
-    const body=st.kind==="resource"?`<div class="call">read ${esc((st.args||{}).uri||st.name)}${srv(st)}</div>${st.error?`<div class="res" style="color:var(--bad)">error: ${esc(st.error)}</div>`:st.result!=null?`<div class="res" title="${esc(jtxt(st.result))}">→ ${esc(jtxt(st.result).slice(0,220))}</div>`:""}`
+    const body=st.kind==="plan"?`<div class="call">${((st.args||{}).steps||[]).map(x=>esc(typeof x==="string"?x:callTxt(x.tool,x.args))).join(" → ")}</div>${st.text?`<div class="res">${esc(st.text)}</div>`:""}`
+      :st.kind==="resource"?`<div class="call">read ${esc((st.args||{}).uri||st.name)}${srv(st)}</div>${st.error?`<div class="res" style="color:var(--bad)">error: ${esc(st.error)}</div>`:st.result!=null?`<div class="res" title="${esc(jtxt(st.result))}">→ ${esc(jtxt(st.result).slice(0,220))}</div>`:""}`
       :st.kind==="mcp_prompt"?`<div class="call">${esc(callTxt(st.name,st.args))}${srv(st)}</div>${st.error?`<div class="res" style="color:var(--bad)">error: ${esc(st.error)}</div>`:st.result!=null?`<div class="res" title="${esc(jtxt(st.result))}">→ ${esc(jtxt(st.result).slice(0,220))}</div>`:""}`
       :st.kind==="tool"?`<div class="call">${esc(callTxt(st.name,st.args))}${srv(st)}</div>${st.error?`<div class="res" style="color:var(--bad)">error: ${esc(st.error)}</div>`:st.result!=null?`<div class="res" title="${esc(jtxt(st.result))}">→ ${esc(jtxt(st.result).slice(0,220))}</div>`:""}`
       :st.kind==="state"?`<div class="call">${esc((st.args||{}).op||"update")} ${esc(st.name)}</div>${st.result!=null?`<div class="res">${esc(jtxt(st.result).slice(0,200))}</div>`:""}`

@@ -120,11 +120,12 @@ class EvalResultEvent(Event):
 
 
 class StepEvent(Event):
-    kind: str = Field(..., pattern="^(reason|tool|state|answer|resource|mcp_prompt)$",
+    kind: str = Field(..., pattern="^(reason|tool|state|answer|resource|mcp_prompt|plan)$",
                       description="reason (model thinking or planning), tool (a call and its result), state "
                                   "(a change to the world), answer (the final reply), resource (an MCP resource "
                                   "read: args {\"uri\"}, result its contents), mcp_prompt (an MCP prompt fetched: "
-                                  "args its arguments, result its messages)")
+                                  "args its arguments, result its messages), plan (the tools the agent means to call: "
+                                  "args {\"steps\": [name, or {\"tool\", \"args\"}]}, text the plan as said)")
     name: Optional[str] = Field(None, max_length=128,
                                 description="tool: the tool's name; state: the object changed, e.g. order:1001")
     args: Optional[Dict[str, Any]] = Field(None, description='tool: its arguments; state: {"op": "create|update|delete"}')

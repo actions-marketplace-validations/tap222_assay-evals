@@ -823,6 +823,29 @@ marks quiet runs abandoned and evaluates anything left over.
 | `GET /v1/agents/runs/{run}?source=…` | pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline |
 | `GET /v1/agents/trajectories/{id}?source=…` | one run step by step: divergence, end state, contract breaks, cost, and its latest evaluation |
 
+### Plan adherence: did it do what it said it would?
+
+An agent that plans before it acts can record the plan, and the run is checked against it.
+No test case or reference is needed:
+
+```python
+run.plan(["search_customer", "get_order", {"tool": "refund", "args": {"id": "O-17"}}],
+         text="Find the customer, check the order, refund it")
+```
+
+The `plan` check fails when the agent:
+- skipped a planned call (or it errored and was never made);
+- made planned calls out of order;
+- made a planned call with other arguments than it planned.
+
+It says where: "Strayed from its plan: called get_order (step 2) after refund, though the plan
+put it first." Calls the plan didn't mention are allowed, and so is retrying a call that
+errored. Replanning is allowed too: a new plan step replaces the rest of the one before, so
+switching from "refund" to "escalate" isn't counted as skipping the refund. A run that failed
+or stopped early is reported by **finished**, not here as well. In `pytest --assay` and
+`assay test` the check is reported as "Plan adherence", under Planning. Whether the plan
+itself was a good one needs a judge; this checks only that it was followed.
+
 ### Conversations and MCP
 
 A chat is several runs, one per turn. `assay.run(..., conversation="chat-1", turn=2)` (or

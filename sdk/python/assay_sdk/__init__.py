@@ -332,6 +332,13 @@ class Run:
         self._step("resource", started, uri=uri, result=self._c.clean(contents), server=server,
                    ended_at=_ts(ended), status="error" if error else "ok", error=error)
 
+    def plan(self, steps: List[Any], text: Optional[str] = None) -> None:
+        """What the agent means to do, before doing it: the tools it will call, in order, each a name
+        or {"tool": name, "args": {...}}. The run is checked against it (plan adherence). Call it
+        again to replan: the new plan replaces what was left of the old one."""
+        self._step("plan", plan=[s if isinstance(s, str) else {**s, "args": self._c.clean(s.get("args"))}
+                                 if s.get("args") else s for s in steps], text=self._c.clean(text))
+
     def mcp_prompt(self, name: str, args: Optional[Dict[str, Any]] = None, messages: Any = None,
                    server: Optional[str] = None, error: Optional[str] = None) -> None:
         """An MCP prompt the agent fetched: its name, the arguments, and the messages it returned."""

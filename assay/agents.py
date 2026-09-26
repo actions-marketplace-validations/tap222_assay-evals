@@ -33,6 +33,12 @@ went wrong:
   ignored_result          a tool returned the answer and the final answer doesn't have it
   wrong_state             the calls look right but the world ended up wrong
   wrong_answer            everything before was right; the answer wasn't
+
+A run that records its plan (a plan step: the tools it means to call, in order) is also
+checked against it, reference or not (plan_adherence): a planned call it skipped, planned
+calls made out of order, or a planned call made with other arguments fail it. Calls the plan
+didn't mention are listed but allowed, a call that errored may be retried, and a new plan
+step replaces what was left of the one before (replanning isn't skipping).
 """
 from __future__ import annotations
 
@@ -65,6 +71,69 @@ MECHANISMS = {
 
 def tool_calls(traj: dict) -> List[dict]:
     return [s for s in traj["steps"] if s["kind"] == "tool"]
+
+
+def _planned(item) -> Optional[dict]:
+    """One planned step: "search_customer", or {"tool": "refund", "args": {...}}."""
+    if isinstance(item, str):
+        return {"tool": item, "args": None}
+    if isinstance(item, dict) and isinstance(item.get("tool"), str):
+        return {"tool": item["tool"], "args": item.get("args")}
+    return None
+
+
+def plan_adherence(traj: dict) -> Optional[dict]:
+    """How the run followed the plan it recorded. None if it recorded none."""
+    plans = [s for s in traj["steps"] if s["kind"] == "plan"]
+    if not plans:
+        return None
+    calls = tool_calls(traj)
+    finished = traj.get("status") in (None, "completed")
+    problems, unplanned, planned_all = [], [], []
+    for i, pl in enumerate(plans):
+        items = [x for x in (_planned(v) for v in ((pl.get("args") or {}).get("steps") or [])) if x]
+        planned_all += items
+        end = plans[i + 1]["seq"] if i + 1 < len(plans) else None
+        seg = [c for c in calls if c["seq"] > pl["seq"] and (end is None or c["seq"] < end)]
+        taken = [None] * len(items)  # the call each planned step was made by
+        order = []  # planned steps, in the order they were made
+        for c in seg:
+            if c.get("error"):
+                continue  # retried later, or the step counts as not made
+            j = next((j for j, x in enumerate(items) if taken[j] is None and x["tool"] == c["name"]), None)
+            if j is None:
+                if not any(x["tool"] == c["name"] for x in items):
+                    unplanned.append(c)
+                continue
+            taken[j] = c
+            order.append(j)
+            diffs = arg_diffs(items[j]["args"], c.get("args"))
+            if diffs:
+                problems.append({"seq": c["seq"], "kind": "arguments",
+                                 "detail": f"planned {call_text(items[j]['tool'], items[j]['args'])}, called "
+                                           f"{call_text(c['name'], c.get('args'))} (step {c['seq']}): {'; '.join(diffs)}"})
+        for a, b in zip(order, order[1:]):
+            if b < a:
+                problems.append({"seq": taken[b]["seq"], "kind": "order",
+                                 "detail": f"called {items[b]['tool']} (step {taken[b]['seq']}) after "
+                                           f"{items[a]['tool']}, though the plan put it first"})
+                break
+        # A later plan replaces this one's rest; a run that failed or stopped says so in "completed".
+        if end is None and finished:
+            for j, x in enumerate(items):
+                if taken[j] is None:
+                    errored = any(c["name"] == x["tool"] and c.get("error") for c in seg)
+                    problems.append({"seq": None, "kind": "skipped", "detail": f"planned {x['tool']}, "
+                                     + ("but it errored and was never made" if errored else "but never called it")})
+    problems.sort(key=lambda p: (p["seq"] is None, p["seq"] or 0))
+    return {"passed": not problems, "problems": problems, "planned": planned_all,
+            "unplanned": [call_text(c["name"], c.get("args")) for c in unplanned], "replans": len(plans) - 1}
+
+
+def plan_reason(pa: dict) -> str:
+    first = pa["problems"][0]
+    more = len(pa["problems"]) - 1
+    return f"Strayed from its plan: {first['detail']}" + (f" (+{more} more)" if more else "") + "."
 
 
 def call_text(name: str, args: Optional[dict]) -> str:
@@ -359,6 +428,12 @@ def checks_for(traj: dict, ref: Optional[dict], rules: List[dict]) -> List[dict]
     e = ev["efficiency"]
     add("efficiency", e["passed"], f"≤ {e['budget']} steps" if e["budget"] else f"< {LOOP} identical calls",
         f"{e['steps']} steps, {e['max_identical']} identical calls at most")
+    pa = plan_adherence(traj)
+    if pa is not None:
+        out.append({"field": "plan", "status": "pass" if pa["passed"] else "fail",
+                    "expected": _brief(" → ".join(call_text(x["tool"], x["args"]) for x in pa["planned"])),
+                    "actual": _brief(" → ".join(call_text(c["name"], c.get("args")) for c in tool_calls(traj))),
+                    "reason": None if pa["passed"] else plan_reason(pa)[:2000]})
     return out
 
 
