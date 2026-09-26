@@ -26,6 +26,7 @@ class Scheduler:
         self._sweeper: Optional[threading.Thread] = None
         self.last: Dict[str, dict] = {}
         self.last_sweep: Optional[dict] = None
+        self.reviewed: Dict[str, str] = {}  # source: the day its conversations were last read
 
     @property
     def enabled(self) -> bool:
@@ -72,9 +73,26 @@ class Scheduler:
                     notify=_notifier(self.engine, name, self.settings), alert_min_n=self.settings.alert_min_n,
                     alert_after_runs=self.settings.alert_after_runs)
                 self.last[name] = {"at": started.isoformat(), "ok": True, "run_id": run_id}
+                self._review(name, source, started)
             except Exception as exc:
                 log.exception("Scheduled run failed for %s", name)
                 self.last[name] = {"at": started.isoformat(), "ok": False, "error": str(exc)}
+
+    def _review(self, name: str, source, started: datetime) -> None:
+        """Once a day, per events source: read a sample of its conversations (assay/review.py). Opt-in
+        (ASSAY_REVIEW_DAILY): it costs a model call per conversation read."""
+        day = started.strftime("%Y-%m-%d")
+        if not self.settings.review_daily or not name.startswith("events:") or self.reviewed.get(name) == day:
+            return
+        from assay import review
+        try:
+            out = review.run(self.engine, source, name.split(":", 1)[1], review.reader_for(self.settings),
+                             n=self.settings.review_sample, rt=review.runtime_for(self.settings),
+                             redact=self.settings.judge_redact)
+            self.last[name]["review"] = {k: out[k] for k in ("read", "went_wrong", "new_categories")}
+        except Exception:
+            log.exception("The daily review failed for %s", name)
+        self.reviewed[name] = day
 
     def _loop(self) -> None:
         while not self._stop.is_set():

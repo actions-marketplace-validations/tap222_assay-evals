@@ -301,6 +301,47 @@ agent_steps = Table(
     Column("settings", JSON),  # temperature, max tokens, reasoning effort, ...
 )
 
+# Reading production conversations (assay/review.py): one note per conversation read, the failure
+# categories they're grouped into, and each day's reading.
+review_notes = Table(
+    "review_notes", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant", String(64), nullable=False, index=True),
+    Column("conversation", String(128), nullable=False),  # its conversation id, or its one run's id
+    Column("trace_ids", JSON),
+    Column("day", String(10)),
+    Column("went_wrong", Boolean, nullable=False),
+    Column("note", Text),  # what went wrong, from the user's side
+    Column("hint", String(80)),
+    Column("quotes", JSON),  # exact quotes of the conversation, checked
+    Column("category_id", Integer, index=True),
+    Column("model", String(128)),
+    Column("created_at", DateTime, nullable=False, index=True),
+)
+
+review_categories = Table(
+    "review_categories", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant", String(64), nullable=False, index=True),
+    Column("name", String(128), nullable=False),
+    Column("description", String(512)),
+    Column("status", String(16), nullable=False),  # open | confirmed | dismissed | merged
+    Column("merged_into", Integer),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+review_runs = Table(
+    "review_runs", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant", String(64), nullable=False, index=True),
+    Column("day", String(10)),
+    Column("read", Integer, nullable=False),
+    Column("went_wrong", Integer, nullable=False),
+    Column("cost_usd", Float),
+    Column("created_at", DateTime, nullable=False),
+)
+
 # People who sign in with SSO (assay/sso.py), and every change anyone made.
 users = Table(
     "users", metadata,

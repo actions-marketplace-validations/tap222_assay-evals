@@ -104,3 +104,37 @@ In the demo, `events:demo-agent` has a week of live traffic. It includes a patte
 thumbs-down feedback reveals (policy answers ignoring the knowledge base), and two patterns
 already protected by tests. `events:demo` has document-pipeline patterns built from
 reported errors, failed steps and contract breaks.
+
+## Reading conversations: what nobody wrote a test for
+
+The signals above are behavioral: something broke, or the user reacted. An answer that's fluent,
+breaks nothing and gets no reaction, but misses what the user actually asked, gives none. Finding
+it takes reading the conversation, which is error analysis done by hand, and that stops scaling at
+a few hundred conversations a week. So Assay reads them, and a person reviews categories instead:
+
+1. **Open coding.** A sample of production conversations (`ASSAY_REVIEW_SAMPLE`, 50 a run), the
+   ones already flagged first, is read by a model. It writes one note each: what, if anything, went
+   wrong from the user's side (missed the intent, answered a different question, gave up too early,
+   over-promised), with exact quotes. Assay checks the quotes against the conversation; a note whose
+   quotes aren't there is dropped and the conversation is read again next time, never counted.
+2. **Axial coding.** The notes are grouped into failure categories. Existing categories are reused
+   before new ones are made, so a category keeps its identity from day to day. Each has a name, a
+   count, its share of what was read this week against last week, and example conversations with
+   their quotes.
+3. **A person reviews categories, not conversations:** confirm, rename, merge or dismiss them.
+4. **The loop.** A category becomes candidate test cases, drafted as a pattern's are, with the note
+   as their provenance. It also becomes simulated-user personas built from its real conversations,
+   for `assay_sdk.simulate`, so a failure nobody wrote a test for becomes one.
+
+```
+POST /v1/review/run?source=events:acme&sample=50        read, note and group (a model call per conversation)
+GET  /v1/review/categories?source=events:acme            what was found, share now and the week before
+PUT  /v1/review/categories/{id}?source=…                 {"status": "confirmed"}, {"merge_into": 7}, {"name": "..."}
+POST /v1/review/categories/{id}/candidates?source=…      draft test cases from it
+GET  /v1/review/categories/{id}/personas?source=…        personas for simulate
+```
+
+It reads with the `[judge]` model and provider, through `EvalRuntime` (`ASSAY_REVIEW_BUDGET_USD`
+caps a run). `ASSAY_REVIEW_DAILY=true` reads a sample every day for each scheduled events source.
+Personal data is redacted before a conversation is sent. A conversation is read once; the notes
+and categories are kept.

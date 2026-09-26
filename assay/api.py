@@ -906,6 +906,67 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return Response(body, media_type=media,
                         headers={"Content-Disposition": f'attachment; filename="{name}.{format}"'})
 
+    # ---------- reading production conversations (assay/review.py) ----------
+
+    def reviewer():
+        from assay import review
+        try:
+            return review.reader_for(settings)
+        except ImportError:
+            raise HTTPException(501, "Reading conversations needs a model: pip install anthropic, or set "
+                                     "ASSAY_JUDGE_PROVIDER.")
+
+    @app.post("/v1/review/run", tags=["operate"],
+              summary="Read a sample of production conversations, note what went wrong, and group it (model calls)")
+    def review_run(source: str, sample: Optional[int] = None, days: float = 1.0,
+                   p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        from assay import review
+        rt = review.runtime_for(settings)
+        return review.run(engine, runner.CachedSource(resolve(p, source)), _tenant(source), reviewer(),
+                          n=sample if sample is not None else settings.review_sample, days=days, rt=rt,
+                          redact=settings.judge_redact)
+
+    @app.get("/v1/review/categories", tags=["results"],
+             summary="Failure categories found by reading conversations: share now and the week before, examples")
+    def review_categories(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        from assay import review
+        return review.categories(engine, _tenant(source))
+
+    class CategoryIn(BaseModel):
+        status: Optional[str] = Field(None, description="open | confirmed | dismissed")
+        name: Optional[str] = Field(None, max_length=128)
+        merge_into: Optional[int] = None
+
+    @app.put("/v1/review/categories/{category_id}", tags=["operate"],
+             summary="Confirm, dismiss, rename or merge a failure category")
+    def review_update(category_id: int, source: str, body: CategoryIn, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        from assay import review
+        try:
+            out = review.update(engine, _tenant(source), category_id, body.status, body.name, body.merge_into)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        if out is None:
+            raise HTTPException(404, "No such category.")
+        return out
+
+    @app.post("/v1/review/categories/{category_id}/candidates", tags=["operate"],
+              summary="Draft test cases from a category's conversations")
+    def review_candidates(category_id: int, source: str, days: int = 30, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        from assay import review
+        return review.propose(engine, runner.CachedSource(resolve(p, source)), category_id,
+                              runner.window_for_days(days))
+
+    @app.get("/v1/review/categories/{category_id}/personas", tags=["results"],
+             summary="Simulated-user personas from a category's conversations (assay_sdk.Persona)")
+    def review_personas(category_id: int, source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        from assay import review
+        return review.personas(engine, _tenant(source), category_id)
+
     @app.get("/v1/learn/candidates", tags=["results"], summary="Drafted test cases: proposed, approved, rejected")
     def learn_candidates(source: str, status: Optional[str] = None, p: Principal = Depends(require("read"))):
         check_source(p, source)

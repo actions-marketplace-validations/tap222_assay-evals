@@ -65,6 +65,9 @@ class Settings:
     judge_rate_limit: Optional[float] = None  # model calls a minute
     judge_max_time: Optional[float] = None  # seconds for one request's judging
     judge_budget_usd: Optional[float] = None  # dollars for one request's judging
+    review_sample: int = 50  # production conversations read per review run (assay/review.py)
+    review_budget_usd: Optional[float] = None  # dollars for one review run
+    review_daily: bool = False  # read ASSAY_REVIEW_SAMPLE conversations a day, per scheduled events source
 
     # built-in scheduler (0 = off)
     schedule_minutes: int = 0
@@ -107,6 +110,9 @@ class Settings:
             judge_rate_limit=_num(e("ASSAY_JUDGE_RATE_LIMIT")),
             judge_max_time=_num(e("ASSAY_JUDGE_MAX_TIME")),
             judge_budget_usd=_num(e("ASSAY_JUDGE_BUDGET_USD")),
+            review_sample=int(e("ASSAY_REVIEW_SAMPLE", "50")),
+            review_budget_usd=_num(e("ASSAY_REVIEW_BUDGET_USD")),
+            review_daily=e("ASSAY_REVIEW_DAILY", "false").lower() in ("1", "true", "yes"),
             schedule_minutes=int(e("ASSAY_SCHEDULE_MINUTES", "0")),
             schedule_sources=_list(e("ASSAY_SCHEDULE_SOURCES")),
             schedule_window_days=float(e("ASSAY_SCHEDULE_WINDOW_DAYS", "1")),
