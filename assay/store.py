@@ -344,6 +344,7 @@ review_categories = Table(
     Column("merged_into", Integer),
     Column("created_at", DateTime, nullable=False),
     Column("updated_at", DateTime, nullable=False),
+    Column("changed_at", DateTime),  # renamed, merged or dismissed: the taxonomy changed
 )
 
 review_runs = Table(

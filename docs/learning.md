@@ -127,7 +127,24 @@ a few hundred conversations a week. So Assay reads them, and a person reviews ca
    mark the first step that failed (the upstream one, not what followed from it). The model's
    note is shown as a suggestion to accept, edit or reject. A person's note replaces the model's
    on that conversation in every count, is grouped into categories with the rest, and is kept
-   apart as theirs (`by_people` on a category).
+   apart as theirs (`by_people` on a category). A conversation can have more than one independent
+   failure: "Another failure" adds one, counted in its own category.
+
+   **The person codes first.** Until they've written 30 notes of their own
+   (`ASSAY_REVIEW_PERSON_FIRST`), the model's notes are hidden, so they don't shape what the
+   person sees. The first sample is spread across kinds of conversation (task, tools, errors,
+   length, what the user asked), not thirty near-copies of the commonest one.
+
+   **Then the model searches for more of it.** "Search for more like mine" reads conversations no
+   person has, looking for the categories the person's notes are in. A match comes first in the
+   queue as "Likely: <category>", with the quotes that show it; it counts toward the category
+   only once a person accepts it.
+
+   **Saturation says when to stop.** Over the last 20 conversations a person read: how many
+   failure modes were new, how many categories changed (renamed, merged or dismissed), and how
+   many notes aren't grouped yet. When all three are zero, new reviews have stopped revealing
+   anything: saturated. The tab shows it against a pool of about 100 conversations, and so does
+   `assay report`. Come back to it when the product changes.
 4. **The loop.** A category becomes candidate test cases, drafted as a pattern's are, with the note
    as their provenance. It also becomes simulated-user personas built from its real conversations,
    for `assay_sdk.simulate`, so a failure nobody wrote a test for becomes one.
@@ -135,7 +152,9 @@ a few hundred conversations a week. So Assay reads them, and a person reviews ca
 ```
 POST /v1/review/run?source=events:acme&sample=50        read, note and group (a model call per conversation)
 GET  /v1/review/queue?source=events:acme                 conversations for a person, with the model's note
-POST /v1/review/notes?source=…                           {"conversation", "went_wrong", "note", "first_step", "accept"}
+POST /v1/review/notes?source=…                           {"conversation", "went_wrong", "note", "first_step", "accept", "also"}
+POST /v1/review/search?source=…&sample=50                 likely instances of people's categories (a model call each)
+GET  /v1/review/saturation?source=…&window=20             new failure modes, changes and ungrouped notes lately
 GET  /v1/review/categories?source=events:acme            what was found, share now and the week before
 PUT  /v1/review/categories/{id}?source=…                 {"status": "confirmed"}, {"merge_into": 7}, {"name": "..."}
 POST /v1/review/categories/{id}/candidates?source=…      draft test cases from it

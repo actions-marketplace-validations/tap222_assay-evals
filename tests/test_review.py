@@ -26,7 +26,11 @@ class Reader:
         self.calls.append(kw)
         system = kw["system"][0]["text"] if isinstance(kw["system"], list) else kw["system"]
         prompt = kw["messages"][-1]["content"]
-        if "group reviewers' notes" in system:
+        if "look for known failures" in system:
+            cat = re.findall(r"^- (\d+): ", prompt.split("<conversation>")[0], re.M)[0]
+            v = ({"category": cat, "note": "Quotes the policy instead of the order.", "quotes": ["Our refund policy is 30 days"]}
+                 if "refund policy" in prompt.split("<conversation>")[1] else {"category": "none", "note": "", "quotes": []})
+        elif "group reviewers' notes" in system:
             ids = [int(x) for x in re.findall(r"^- (\d+): ", prompt.split("<notes>")[1], re.M)]
             known = re.findall(r"^- (\d+): ", prompt.split("<notes>")[0], re.M)
             cat = known[0] if known else "new:1"
@@ -56,17 +60,21 @@ def convo(c, cid, asked, answered, hours_ago=2):
     assert r.status_code == 200
 
 
-@pytest.fixture
-def app(tmp_path, monkeypatch):
+def make(tmp_path, monkeypatch, first=30):
     reader = Reader(invent={"O-3"})
     monkeypatch.setattr(judge_mod, "_client", lambda: reader)
-    c = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path / 's.db'}")))
+    c = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path / 's.db'}", review_person_first=first)))
     c.reader = reader
     for i in range(1, 4):  # fluent, nothing errors, and it misses what was asked
         convo(c, f"bad-{i}", f"Where is my order O-{i}? It hasn't arrived.", "Our refund policy is 30 days from delivery.")
     for i in range(4, 7):
         convo(c, f"ok-{i}", f"Where is my order O-{i}?", f"O-{i} is out for delivery today.")
     return c
+
+
+@pytest.fixture
+def app(tmp_path, monkeypatch):
+    return make(tmp_path, monkeypatch, first=0)  # suggestions from the start
 
 
 def test_reading_finds_what_no_rule_does_and_groups_it(app):
@@ -107,7 +115,7 @@ def test_quotes_are_checked():
 
 def test_a_person_reads_the_queue_and_their_notes_replace_the_models(app):
     app.post("/v1/review/run", params={**SRC, "sample": 10})
-    Q = app.get("/v1/review/queue", params=SRC).json()
+    Q = app.get("/v1/review/queue", params=SRC).json()["conversations"]
     assert len(Q) == 6 and all(c["turns"] for c in Q)
     assert [c["suggestion"]["went_wrong"] for c in Q[:2]] == [True, True]  # the likeliest wrong first
     one = Q[0]
@@ -132,8 +140,68 @@ def test_a_person_reads_the_queue_and_their_notes_replace_the_models(app):
                                                           "went_wrong": True}).status_code == 422  # say what
     app.post("/v1/review/notes", params=SRC, json={"conversation": fine["conversation"], "went_wrong": True,
                                                    "note": "It never said when the parcel would arrive."})
-    left = {c["conversation"] for c in app.get("/v1/review/queue", params=SRC).json()}
+    left = {c["conversation"] for c in app.get("/v1/review/queue", params=SRC).json()["conversations"]}
     assert not left & {one["conversation"], two["conversation"], fine["conversation"]}
     app.post("/v1/review/run", params={**SRC, "sample": 10})  # people's notes are grouped with the rest
     cat = app.get("/v1/review/categories", params=SRC).json()[0]
     assert (cat["notes"], cat["by_people"]) == (3, 2)  # and O-3, read right by the model this time
+
+
+def note(c, conv, wrong, text=None, **kw):
+    r = c.post("/v1/review/notes", params=SRC, json={"conversation": conv, "went_wrong": wrong, "note": text, **kw})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_a_person_codes_first_on_a_diverse_sample(tmp_path, monkeypatch):
+    c = make(tmp_path, monkeypatch, first=2)
+    c.post("/v1/review/run", params={**SRC, "sample": 10})  # the model has read them all
+    Q = c.get("/v1/review/queue", params=SRC).json()
+    assert (Q["suggestions"], Q["reviewed"], Q["suggestions_after"]) == (False, 0, 2)
+    assert all(x["suggestion"] is None for x in Q["conversations"])  # nothing to anchor the reading
+    top = [x["conversation"][:3] for x in Q["conversations"][:2]]
+    assert sorted(top) == ["bad", "ok-"]  # the two kinds of conversation, not two of one
+    assert c.post("/v1/review/search", params=SRC).status_code == 422  # the person's notes come first
+    note(c, "bad-1", True, "Answered the refund policy; they asked where the order is.")
+    note(c, "ok-4", False)
+    Q = c.get("/v1/review/queue", params=SRC).json()
+    assert Q["suggestions"] and any(x["suggestion"] for x in Q["conversations"])
+
+
+def test_search_for_more_of_what_the_person_found_then_saturation(tmp_path, monkeypatch):
+    c = make(tmp_path, monkeypatch, first=2)
+    note(c, "bad-1", True, "Answered the refund policy; they asked where the order is.")
+    note(c, "ok-4", False)
+    assert c.post("/v1/review/search", params=SRC).status_code == 422  # not grouped yet
+    c.post("/v1/review/run", params={**SRC, "sample": 0})  # group the person's notes, read nothing new
+    cat = c.get("/v1/review/categories", params=SRC).json()[0]
+    assert (cat["notes"], cat["by_people"]) == (1, 1)
+    out = c.post("/v1/review/search", params=SRC).json()
+    assert (out["searched"], out["likely"]) == (4, 2), out
+    assert out["by_category"] == {cat["name"]: 2}
+    Q = c.get("/v1/review/queue", params=SRC).json()["conversations"]
+    first = Q[0]
+    assert first["suggestion"]["searched"] and first["suggestion"]["category"] == cat["name"]
+    assert c.get("/v1/review/categories", params=SRC).json()[0]["notes"] == 1  # a match counts once accepted
+    note(c, first["conversation"], True, accept=first["suggestion"]["id"])
+    assert c.get("/v1/review/categories", params=SRC).json()[0]["notes"] == 2
+    sat = c.get("/v1/review/saturation", params={**SRC, "window": 2}).json()
+    assert (sat["reviewed"], sat["new_modes"], sat["saturated"]) == (3, 0, True)
+    c.put(f"/v1/review/categories/{cat['id']}", params=SRC, json={"name": "Policy instead of status"})
+    note(c, "ok-5", False)
+    sat = c.get("/v1/review/saturation", params={**SRC, "window": 2}).json()
+    assert (sat["changed"], sat["saturated"]) == (1, False)  # the taxonomy moved: keep reading
+    sat = c.get("/v1/review/saturation", params={**SRC, "window": 4}).json()
+    assert sat["new_modes"] == 1 and sat["new"] == ["Policy instead of status"]  # bad-1's is in the window
+
+
+def test_more_than_one_failure_in_a_conversation(tmp_path, monkeypatch):
+    c = make(tmp_path, monkeypatch, first=0)
+    out = note(c, "bad-1", True, "Answered the refund policy.", first_step={"trace_id": "bad-1", "seq": 1},
+               also=[{"note": "Never gave a delivery date.", "hint": "incomplete"}, {"note": " "}])
+    assert len(out["also"]) == 1  # the empty one is dropped
+    loose = review.ungrouped(c.app.state.engine, "q")
+    assert sorted(n["note"] for n in loose) == ["Answered the refund policy.", "Never gave a delivery date."]
+    r = c.post("/v1/review/notes", params=SRC, json={"conversation": "ok-4", "went_wrong": False,
+                                                     "also": [{"note": "x"}]})
+    assert r.status_code == 422

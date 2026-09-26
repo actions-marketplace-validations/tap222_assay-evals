@@ -127,7 +127,8 @@ def production(engine: Engine, source, tenant: str, since: datetime, until: date
     return {"categories": cats[:8], "patterns": sorted(pats, key=lambda p: -p["traces"])[:8],
             "fixed": fixed, "recurred": recurred, "falling": [x for x in cats if x["share"] is not None and
                                                               x["share_before"] and x["share"] < x["share_before"] / 2],
-            "new_categories": new_cats, "new_tasks": new_tasks, "rare_paths": rare}
+            "new_categories": new_cats, "new_tasks": new_tasks, "rare_paths": rare,
+            "saturation": review.saturation(engine, tenant)}
 
 
 # ---------- the log ----------
@@ -204,6 +205,13 @@ def markdown(r: dict) -> str:
             out += [f"| {_md(n)} | {_md(by)} | {_pct(a)} | {_pct(b)} |" for n, by, a, b in rows]
         else:
             out.append("Nothing found this period.")
+        sat = p.get("saturation") or {}
+        if sat.get("reviewed"):
+            out += ["", f"People read {sat['reviewed']} conversation{'s' * (sat['reviewed'] != 1)} "
+                        f"(a pool of {sat['pool']} is a useful round). " + (
+                        f"The last {sat['window']} found no new failure mode: saturated." if sat["saturated"] else
+                        f"The last {sat['window']}: {sat['new_modes']} new failure mode{'s' * (sat['new_modes'] != 1)}, "
+                        f"{sat['changed']} changed, {sat['ungrouped']} not grouped yet: keep reading.")]
         good = [f"- “{_md(x['name'])}”: no longer seen in production since {x['fixed_at']:%b %d}" for x in p["fixed"]]
         good += [f"- {_md(c['name'])}: {_pct(c['share_before'])} → {_pct(c['share'])} of conversations"
                  for c in p["falling"]]
@@ -229,5 +237,6 @@ def as_json(r: dict) -> dict:
             "production": None if p is None else {
                 "categories": p["categories"], "patterns": [clean(x) for x in p["patterns"]],
                 "fixed": [clean(x) for x in p["fixed"]], "recurred": [clean(x) for x in p["recurred"]],
-                "new_categories": p["new_categories"], "new_tasks": p["new_tasks"]},
+                "new_categories": p["new_categories"], "new_tasks": p["new_tasks"],
+                "saturation": p.get("saturation")},
             "log": [clean(x) for x in r["log"]]}

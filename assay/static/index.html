@@ -1426,37 +1426,65 @@ const PKIND={failure:["bad","failure"],infrastructure:["warn","infrastructure"],
 const PFROM={correction:["good","a correction"],property:["good","what broke"],pattern:["neutral","pattern"],
   passing_traces:["warn","guess: normal traces"],request:["warn","guess: the request"]};
 /* ---------- review: a person reads one conversation at a time ---------- */
+function saturationLine(t){
+  if(!t||!t.reviewed)return`<span class="note">Nothing read by a person yet. A round is about ${t?t.pool:100} diverse conversations.</span>`;
+  const bar=`<span class="track" style="display:inline-block;width:120px;vertical-align:middle"><span class="fill" style="width:${Math.min(100,t.reviewed/t.pool*100)}%"></span></span>`;
+  return`<span>${bar} <b>${t.reviewed}</b> of a ${t.pool}-conversation pool read. `+(t.saturated?`The last ${t.window} found no new failure mode: <b>saturated</b>.`
+    :t.window<t.of?`Saturation is checked over the last ${t.of}.`
+    :`The last ${t.window}: ${t.new_modes} new failure mode${t.new_modes===1?"":"s"}, ${t.changed} changed, ${t.ungrouped} not grouped yet. Keep reading.`)+`</span>`}
 async function renderReview(){
   const box=$("#tab-review");
   if(!S.rq){box.innerHTML=`<div class="panel"><p class="note">Loading conversations…</p></div>`;
-    S.rq=await api(`/v1/review/queue?${q({source:src(),days:7,limit:25})}`);S.ri=0;S.rdone=0}
-  const Q=S.rq,c=Q[S.ri];
-  if(!c){box.innerHTML=`<div class="panel stack"><h2>Review</h2><p class="note">${S.rdone?`Done: ${S.rdone} read. `:""}Nothing left to read in the last 7 days. Run <span class="mono">assay review run</span> to group the notes into categories.</p>
-    <button id="rv-more">Load again</button></div>`;$("#rv-more").onclick=()=>{S.rq=null;renderReview()};return}
-  const g=c.suggestion,turn=(x,i)=>{
+    S.rq=await api(`/v1/review/queue?${q({source:src(),days:7,limit:25})}`);S.ri=0}
+  const Q=S.rq,L=Q.conversations,c=L[S.ri];
+  const tools=`<div class="legend">${saturationLine(Q.saturation)}</div>
+    <div><button id="rv-group" title="Group your notes into failure categories (a model call)">Group my notes</button>
+    ${Q.suggestions?` <button id="rv-search" title="Read conversations nobody has for the failures you described (model calls)">Search for more like mine</button>`:""}
+    <span class="note" id="rv-tmsg"></span></div>`;
+  const wire=()=>{
+    $("#rv-group").onclick=async e=>{e.target.disabled=true;try{const r=await api(`/v1/review/run?${q({source:src(),sample:0})}`,{method:"POST"});
+      $("#rv-tmsg").textContent=r.new_categories.length?`New: ${r.new_categories.join(", ")}`:"Grouped.";S.rq=null;setTimeout(renderReview,800)}catch(x){$("#rv-tmsg").textContent=x.message;e.target.disabled=false}};
+    const sb=$("#rv-search");if(sb)sb.onclick=async e=>{e.target.disabled=true;$("#rv-tmsg").textContent="Searching…";
+      try{const r=await api(`/v1/review/search?${q({source:src()})}`,{method:"POST"});$("#rv-tmsg").textContent=`${r.likely} likely of ${r.searched} read. They're first in the queue.`;S.rq=null;setTimeout(renderReview,800)}
+      catch(x){$("#rv-tmsg").textContent=x.message;e.target.disabled=false}}};
+  if(!c){box.innerHTML=`<div class="panel stack"><h2>Review</h2><p class="note">Nothing left to read in the last 7 days.</p>${tools}
+    <div><button id="rv-more">Load again</button></div></div>`;$("#rv-more").onclick=()=>{S.rq=null;renderReview()};wire();return}
+  const g=c.suggestion,gate=Q.suggestions?"":`<p class="note">Write ${Q.suggestions_after} notes of your own before the model's suggestions show (${Q.reviewed} so far), so they don't shape what you see. This first sample is spread across different kinds of conversation.</p>`;
+  const turn=(x,i)=>{
     const pick=`<label class="ref" title="The first thing that went wrong, upstream of the rest"><input type="radio" name="first" value="${i}"> first failure</label>`;
     if(x.role==="tool")return`<details class="turn tool"><summary><span class="mono">${esc(x.name||"tool")}</span>${x.error?` <span class="worse">failed</span>`:""} ${pick}</summary>
       <pre class="code">${esc(JSON.stringify(x.args,null,1))}</pre><pre class="code">${esc(x.error||JSON.stringify(x.result,null,1))}</pre></details>`;
     if(x.role==="thinking")return`<details class="turn"><summary class="note">thinking ${pick}</summary><p class="note">${esc(x.text)}</p></details>`;
     return`<div class="turn ${x.role}"><b>${x.role==="user"?"User":"Assistant"}</b> ${pick}<p style="white-space:pre-wrap;margin:4px 0 0">${esc(x.text)}</p></div>`};
+  const steps=c.turns.map((x,i)=>`<option value="${i}">${i+1}. ${esc(x.role==="tool"?x.name||"tool":x.role)}</option>`).join("");
   box.innerHTML=`<div class="panel stack">
-    <div class="panel-head"><div><h2>Review <span class="note">${S.ri+1} of ${Q.length}</span></h2><p class="sub">Read the whole conversation, then write what went wrong in your own words and mark the first thing that failed. Your notes become the categories; the model's note is only a suggestion.${c.flagged?" This one was flagged by production signals.":""}</p></div></div>
+    <div class="panel-head"><div><h2>Review <span class="note">${S.ri+1} of ${L.length}</span></h2><p class="sub">Read the whole conversation, write what went wrong in your own words, and mark the first thing that failed. Your notes become the categories; the model's are only suggestions.${c.flagged?" This one was flagged by production signals.":""}</p></div></div>
+    ${gate}${tools}
     <div class="stack" id="rv-turns">${c.turns.map(turn).join("")||`<p class="note">No turns recorded.</p>`}</div></div>
   <div class="panel stack">
-    ${g?`<div class="stack"><b>The model's suggestion</b><p class="note">${g.went_wrong?esc(g.note||""):"Nothing went wrong."}${g.hint?` <span class="ref">(${esc(g.hint)})</span>`:""}</p>
-      <div><button id="rv-accept">Accept</button> <button id="rv-edit">Edit</button> <button id="rv-reject">Reject</button></div></div>`:`<p class="note">No model note for this one; write your own.</p>`}
+    ${g?`<div class="stack"><b>${g.searched?"Likely: "+esc(g.category||""):"The model's suggestion"}</b><p class="note">${g.went_wrong?esc(g.note||""):"Nothing went wrong."}${g.hint&&!g.searched?` <span class="ref">(${esc(g.hint)})</span>`:""}</p>
+      <div><button id="rv-accept">Accept</button> <button id="rv-edit">Edit</button> <button id="rv-reject">Reject</button></div></div>`:Q.suggestions?`<p class="note">No model note for this one; write your own.</p>`:""}
     <textarea id="rv-note" rows="3" maxlength="500" placeholder="What went wrong, in your words (leave empty if nothing did)" style="width:100%"></textarea>
     <input id="rv-hint" maxlength="80" placeholder="A short label, if one comes to mind (optional)">
+    <div id="rv-also" class="stack"></div>
+    <div><button id="rv-add" title="Another failure, independent of the first">Another failure</button></div>
     <div><button id="rv-wrong">Went wrong</button> <button id="rv-fine">Nothing wrong</button> <button id="rv-skip">Skip</button> <span class="note" id="rv-msg"></span></div></div>`;
+  wire();
   const first=()=>{const r=box.querySelector("input[name=first]:checked");if(!r)return null;const x=c.turns[+r.value];return{trace_id:x.trace_id,seq:x.seq}};
+  $("#rv-add").onclick=()=>{const d=document.createElement("div");d.className="also";
+    d.innerHTML=`<textarea rows="2" maxlength="500" placeholder="Another failure, independent of the first" style="width:100%"></textarea>
+      <select aria-label="Where it first shows"><option value="">where it first shows (optional)</option>${steps}</select>`;$("#rv-also").appendChild(d)};
+  const also=()=>[...box.querySelectorAll("#rv-also .also")].map(d=>{const n=d.querySelector("textarea").value.trim(),i=d.querySelector("select").value;
+    return n?{note:n,first_step:i===""?null:{trace_id:c.turns[+i].trace_id,seq:c.turns[+i].seq}}:null}).filter(Boolean);
   const next=()=>{S.ri++;renderReview();window.scrollTo({top:0})};
-  const send=async body=>{try{await api(`/v1/review/notes?${q({source:src()})}`,{method:"POST",body:JSON.stringify({conversation:c.conversation,trace_ids:c.trace_ids,first_step:first(),...body})});S.rdone++;next()}
+  const send=async body=>{try{await api(`/v1/review/notes?${q({source:src()})}`,{method:"POST",body:JSON.stringify({conversation:c.conversation,trace_ids:c.trace_ids,first_step:first(),...body})});
+      Q.reviewed++;if(!Q.suggestions&&Q.reviewed>=Q.suggestions_after){S.rq=null;renderReview();window.scrollTo({top:0})}else next()}
     catch(e){$("#rv-msg").textContent=e.message}};
-  $("#rv-wrong").onclick=()=>{const n=$("#rv-note").value.trim();if(!n){$("#rv-msg").textContent="Say what went wrong first.";return}send({went_wrong:true,note:n,hint:$("#rv-hint").value.trim()||null})};
-  $("#rv-fine").onclick=()=>send({went_wrong:false});
+  $("#rv-wrong").onclick=()=>{const n=$("#rv-note").value.trim();if(!n){$("#rv-msg").textContent="Say what went wrong first.";return}send({went_wrong:true,note:n,hint:$("#rv-hint").value.trim()||null,also:also()})};
+  $("#rv-fine").onclick=()=>{if(also().length){$("#rv-msg").textContent="Other failures go on a conversation that went wrong.";return}send({went_wrong:false})};
   $("#rv-skip").onclick=next;
-  if(g){$("#rv-accept").onclick=()=>send({went_wrong:g.went_wrong,accept:g.id});
-    $("#rv-edit").onclick=()=>{$("#rv-note").value=g.note||"";$("#rv-hint").value=g.hint||"";$("#rv-note").focus()};
+  if(g){$("#rv-accept").onclick=()=>send({went_wrong:g.went_wrong,accept:g.id,also:g.went_wrong?also():[]});
+    $("#rv-edit").onclick=()=>{$("#rv-note").value=g.note||"";$("#rv-hint").value=g.searched?"":g.hint||"";$("#rv-note").focus()};
     $("#rv-reject").onclick=()=>{$("#rv-note").value="";$("#rv-note").focus();$("#rv-msg").textContent="Rejected; write your own note, or mark it fine."}}
 }
 
