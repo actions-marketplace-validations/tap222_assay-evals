@@ -34,7 +34,7 @@ dev = ["pytest>=8", "httpx>=0.27"]
 
 [project.urls]
 Homepage = "https://github.com/tap222/docai-eval"
-Documentation = "https://github.com/tap222/docai-eval#setup-guide"
+Documentation = "https://github.com/tap222/docai-eval/blob/main/docs/setup.md"
 Issues = "https://github.com/tap222/docai-eval/issues"
 
 [project.scripts]

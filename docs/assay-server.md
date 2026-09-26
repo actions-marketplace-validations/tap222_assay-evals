@@ -36,5 +36,5 @@ assay keys create --tenant acme --scopes admin --name "acme admin"
 To send data to the server from your own code, use the SDK,
 [`assay-evals`](https://pypi.org/project/assay-evals/), which has no dependencies.
 
-The [setup guide](https://github.com/tap222/docai-eval#setup-guide) also covers Docker,
+The [setup guide](https://github.com/tap222/docai-eval/blob/main/docs/setup.md) also covers Docker,
 Vercel, connecting your pipeline's database, and release gates.

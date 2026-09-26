@@ -1,0 +1,223 @@
+[Assay](../README.md) › [Documentation](README.md)
+
+# Agents
+
+## Agents: evaluating the trajectory, not just the answer
+
+An agent reasons, calls tools, reads what they return, changes things, and answers. Judging
+only the answer misses a refund issued to the wrong order, or a correct answer reached by
+deleting something first. Send each run as a **trajectory**:
+
+```json
+{"trajectory_id": "agent-0923.case-017.a0", "run_id": "agent-0923", "case_id": "case-017", "attempt": 0,
+ "task": "refund_request", "started_at": "2026-09-23T10:00:00Z", "answer": "Refunded $27.61.",
+ "lineage": {"prompt": "support_agent@v5", "model": "claude-sonnet-5"},
+ "steps": [
+   {"kind": "reason", "model": "claude-sonnet-5", "tokens": 812, "cost_usd": 0.0024},
+   {"kind": "tool", "name": "get_order", "args": {"order_id": "O-10017"}, "result": {"price": 27.61}},
+   {"kind": "tool", "name": "issue_refund", "args": {"order_id": "O-10017", "amount": 27.61}},
+   {"kind": "state", "name": "refund:O-10017", "args": {"op": "create"}, "result": {"amount": 27.61}},
+   {"kind": "answer", "text": "Refunded $27.61."}]}
+```
+
+Also send what each test case expects to `POST /v1/agents/references`:
+- the tool calls, in order where it matters. Arguments match partially, and a call can be
+  `optional` or `any_order`;
+- tools that may be called beyond those (`allow_extra`, e.g. read-only lookups);
+- the answer;
+- end-state assertions, such as `{"object": "refund:O-10017", "exists": true}` or
+  `{"object": "order:*", "field": "qty", "equals": 3}`;
+- a step budget.
+
+OpenTelemetry works too. `execute_tool` spans become tool steps and model spans become
+reasoning steps (see the mapping at `/docs`).
+
+`POST /v1/agents/runs/{run}/evaluate` checks every trajectory five ways and stores the checks
+as evaluation results. Failure causes, flakiness across attempts and the release call then
+work on agents unchanged.
+
+| Check | Passes when |
+|---|---|
+| answer | the final answer has the expected value (whole-word, or written another usual way) |
+| end state | the world afterwards matches, folded from the state-change steps |
+| tool calls | every required call was made with the right arguments, in order. Retrying a call that errored is fine; so are allowed extras |
+| safety | no critical path contract broke. Contracts see tool arguments: `delete_order` never runs `where` `confirmed` isn't true; `issue_refund` only after `get_order` with the `same` `order_id`; at most 2 `identical` `lookup_customer` calls |
+| efficiency | within the step budget, and no call repeated 3 times with identical arguments |
+
+For a failing run, **credit assignment** finds the first bad step and how it went wrong:
+unsafe action, a tool error it never recovered from (infrastructure when the error says the
+tool was unavailable), a loop, the wrong tool, the right tool with the wrong arguments,
+stopping before an expected call, ignoring a tool result that held the answer, the wrong end
+state, or a wrong answer after correct calls. These are the mechanisms Failure causes groups
+by, so you get lines like "Wrong tool: `search_orders` where `get_order` was expected: 21
+cases, a regression since `support_agent` v4 → v5".
+
+Tool calls are also recorded as pipeline steps. So the workflow graph draws the agent's tool
+graph, path contracts and shifts apply to tool sequences, Trace shows any run step by step
+against its reference, and the measures count tool failures and model cost. A document
+pipeline is just an agent with a fixed path.
+
+### When a run is evaluated: when it ends, not on a timer
+
+An agent can take ten seconds or five minutes, so Assay doesn't evaluate after a fixed
+delay. Each run goes through a lifecycle:
+
+- **running:** `run.start` (or its first step) has arrived, and `run.end` hasn't. It isn't
+  judged half-way.
+- **ended:** `run.end` says `completed` or `failed`. A run with no events for 30 minutes
+  (`ASSAY_ABANDON_MINUTES`) is marked **abandoned**: its process died. An agent that's
+  quiet for longer between steps can be given its own limit, by its runs' `task`:
+
+  ```bash
+  curl -X PUT $ASSAY_URL/v1/agents/limits -H "Authorization: Bearer $ASSAY_KEY" \
+    -d '{"abandon_minutes": {"deep_research": 180, "*": 10}}'   # "*": this source's other agents; null removes one
+  ```
+- **evaluated:** in the same request that ended it, once its child runs (`parent_run_id`)
+  have ended too.
+- **evaluated again:** if more events arrive after that, e.g. a late step.
+
+With OpenTelemetry, a run ends when its root span arrives. Spans are exported as they end,
+often over several batches, so the run's steps are added up across batches, and a tool span
+that arrives before the root span doesn't end the run early.
+
+Every run gets the checks that need no expectations: it **finished**, it kept the critical
+path contracts, it didn't **loop**, and no **tool error** went unrecovered. A test-case run
+also gets its case's checks, so an evaluation run fills in as its cases finish. A background
+sweep, every 60 seconds (`ASSAY_EVALUATE_SECONDS`) or on each `/v1/cron` call on Vercel,
+marks quiet runs abandoned and evaluates anything left over.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/agents/lifecycle?source=…` | how many runs are running, awaiting evaluation, evaluated, abandoned or failing, and the latest failures |
+| `GET /v1/agents/limits?source=…`, `PUT /v1/agents/limits` | each agent's abandon limit, in minutes |
+| `POST /v1/events/trajectories` | ingest trajectories (steps inline) |
+| `POST /v1/agents/references`, `GET /v1/agents/references?source=…` | what cases expect |
+| `GET /v1/agents/runs?source=…` | agent runs, newest first |
+| `POST /v1/agents/runs/{run}/evaluate?source=…` | run the five checks, stored as eval results (runs still going are skipped and counted) |
+| `GET /v1/agents/runs/{run}?source=…` | pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline |
+| `GET /v1/agents/trajectories/{id}?source=…` | one run step by step: divergence, end state, contract breaks, cost, and its latest evaluation |
+
+### Plan adherence: did it do what it said it would?
+
+An agent that plans before it acts can record the plan, and the run is checked against it.
+No test case or reference is needed:
+
+```python
+run.plan(["search_customer", "get_order", {"tool": "refund", "args": {"id": "O-17"}}],
+         text="Find the customer, check the order, refund it")
+```
+
+The `plan` check fails when the agent:
+- skipped a planned call (or it errored and was never made);
+- made planned calls out of order;
+- made a planned call with other arguments than it planned.
+
+It says where: "Strayed from its plan: called get_order (step 2) after refund, though the plan
+put it first." Calls the plan didn't mention are allowed, and so is retrying a call that
+errored. Replanning is allowed too: a new plan step replaces the rest of the one before, so
+switching from "refund" to "escalate" isn't counted as skipping the refund. A run that failed
+or stopped early is reported by **finished**, not here as well. In `pytest --assay` and
+`assay test` the check is reported as "Plan adherence", under Planning. Whether the plan
+itself was a good one needs a judge; this checks only that it was followed.
+
+### An LLM judge: was the plan a good one, and does the run hang together?
+
+Rules can check that a plan was followed. They can't check whether it was worth following,
+or whether the answer agrees with what the tools returned. An LLM judge scores both, 1 to 5,
+with a reason that names the step it rests on:
+
+| Check | What the judge looks at |
+|---|---|
+| **Plan quality** | whether the plan, given the request and the tools offered, addresses what was asked, in a workable order, without steps it didn't need. Only for runs that record a plan |
+| **Consistency** | whether the reasoning, the tool results and the answer agree: nothing contradicted, nothing stated as fact that no step established |
+
+```bash
+pip install anthropic                       # and ANTHROPIC_API_KEY, or `ant auth login`
+assay test --judge                          # or: pytest --assay --assay-judge
+curl -X POST "$ASSAY_URL/v1/agents/runs/nightly-0924/judge?source=events:acme" -H "Authorization: Bearer $ASSAY_KEY"
+```
+
+It costs a model call per run, so it runs only when asked. `[judge] enabled = true` in
+`assay.toml` turns it on for every run. The model is `claude-opus-5` by default (`[judge]
+model`, or `ASSAY_JUDGE_MODEL` on the server). A score of 3 or more passes.
+
+The judge's results are ordinary evaluation results (evaluator `assay.judge@1`). So:
+- a case whose consistency drops from its baseline is a regression, and a judge that disagrees
+  with itself across attempts is flaky;
+- what the judge was given is recorded, and checked against the trace like any evaluator's;
+- a judge that couldn't judge isn't a failure. A rate limit, timeout, 5xx or connection error
+  is `INFRA_ERROR`. A refusal, a rejected request, or an answer that isn't the JSON asked for
+  is `EVALUATOR_ERROR`.
+
+Requests the model declines are retried on another model server-side (`fallbacks: "default"`).
+The trace is shown to the judge as data, marked as such, so instructions inside a tool result
+don't steer the score. Long tool results are cut, and the cut is marked.
+
+### Conversations and MCP
+
+A chat is several runs, one per turn. `assay.run(..., conversation="chat-1", turn=2)` (or
+`conversation_id` and `turn` on `run.start`, or `gen_ai.conversation.id` with OpenTelemetry)
+links them. `GET /v1/agents/conversations?source=…` lists conversations, and
+`GET /v1/agents/conversations/{id}?source=…` shows one turn by turn: what each turn was asked
+and answered, its steps, and its evaluation. A case saved from a later turn keeps the turns
+before it in full (`trajectory.conversation`), so it can be replayed with what was said before.
+
+MCP steps are recorded as what they are, not as tool calls:
+
+```python
+run.tool("refund", {"id": "O-17"}, {"ok": True}, server="shop")              # an MCP tool
+run.resource("file:///policies/refunds.md", policy_text, server="docs")     # a resource read
+run.mcp_prompt("refund_policy_check", {"order": "O-17"}, messages, server="docs")
+```
+
+A resource's contents count as what the agent retrieved, so a judge given that policy as its
+context passes the context check.
+
+## Beyond the final answer: how the agent behaved
+
+"Agent score: 0.87" doesn't say what changed. Assay checks what the agent did, and compares how it
+behaved with each test's last passing run.
+
+```python
+from assay_sdk.testing import expect
+
+def test_refund(assay_case):
+    expect(assay_case).must_call("get_order").must_not_call("delete_order").max_steps(8) \
+        .must_get_approval_before("refund").max_cost(0.05).max_latency(8) \
+        .max_tools_exposed(10).max_context_tokens(8000).must_resolve()
+    my_agent("Refund O-17", run=assay_case)
+```
+
+Expectations can be declared before the agent runs. They're checked when the test ends, and every
+one that fails is reported together. Each is also recorded as a check (`expect.must_call(get_order)`),
+so it's compared with its baseline like any other. Outside pytest, call `.verify()` or use
+`with expect(run):`.
+
+For that, the SDK records three things beyond tool calls and the answer:
+
+| Call | Records |
+|---|---|
+| `run.llm(..., tokens_in=, tools=[...])` | the tools the model was offered (names, or the definitions you passed it), and how big its input was |
+| `run.approval("refund", "approved" \| "rejected" \| "pending", by="manager", reason=)` | a decision to allow an action |
+| `run.outcome("resolved" \| "unresolved" \| "escalated")` | whether the run did what was asked |
+
+`pytest --assay` and `assay test` then compare each case's behavior with its baseline, and a
+case fails when it got worse:
+
+```
+⚠ 3 cases behaved worse than their baseline
+  tests/test_behavior.py::test_hard_case
+    Cost: $0.0040 → $0.0120 (3.0×)
+    Context: 1,200 tokens → 9,000 tokens (7.5×)
+    Tools exposed: 8 tools → 30 tools (3.8×)
+    Outcome: resolved → unresolved
+  tests/test_behavior.py::test_policy_edge
+    Approval for refund: approved → rejected
+```
+
+A number counts as worse when it grew 1.5× and by at least a minimum ($0.001, 1 s, 2 steps, 500
+tokens, 2 tools), so small moves aren't news. An outcome counts as worse when a resolved case
+stops resolving, and an approval when its decision changes. `[behavior]` in `assay.toml` sets
+the ratios (0 turns one off), and `fail = false` only reports it. With repeats, a case's number
+is the median of its attempts. The `requires_approval` contract puts an approval rule in
+`assay.toml` instead of in every test.

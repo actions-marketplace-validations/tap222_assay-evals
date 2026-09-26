@@ -9,7 +9,7 @@ pip install assay-evals
 ```
 
 With an Assay server, events go there (see the
-[setup guide](https://github.com/tap222/docai-eval#setup-guide)). Without one, they're
+[setup guide](https://github.com/tap222/docai-eval/blob/main/docs/setup.md)). Without one, they're
 recorded to a local file, so you can start with no account and no server (see
 "No server" below).
 
@@ -124,4 +124,4 @@ run, prints Assay's report in pytest's summary, and exits 1 only when something 
 
 To test with it, `assay test` (in `assay-server`) runs your code with the SDK recording,
 checks each run against its `assay.expect(...)`, and compares with the last run that passed.
-See [Test your AI app locally](https://github.com/tap222/docai-eval#test-your-ai-app-locally-its-pytest-no-server-no-account).
+See [Test your AI app locally](https://github.com/tap222/docai-eval/blob/main/docs/testing.md).
