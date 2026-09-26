@@ -232,6 +232,8 @@ agent_trajectories = Table(
     Column("lineage", JSON),
     Column("updated_at", DateTime, index=True),  # server time of the latest event; see assay/lifecycle.py
     Column("outcome", String(16)),  # resolved | unresolved | escalated
+    Column("conversation_id", String(128), index=True),  # the turns of one conversation share it
+    Column("turn", Integer),  # this run's place in it, from 0
 )
 
 # How each test-case run behaved (assay/behavior.py): cost, latency, steps, context, tools offered,
@@ -279,6 +281,7 @@ agent_steps = Table(
     Column("tools", JSON),  # the tools a model call was offered
     Column("tokens_out", Integer),  # a model call's output
     Column("prompt", String(192)),  # the prompt a model call used, id@version
+    Column("server", String(128)),  # the MCP server a tool call, resource read or prompt went to
 )
 
 # Runs as the v1 event schema describes them (assay/schema.py): what run.start and run.end
@@ -302,6 +305,8 @@ runs = Table(
     Column("parent_run_id", String(128)),
     Column("tags", JSON),
     Column("outcome", String(16)),  # resolved | unresolved | escalated
+    Column("conversation_id", String(128)),
+    Column("turn", Integer),
 )
 
 # What a test case expects of a trajectory: the tool calls, the answer, and the end state.

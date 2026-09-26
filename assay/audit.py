@@ -188,7 +188,8 @@ def run_context(engine: Engine, tenant: str, ids: Iterable[str]) -> Dict[str, di
                     st.c.text.is_not(None))).order_by(st.c.trajectory_id, st.c.seq)):
                 ctx[r.trajectory_id]["outputs"].append(r.text)
             for r in conn.execute(select(st.c.trajectory_id, st.c.result).where(and_(  # what the judge's context
-                    st.c.tenant == tenant, st.c.trajectory_id.in_(chunk), st.c.kind == "tool",  # should come from
+                    st.c.tenant == tenant, st.c.trajectory_id.in_(chunk),  # should come from: tools, MCP resources
+                    st.c.kind.in_(("tool", "resource")),
                     st.c.error.is_(None), st.c.result.is_not(None))).order_by(st.c.trajectory_id, st.c.seq)):
                 ctx[r.trajectory_id]["retrieved"].append(r.result)
             for tbl, key in ((t, t.c.trajectory_id), (runs, runs.c.run_id)):

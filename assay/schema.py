@@ -65,13 +65,16 @@ class RunStart(_E):
     test: Optional[Test] = None
     parent_run_id: Optional[str] = Field(None, max_length=128)
     tags: Optional[Dict[str, Scalar]] = None
+    conversation_id: Optional[str] = Field(None, max_length=128,
+                                           description="The conversation this run is a turn of: the turns share it")
+    turn: Optional[int] = Field(None, ge=0, description="This run's place in the conversation, from 0")
 
 
 class Step(_E):
     type: Literal["step"]
     run_id: str = Field(..., max_length=128)
     seq: int = Field(..., ge=0)
-    kind: Literal["llm", "tool", "state", "answer", "stage", "approval"]
+    kind: Literal["llm", "tool", "state", "answer", "stage", "approval", "resource", "mcp_prompt"]
     name: Optional[str] = Field(None, max_length=128)
     parent_seq: Optional[int] = Field(None, ge=0)
     ended_at: Optional[datetime] = None
@@ -85,9 +88,12 @@ class Step(_E):
     prompt: Optional[str] = Field(None, max_length=192, description="id@version")
     text: Optional[str] = Field(None, max_length=32768)
     tools: Optional[List[str]] = Field(None, max_length=500, description="llm: the tools the model was offered")
-    # tool
+    # tool; mcp_prompt: args are the prompt's arguments, result the messages it returned
     args: Optional[Dict[str, Any]] = None
     result: Optional[Any] = None
+    server: Optional[str] = Field(None, max_length=128, description="tool, resource, mcp_prompt: the MCP server")
+    # resource: an MCP resource read; result is its contents
+    uri: Optional[str] = Field(None, max_length=2048)
     # state
     op: Optional[Literal["create", "update", "delete"]] = None
     value: Optional[Any] = None
@@ -101,15 +107,18 @@ class Step(_E):
     @model_validator(mode="after")
     def _kind_fields(self):
         allowed = {"llm": {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "tools"},
-                   "tool": {"args", "result"}, "state": {"op", "value"}, "answer": {"text"},
-                   "stage": {"outputs", "did_work", "prompt"}, "approval": {"decision", "by", "text"}}[self.kind]
+                   "tool": {"args", "result", "server"}, "state": {"op", "value"}, "answer": {"text"},
+                   "stage": {"outputs", "did_work", "prompt"}, "approval": {"decision", "by", "text"},
+                   "resource": {"uri", "result", "server"}, "mcp_prompt": {"args", "result", "server"}}[self.kind]
         specific = {"model", "tokens_in", "tokens_out", "cost_usd", "prompt", "text", "args", "result", "op",
-                    "value", "outputs", "did_work", "tools", "decision", "by"}
+                    "value", "outputs", "did_work", "tools", "decision", "by", "server", "uri"}
         wrong = [f for f in specific - allowed if getattr(self, f) is not None]
         if wrong:
             raise ValueError(f"a {self.kind} step doesn't take {', '.join(sorted(wrong))}")
-        if self.kind in ("tool", "stage", "state", "approval") and not self.name:
+        if self.kind in ("tool", "stage", "state", "approval", "mcp_prompt") and not self.name:
             raise ValueError(f"a {self.kind} step needs a name")
+        if self.kind == "resource" and not self.uri:
+            raise ValueError("a resource step needs the uri it read")
         if self.kind == "approval" and not self.decision:
             raise ValueError("an approval step needs a decision: approved, rejected or pending")
         return self
@@ -228,7 +237,8 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                 run = {"tenant": tenant, "run_id": e.run_id, "kind": e.kind, "task": e.task, "segment": e.segment,
                        "started_at": e.ts, "status": "running", "version": e.version,
                        "test_run": e.test.run if e.test else None, "test_case": e.test.case if e.test else None,
-                       "attempt": e.test.attempt if e.test else None, "parent_run_id": e.parent_run_id, "tags": e.tags}
+                       "attempt": e.test.attempt if e.test else None, "parent_run_id": e.parent_run_id, "tags": e.tags,
+                       "conversation_id": e.conversation_id, "turn": e.turn}
                 known[e.run_id] = run
                 rows["runs"].append(run)
                 rows["docs"].append({"tenant": tenant, "document_id": e.run_id, "received_at": e.ts,
@@ -268,9 +278,11 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                     tokens = (e.tokens_in or 0) + (e.tokens_out or 0)
                     rows["steps"].append({
                         "tenant": tenant, "trajectory_id": e.run_id, "seq": e.seq,
-                        "kind": "reason" if e.kind == "llm" else e.kind, "name": e.name,
+                        "kind": "reason" if e.kind == "llm" else e.kind,
+                        "name": e.name or (e.uri[:128] if e.kind == "resource" else None),
                         "args": {"op": e.op or "update"} if e.kind == "state" else
-                        {"decision": e.decision, "by": e.by} if e.kind == "approval" else e.args,
+                        {"decision": e.decision, "by": e.by} if e.kind == "approval" else
+                        {"uri": e.uri} if e.kind == "resource" else e.args, "server": e.server,
                         "tokens_in": e.tokens_in, "tokens_out": e.tokens_out, "prompt": e.prompt, "tools": e.tools,
                         "result": e.value if e.kind == "state" else e.result,
                         "error": e.error if e.status == "error" else None, "text": e.text, "model": e.model,
@@ -379,7 +391,8 @@ def _head(run: dict) -> dict:
     return {"tenant": run["tenant"], "trajectory_id": run["run_id"], "run_id": run.get("test_run"),
             "case_id": run.get("test_case"), "attempt": run.get("attempt"), "task": run.get("task"),
             "started_at": run.get("started_at"), "status": run.get("status") or "running",
-            "lineage": run.get("version"), "outcome": run.get("outcome")}
+            "lineage": run.get("version"), "outcome": run.get("outcome"),
+            "conversation_id": run.get("conversation_id"), "turn": run.get("turn")}
 
 
 def _merge(rows: List[dict], key: str) -> List[dict]:

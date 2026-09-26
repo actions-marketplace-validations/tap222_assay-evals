@@ -190,3 +190,12 @@ def test_otlp_root_span_that_errored_fails_the_run(app):
     e = evaluation(app, "tr1")
     assert e["status"] == "failed" and {c["check"] for c in e["checks"] if c["status"] == "fail"} == {
         "completed", "tool_errors"}
+
+
+def test_otlp_turns_of_one_conversation(app):
+    otlp(app, span("t1", "root", 1, 2, name="execute_tool", gen_ai__tool__name="search",
+                   gen_ai__conversation__id="chat-9"),
+         span("root", None, 0, 3, name="agent", assay__turn=1, assay__answer="done"))
+    t = app.get("/v1/agents/trajectories/tr1", params=SRC).json()
+    assert (t["conversation_id"], t["turn"]) == ("chat-9", 1)
+    assert app.get("/v1/agents/conversations/chat-9", params=SRC).json()["turns"][0]["trajectory_id"] == "tr1"

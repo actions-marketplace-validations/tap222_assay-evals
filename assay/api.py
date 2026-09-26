@@ -560,6 +560,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, f"No trajectory '{trajectory_id}' in {source}.")
         return out | {"evaluation": lifecycle.get(engine, _tenant(source), trajectory_id)}
 
+    @app.get("/v1/agents/conversations", tags=["results"],
+             summary="Conversations, newest first: their turns, and whether any failed a check")
+    def list_conversations(source: str, limit: int = 50, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return agents.conversations(engine, _tenant(source), max(1, min(limit, 500)))
+
+    @app.get("/v1/agents/conversations/{conversation_id}", tags=["results"],
+             summary="One conversation turn by turn: input, answer, steps and evaluation of each")
+    def get_conversation(conversation_id: str, source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        out = agents.conversation(engine, _tenant(source), conversation_id)
+        if out is None:
+            raise HTTPException(404, f"No conversation '{conversation_id}' in {source}.")
+        return out
+
     @app.get("/v1/agents/lifecycle", tags=["results"],
              summary="Agent runs by lifecycle: running, awaiting evaluation, evaluated, abandoned; latest failures")
     def agent_lifecycle(source: str, p: Principal = Depends(require("read"))):

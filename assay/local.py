@@ -215,9 +215,12 @@ def as_trajectory(steps: List[dict], answer: Optional[str]) -> dict:
     for s in steps:
         kind = "reason" if s["kind"] == "llm" else s["kind"]
         state = s["kind"] == "state"
-        out.append({"seq": s["seq"], "kind": kind, "name": s.get("name"), "parent_seq": s.get("parent_seq"),
+        resource = kind == "resource"
+        out.append({"seq": s["seq"], "kind": kind, "name": s.get("name") or (s["uri"][:128] if resource else None),
+                    "parent_seq": s.get("parent_seq"), "server": s.get("server"),
                     "args": {"op": s.get("op") or "update"} if state else
-                    {"decision": s.get("decision"), "by": s.get("by")} if kind == "approval" else s.get("args"),
+                    {"decision": s.get("decision"), "by": s.get("by")} if kind == "approval" else
+                    {"uri": s.get("uri")} if resource else s.get("args"),
                     "tokens_in": s.get("tokens_in"), "tools": s.get("tools"),
                     "result": s.get("value") if state else s.get("result"), "error": s.get("error"),
                     "text": s.get("text"), "model": s.get("model"),

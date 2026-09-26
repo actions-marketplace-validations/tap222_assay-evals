@@ -403,6 +403,62 @@ def evaluate_run(engine: Engine, source, tenant: str, run_id: str) -> dict:
                        if counts[(f, "pass")] + counts[(f, "fail")]}}
 
 
+def conversation_turns(engine: Engine, tenant: str, conversation_id: str) -> List[dict]:
+    """A conversation's runs, in order: by turn, then by when they started."""
+    t = store.agent_trajectories
+    with engine.connect() as conn:
+        rows = [dict(r._mapping) for r in conn.execute(select(
+            t.c.trajectory_id, t.c.turn, t.c.task, t.c.status, t.c.outcome, t.c.answer, t.c.started_at,
+            t.c.finished_at, t.c.case_id, t.c.run_id).where(and_(t.c.tenant == tenant,
+                                                                t.c.conversation_id == conversation_id)))]
+    return sorted(rows, key=lambda r: (r["turn"] is None, r["turn"] or 0, r["started_at"]))
+
+
+def conversation(engine: Engine, tenant: str, conversation_id: str) -> Optional[dict]:
+    """One conversation turn by turn: what each turn was asked and answered, its steps, and its
+    evaluation."""
+    turns = conversation_turns(engine, tenant, conversation_id)
+    if not turns:
+        return None
+    ids = [x["trajectory_id"] for x in turns]
+    ti, st, rc = store.trace_inputs, store.agent_steps, store.run_checks
+    from sqlalchemy import func
+    with engine.connect() as conn:
+        inputs = dict(conn.execute(select(ti.c.trace_id, ti.c.input).where(
+            and_(ti.c.tenant == tenant, ti.c.trace_id.in_(ids)))).all())
+        steps = dict(conn.execute(select(st.c.trajectory_id, func.count()).where(
+            and_(st.c.tenant == tenant, st.c.trajectory_id.in_(ids))).group_by(st.c.trajectory_id)).all())
+        checks = {r.trajectory_id: r for r in conn.execute(select(rc.c.trajectory_id, rc.c.failed, rc.c.checks).where(
+            and_(rc.c.tenant == tenant, rc.c.trajectory_id.in_(ids))))}
+    ser = lambda v: v.isoformat() if isinstance(v, datetime) else v
+    out = []
+    for i, x in enumerate(turns):
+        c = checks.get(x["trajectory_id"])
+        out.append({**{k: ser(v) for k, v in x.items()}, "position": i, "input": inputs.get(x["trajectory_id"]),
+                    "steps": steps.get(x["trajectory_id"], 0),
+                    "evaluation": None if c is None else {
+                        "failed": c.failed, "failing": [k for k in c.checks or [] if k.get("status") == "fail"]}})
+    return {"conversation_id": conversation_id, "turns": out, "failing_turns": sum(
+        1 for x in out if x["evaluation"] and x["evaluation"]["failed"]),
+            "status": "running" if any(x["status"] == "running" for x in out) else "ended"}
+
+
+def conversations(engine: Engine, tenant: str, limit: int = 50) -> List[dict]:
+    """Recent conversations, newest first: how many turns each had and whether any failed a check."""
+    t, rc = store.agent_trajectories, store.run_checks
+    from sqlalchemy import func
+    q = (select(t.c.conversation_id, func.count().label("turns"), func.min(t.c.started_at).label("started_at"),
+                func.max(func.coalesce(t.c.finished_at, t.c.started_at)).label("last_at"),
+                func.sum(func.coalesce(rc.c.failed, 0)).label("failed_checks"))
+         .select_from(t.outerjoin(rc, and_(rc.c.tenant == t.c.tenant, rc.c.trajectory_id == t.c.trajectory_id)))
+         .where(and_(t.c.tenant == tenant, t.c.conversation_id.is_not(None)))
+         .group_by(t.c.conversation_id).order_by(func.max(t.c.started_at).desc()).limit(limit))
+    with engine.connect() as conn:
+        return [{"conversation_id": r.conversation_id, "turns": r.turns, "started_at": r.started_at.isoformat(),
+                 "last_at": r.last_at.isoformat(), "failed_checks": int(r.failed_checks or 0)}
+                for r in conn.execute(q)]
+
+
 def detail(engine: Engine, source, tenant: str, trajectory_id: str) -> Optional[dict]:
     """One trajectory with everything the trace view shows."""
     traj = source.trajectory(trajectory_id)

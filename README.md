@@ -823,6 +823,26 @@ marks quiet runs abandoned and evaluates anything left over.
 | `GET /v1/agents/runs/{run}?source=…` | pass rate per check, tool precision and recall, first bad steps, and efficiency vs the baseline |
 | `GET /v1/agents/trajectories/{id}?source=…` | one run step by step: divergence, end state, contract breaks, cost, and its latest evaluation |
 
+### Conversations and MCP
+
+A chat is several runs, one per turn. `assay.run(..., conversation="chat-1", turn=2)` (or
+`conversation_id` and `turn` on `run.start`, or `gen_ai.conversation.id` with OpenTelemetry)
+links them. `GET /v1/agents/conversations?source=…` lists conversations, and
+`GET /v1/agents/conversations/{id}?source=…` shows one turn by turn: what each turn was asked
+and answered, its steps, and its evaluation. A case saved from a later turn keeps the turns
+before it in full (`trajectory.conversation`), so it can be replayed with what was said before.
+
+MCP steps are recorded as what they are, not as tool calls:
+
+```python
+run.tool("refund", {"id": "O-17"}, {"ok": True}, server="shop")              # an MCP tool
+run.resource("file:///policies/refunds.md", policy_text, server="docs")     # a resource read
+run.mcp_prompt("refund_policy_check", {"order": "O-17"}, messages, server="docs")
+```
+
+A resource's contents count as what the agent retrieved, so a judge given that policy as its
+context passes the context check.
+
 ## Beyond the final answer: how the agent behaved
 
 "Agent score: 0.87" doesn't say what changed. Assay checks what the agent did, and compares how it

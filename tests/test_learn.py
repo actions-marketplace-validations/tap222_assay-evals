@@ -187,3 +187,93 @@ def test_the_suite_export_carries_the_trace_with_personal_data_redacted(client):
     assert [s["kind"] for s in t["steps"]] == ["llm", "tool", "tool", "approval", "state", "answer"]
     assert t["steps"][1]["args"] == {"email": "<email>"} and "ana@" not in out  # redacted everywhere
     assert t["steps"][0]["tools"] == ["search_customer", "refund"] and t["tags"]["tier"] == "gold"
+
+
+TURNS = [  # one conversation, three turns; the last reads an MCP resource and fetches an MCP prompt
+    ("c-t0", 0, "Hi, I need help with an order", [{"type": "step", "seq": 0, "kind": "answer", "text": "Sure, which?"}]),
+    ("c-t1", 1, "O-17", [{"type": "step", "seq": 0, "kind": "tool", "name": "get_order", "server": "shop",
+                          "args": {"id": "O-17"}, "result": {"status": "delivered", "damaged": True}},
+                         {"type": "step", "seq": 1, "kind": "answer", "text": "It shows as delivered."}]),
+    ("c-t2", 2, "It arrived broken, refund it", [
+        {"type": "step", "seq": 0, "kind": "mcp_prompt", "name": "refund_policy_check", "server": "docs",
+         "args": {"order": "O-17"}, "result": [{"role": "user", "content": "Check the refund policy for O-17"}]},
+        {"type": "step", "seq": 1, "kind": "resource", "uri": "file:///policies/refunds.md", "server": "docs",
+         "result": "Damaged items are refunded in full within 30 days of delivery."},
+        {"type": "step", "seq": 2, "kind": "tool", "name": "refund", "server": "shop", "args": {"id": "O-17"},
+         "result": {"ok": True}},
+        {"type": "step", "seq": 3, "kind": "answer", "text": "Refunded O-17 in full."}]),
+]
+
+
+def _conversation(client, tenant="p"):
+    for i, (rid, turn, said, steps) in enumerate(TURNS):
+        _send(client, tenant, rid, [{"type": "run.start", "task": "support", "input": said, "conversation_id": "chat-1",
+                                     "turn": turn}, *steps, {"type": "run.end"}])
+
+
+def test_a_conversation_turn_by_turn(client):
+    _conversation(client)
+    conv = client.get("/v1/agents/conversations/chat-1", params={"source": "events:p"}).json()
+    assert [(t["turn"], t["input"], t["answer"]) for t in conv["turns"]] == [
+        (0, "Hi, I need help with an order", "Sure, which?"), (1, "O-17", "It shows as delivered."),
+        (2, "It arrived broken, refund it", "Refunded O-17 in full.")]
+    assert conv["status"] == "ended" and all(t["evaluation"] is not None for t in conv["turns"])
+    listed = client.get("/v1/agents/conversations", params={"source": "events:p"}).json()
+    assert listed[0]["conversation_id"] == "chat-1" and listed[0]["turns"] == 3
+    t = client.get("/v1/agents/trajectories/c-t2", params={"source": "events:p"}).json()
+    assert (t["conversation_id"], t["turn"]) == ("chat-1", 2)
+    assert client.get("/v1/agents/conversations/nope", params={"source": "events:p"}).status_code == 404
+
+
+def test_mcp_steps_and_earlier_turns_are_kept_with_a_case(client):
+    _conversation(client)
+    snap = learn.snapshot(client.engine, "events:p", "c-t2", redact_pii=False)
+    prompt, resource, tool, _ = snap["steps"]
+    assert (prompt["kind"], prompt["name"], prompt["server"], prompt["args"]) == \
+        ("mcp_prompt", "refund_policy_check", "docs", {"order": "O-17"})
+    assert prompt["result"][0]["content"].startswith("Check the refund policy")
+    assert (resource["kind"], resource["uri"], resource["server"]) == ("resource", "file:///policies/refunds.md", "docs")
+    assert "name" not in resource and resource["result"].startswith("Damaged items")
+    assert tool["server"] == "shop"
+    assert (snap["conversation_id"], snap["turn"]) == ("chat-1", 2)
+    assert [(t["turn"], t["input"], t["output"]) for t in snap["conversation"]] == [
+        (0, "Hi, I need help with an order", "Sure, which?"), (1, "O-17", "It shows as delivered.")]
+    assert snap["conversation"][1]["steps"][0]["result"]["damaged"] is True  # earlier turns in full
+
+    # Saved again from its own export: the MCP steps come back the same.
+    _send(client, "copy", "c-t2", _as_events({k: v for k, v in snap.items() if k != "conversation"}))
+    again = learn.snapshot(client.engine, "events:copy", "c-t2", redact_pii=False)
+    assert again["steps"] == snap["steps"]
+
+
+def test_a_judges_context_can_come_from_an_mcp_resource(client):
+    from assay import audit
+    _conversation(client)
+    ctx = audit.run_context(client.engine, "p", ["c-t2"])["c-t2"]
+    policy = "Damaged items are refunded in full within 30 days of delivery."
+    assert policy in ctx["retrieved"]
+    assert audit.findings({"query": "It arrived broken, refund it", "output": "Refunded O-17 in full.",
+                           "context": [policy]}, ctx) == []
+
+
+def test_the_sdk_records_mcp_steps_and_turns(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "sdk" / "python"))
+    import assay_sdk
+    from assay import schema
+    path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("ASSAY_PATH", str(path))
+    monkeypatch.delenv("ASSAY_URL", raising=False)
+    assay_sdk.init()
+    with assay_sdk.run("support", conversation="chat-1", turn=2) as r:
+        r.mcp_prompt("refund_policy_check", {"order": "O-17"}, [{"role": "user", "content": "…"}], server="docs")
+        r.resource("file:///policies/refunds.md", "Damaged items are refunded.", server="docs")
+        r.tool("refund", {"id": "O-17"}, {"ok": True}, server="shop")
+        r.answer("Refunded.")
+    assay_sdk.shutdown()
+    import json
+    events = schema.EVENTS.validate_python([json.loads(x) for x in path.read_text().splitlines()])
+    start, prompt, resource, tool = events[:4]
+    assert (start.conversation_id, start.turn) == ("chat-1", 2)
+    assert (prompt.kind, resource.kind, resource.uri, tool.server) == \
+        ("mcp_prompt", "resource", "file:///policies/refunds.md", "shop")

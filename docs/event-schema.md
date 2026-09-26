@@ -72,13 +72,15 @@ three things:
 | `test` | {run, case, attempt} | set when the run is part of a test run |
 | `parent_run_id` | string | a sub-agent's parent run |
 | `tags` | {string: scalar} | anything else to filter by |
+| `conversation_id` | string | the conversation this run is a turn of: its turns share it |
+| `turn` | int ≥ 0 | this run's place in the conversation, from 0 |
 
 ### `step`
 | Field | Type | Meaning |
 |---|---|---|
 | `run_id`, `seq` | string, int ≥ 0 | **required.** Which run, and the step's position in it |
-| `kind` | `llm` \| `tool` \| `state` \| `answer` \| `stage` | **required** |
-| `name` | string | tool name, stage name, or the object a state change touched (`order:17`) |
+| `kind` | `llm` \| `tool` \| `state` \| `answer` \| `stage` \| `approval` \| `resource` \| `mcp_prompt` | **required** |
+| `name` | string | tool name, stage name, MCP prompt name, the action approved, or the object a state change touched (`order:17`) |
 | `parent_seq` | int | a step nested inside another (a tool called from inside a stage) |
 | `ended_at` | time | when it finished (`ts` is when it started) |
 | `status` | `ok` \| `error` | default `ok` |
@@ -89,7 +91,11 @@ Fields for each kind:
 | Kind | Fields |
 |---|---|
 | `llm` | `model`, `tokens_in`, `tokens_out`, `cost_usd`, `prompt` (`id@version`), `text` (the output, or a summary) |
-| `tool` | `args` (object), `result` (JSON) |
+| `llm` (also) | `tools` (the tools the model was offered) |
+| `tool` | `args` (object), `result` (JSON), `server` (the MCP server, for an MCP tool) |
+| `resource` | `uri` (**required**), `result` (its contents), `server`: an MCP resource the agent read. Its contents count as retrieved context when a judge's inputs are checked |
+| `mcp_prompt` | `args` (the prompt's arguments), `result` (the messages it returned), `server`: an MCP prompt the agent fetched |
+| `approval` | `decision` (`approved` \| `rejected` \| `pending`), `by`, `text` (the reason) |
 | `state` | `op` (`create` \| `update` \| `delete`), `value` (the object afterwards) |
 | `answer` | `text` |
 | `stage` | `outputs` (object of named values; long strings count as text evidence), `did_work` (bool) |

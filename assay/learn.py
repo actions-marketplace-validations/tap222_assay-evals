@@ -647,8 +647,12 @@ def _step(r: dict) -> dict:
             tokens_out = r["tokens"] - (r.get("tokens_in") or 0) or None
         out |= {"model": r.get("model"), "prompt": r.get("prompt"), "tokens_in": r.get("tokens_in"),
                 "tokens_out": tokens_out, "cost_usd": r.get("cost_usd"), "tools": r.get("tools")}
-    elif kind == "tool":
-        out |= {"args": r.get("args"), "result": r.get("result")}
+    elif kind in ("tool", "mcp_prompt"):
+        out |= {"args": r.get("args"), "result": r.get("result"), "server": r.get("server")}
+    elif kind == "resource":
+        out |= {"uri": (r.get("args") or {}).get("uri"), "result": r.get("result"), "server": r.get("server")}
+        if out["name"] == (out["uri"] or "")[:128]:  # named after its uri at ingest: don't repeat it
+            out["name"] = None
     elif kind == "state":
         out |= {"op": (r.get("args") or {}).get("op"), "value": r.get("result")}
     elif kind == "approval":
@@ -657,11 +661,14 @@ def _step(r: dict) -> dict:
     return {k: ser(v) for k, v in out.items() if v is not None}
 
 
-def snapshot(engine: Engine, source: str, trace_id: str, redact_pii: bool = True) -> Optional[dict]:
+def snapshot(engine: Engine, source: str, trace_id: str, redact_pii: bool = True,
+             with_conversation: bool = True) -> Optional[dict]:
     """The trace in full, to keep with a test case: its input, every step (model calls with their
     model, prompt, tokens and the tools they were offered; tool calls with arguments and results;
-    approvals; state changes), its answer, and the run's metadata. A saved case then doesn't lose
-    what the agent did, even once the trace itself is gone. None if the trace isn't an agent run."""
+    MCP resource reads and prompts; approvals; state changes), its answer, and the run's metadata.
+    A turn of a conversation also gets the turns before it (`conversation`), so the case can be
+    replayed with what was said before. A saved case then doesn't lose what the agent did, even
+    once the trace itself is gone. None if the trace isn't an agent run."""
     from assay.sources.events import EventsSource
     tenant = source.split(":", 1)[1] if source.startswith("events:") else source
     traj = EventsSource(engine, tenant).trajectories([trace_id]).get(trace_id)
@@ -684,8 +691,21 @@ def snapshot(engine: Engine, source: str, trace_id: str, redact_pii: bool = True
            "status": traj.get("status"), "outcome": traj.get("outcome"), "error": run.error if run else None,
            "version": traj.get("lineage"), "tags": run.tags if run else None,
            "segment": run.segment if run else None, "parent_run_id": run.parent_run_id if run else None,
-           "started_at": ser(traj.get("started_at")), "finished_at": ser(traj.get("finished_at"))}
+           "started_at": ser(traj.get("started_at")), "finished_at": ser(traj.get("finished_at")),
+           "conversation_id": traj.get("conversation_id"), "turn": traj.get("turn")}
+    if with_conversation and traj.get("conversation_id"):
+        from assay import agents
+        before = [t for t in agents.conversation_turns(engine, tenant, traj["conversation_id"])
+                  if t["trajectory_id"] != trace_id and _earlier(t, traj)]
+        out["conversation"] = [snapshot(engine, source, t["trajectory_id"], redact_pii, False) for t in before]
     return {k: v for k, v in out.items() if v is not None}
+
+
+def _earlier(a: dict, b: dict) -> bool:
+    """Turn a came before turn b: by turn number when both have one, else by start time."""
+    if a.get("turn") is not None and b.get("turn") is not None:
+        return a["turn"] < b["turn"]
+    return a["started_at"] < b["started_at"]
 
 
 def approve(engine: Engine, source: str, candidate_id: int, suite: str, case: Optional[dict] = None,

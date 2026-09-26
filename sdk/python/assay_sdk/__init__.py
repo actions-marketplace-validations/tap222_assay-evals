@@ -320,10 +320,23 @@ class Run:
         self.outcome_value = value
 
     def tool(self, name: str, args: Optional[Dict[str, Any]] = None, result: Any = None, error: Optional[str] = None,
-             started: Optional[datetime] = None, ended: Optional[datetime] = None) -> None:
-        """A tool call you've already made."""
+             started: Optional[datetime] = None, ended: Optional[datetime] = None, server: Optional[str] = None) -> None:
+        """A tool call you've already made. server: the MCP server it went to, if any."""
         self._step("tool", started, name=name, args=self._c.clean(args or {}), result=self._c.clean(result),
+                   ended_at=_ts(ended), status="error" if error else "ok", error=error, server=server)
+
+    def resource(self, uri: str, contents: Any = None, server: Optional[str] = None, error: Optional[str] = None,
+                 started: Optional[datetime] = None, ended: Optional[datetime] = None) -> None:
+        """An MCP resource the agent read, e.g. resource("file:///policies/refunds.md", text, server="docs").
+        Its contents count as what the agent retrieved, for checking a judge's context."""
+        self._step("resource", started, uri=uri, result=self._c.clean(contents), server=server,
                    ended_at=_ts(ended), status="error" if error else "ok", error=error)
+
+    def mcp_prompt(self, name: str, args: Optional[Dict[str, Any]] = None, messages: Any = None,
+                   server: Optional[str] = None, error: Optional[str] = None) -> None:
+        """An MCP prompt the agent fetched: its name, the arguments, and the messages it returned."""
+        self._step("mcp_prompt", name=name, args=self._c.clean(args or {}), result=self._c.clean(messages),
+                   server=server, status="error" if error else "ok", error=error)
 
     def call(self, name: str, fn: Callable, *positional, **args):
         """Call fn(*positional, **args), record it as a tool call (result or error, and timing), and
@@ -383,8 +396,10 @@ class _Stage:
 @contextmanager
 def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str = "agent", input: Any = None,
         input_ref: Optional[str] = None, version: Optional[Dict[str, str]] = None, segment: Optional[str] = None,
-        test: Any = None, parent: Optional[Run] = None, tags: Optional[Dict[str, Any]] = None):
+        test: Any = None, parent: Optional[Run] = None, tags: Optional[Dict[str, Any]] = None,
+        conversation: Optional[str] = None, turn: Optional[int] = None):
     """Record one run. kind is "agent" (llm/tool/state/answer steps) or "pipeline" (stages).
+    conversation="c-1", turn=2: this run is one turn of a conversation (turns from 0).
     test="case-17" (or {"run": "nightly-0924", "case": "case-17", "attempt": 0}) marks a test-case run;
     under `assay test`, the run and attempt are filled in.
     An exception inside the block ends the run as failed (and is re-raised)."""
@@ -396,7 +411,8 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
     if recorded:
         c.emit({"type": "run.start", "run_id": rid, "kind": kind, "task": task, "segment": segment,
                 "input": c.clean(input), "input_ref": input_ref, "version": version, "test": r.test,
-                "parent_run_id": parent.id if parent else None, "tags": tags})
+                "parent_run_id": parent.id if parent else None, "tags": tags, "conversation_id": conversation,
+                "turn": turn})
     status, error = "completed", None
     try:
         yield r

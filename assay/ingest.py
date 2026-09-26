@@ -120,14 +120,17 @@ class EvalResultEvent(Event):
 
 
 class StepEvent(Event):
-    kind: str = Field(..., pattern="^(reason|tool|state|answer)$",
+    kind: str = Field(..., pattern="^(reason|tool|state|answer|resource|mcp_prompt)$",
                       description="reason (model thinking or planning), tool (a call and its result), state "
-                                  "(a change to the world), answer (the final reply)")
+                                  "(a change to the world), answer (the final reply), resource (an MCP resource "
+                                  "read: args {\"uri\"}, result its contents), mcp_prompt (an MCP prompt fetched: "
+                                  "args its arguments, result its messages)")
     name: Optional[str] = Field(None, max_length=128,
                                 description="tool: the tool's name; state: the object changed, e.g. order:1001")
     args: Optional[Dict[str, Any]] = Field(None, description='tool: its arguments; state: {"op": "create|update|delete"}')
     result: Optional[Any] = Field(None, description="tool: what it returned; state: the object after the change")
     error: Optional[str] = Field(None, max_length=1024, description="tool: the error it raised, if any")
+    server: Optional[str] = Field(None, max_length=128, description="tool, resource, mcp_prompt: the MCP server")
     text: Optional[str] = Field(None, max_length=16384, description="reason / answer: the text")
     model: Optional[str] = Field(None, max_length=128)
     tokens: Optional[int] = Field(None, ge=0)
@@ -151,6 +154,8 @@ class TrajectoryEvent(Event):
     status: Optional[str] = Field(None, description="completed, failed, max_steps, …")
     lineage: Optional[Dict[str, str]] = None
     input: Optional[Any] = Field(None, description="What the agent was asked, so a failure can become a test case")
+    conversation_id: Optional[str] = Field(None, max_length=128, description="The conversation this run is a turn of")
+    turn: Optional[int] = Field(None, ge=0, description="This run's place in the conversation, from 0")
     steps: List[StepEvent] = Field(..., max_length=500)
 
     @model_validator(mode="after")
@@ -378,11 +383,12 @@ def write_trajectories(engine: Engine, events: List["TrajectoryEvent"], tenant: 
     for e in events:
         head = {"tenant": tenant, "trajectory_id": e.trajectory_id, "run_id": e.run_id, "case_id": e.case_id,
                 "attempt": e.attempt, "task": e.task, "started_at": e.started_at, "finished_at": e.finished_at,
-                "answer": e.answer, "status": e.status, "lineage": e.lineage, "updated_at": now}
+                "answer": e.answer, "status": e.status, "lineage": e.lineage, "updated_at": now,
+                "conversation_id": e.conversation_id, "turn": e.turn}
         new = [s.model_dump() for s in e.steps]
         old = before.get(e.trajectory_id)
         if old:
-            for k in ("run_id", "case_id", "attempt", "task", "lineage"):
+            for k in ("run_id", "case_id", "attempt", "task", "lineage", "conversation_id", "turn"):
                 head[k] = head[k] if head[k] is not None else old[k]
             head["started_at"] = min(head["started_at"], old["started_at"])
             if e.status == "running" and old["status"] != "running":  # a late span: still ended
@@ -500,6 +506,8 @@ Agents     a trace with any tool span (gen_ai.operation.name = execute_tool, or 
            assay.state.object are state changes (assay.state.op,
            assay.state.value as JSON). The root span may carry assay.answer,
            assay.task, and for test cases assay.run_id, assay.case_id, assay.attempt.
+           A run is a turn of a conversation with gen_ai.conversation.id (or session.id,
+           or assay.conversation_id on the root), its place in it assay.turn.
            Spans are exported as they end, so a run's spans often come over several
            batches: they're added to the run, not replacing it. The run is running until
            its root span arrives (completed, or failed if the root span errored), then
@@ -630,6 +638,11 @@ def _json(v):
     return v
 
 
+def _conversation(spans) -> Optional[str]:
+    """The conversation a trace belongs to, from the OpenTelemetry attributes that name it."""
+    return next((a[k] for _, a, _ in spans for k in ("gen_ai.conversation.id", "session.id") if a.get(k)), None)
+
+
 def _agent_trajectories(batch: EventBatch, collected, doc_of) -> None:
     """Turn traces with tool spans into trajectories (see OTEL_MAPPING)."""
     by_doc = defaultdict(list)
@@ -676,6 +689,8 @@ def _agent_trajectories(batch: EventBatch, collected, doc_of) -> None:
             trajectory_id=doc, run_id=_str(ra.get("assay.run_id")), case_id=_str(ra.get("assay.case_id")),
             attempt=ra.get("assay.attempt"), task=_str(ra.get("assay.task") or ra.get("assay.document_type")),
             segment=_str(ra.get("assay.segment")),
+            conversation_id=_str(ra.get("assay.conversation_id") or _conversation(spans)),
+            turn=ra.get("assay.turn"),
             started_at=_ts(rsp.get("startTimeUnixNano") if root else first) or datetime.utcnow(),
             finished_at=_ts(rsp.get("endTimeUnixNano")) if root else None,
             answer=_str(ra.get("assay.answer")) if root else None,
