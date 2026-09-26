@@ -292,6 +292,18 @@ agent_steps = Table(
     Column("tokens_reasoning", Integer),
 )
 
+# Judge calibrations (assay/calibrate.py): a judge run over a golden set, and how it tracked the labels.
+calibrations = Table(
+    "calibrations", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("run_id", String(64), primary_key=True),
+    Column("created_at", DateTime, nullable=False),
+    Column("judge", String(256)),
+    Column("golden", String(32)),  # a digest of the items and their labels
+    Column("passed", Boolean),  # not worse than the baseline it was compared with
+    Column("result", JSON, nullable=False),  # assay/calibrate.as_json
+)
+
 # Runs as the v1 event schema describes them (assay/schema.py): what run.start and run.end
 # said, kept so steps and outcomes arriving in later batches land in the right place.
 runs = Table(

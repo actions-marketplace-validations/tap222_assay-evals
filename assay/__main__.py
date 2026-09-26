@@ -116,6 +116,27 @@ def main(argv=None) -> int:
                     help="How long: 36h, 14d, 2w (default 14d, at most 90 days)")
     ak.add_argument("--by", help="Who (default: git config user.name)")
     ak.add_argument("--run", help="The run to take its state from (default: the latest)")
+    g = sub.add_parser("golden", help="The golden set a judge is calibrated against: outputs a person scored")
+    gs = g.add_subparsers(dest="golden_cmd", required=True)
+    ga = gs.add_parser("add", help="Label a recorded output (or give --output); a second person adds a label")
+    ga.add_argument("case", help="The test case, or the item's id")
+    ga.add_argument("--score", type=float, required=True, help="Your score, on the labels' scale")
+    ga.add_argument("--by", help="Who labeled it (default: git config user.name)")
+    ga.add_argument("--tags", default="", help="Comma-separated, e.g. behavioral,product_sense")
+    ga.add_argument("--run", help="The run to take the output from (default: the latest)")
+    ga.add_argument("--input", dest="input_", help="The input, if it wasn't recorded")
+    ga.add_argument("--output", help="The output, if it wasn't recorded")
+    ga.add_argument("--note")
+    gs.add_parser("stats", help="Labels per score, labelers, and how much people agree")
+    gg = gs.add_parser("suggest", help="Recorded outputs to label next, spread over the judge's scores")
+    gg.add_argument("-n", type=int, default=10)
+    gg.add_argument("--field", help="The judge's check (default: [calibrate] field)")
+    cb = sub.add_parser("calibrate", help="Run the judge over the golden set: ranking, agreement, bias, consistency; "
+                                          "compared with the last calibration that passed")
+    cb.add_argument("--baseline", help="A calibration id, or 'none'")
+    cb.add_argument("--judge", help="module:function or path.py:function (default: [calibrate] judge)")
+    cb.add_argument("--repeat", type=int, help="Judgements per item (default: [calibrate] repeat)")
+    cb.add_argument("--format", choices=["text", "json"], default="text")
     al = sub.add_parser("acks", help="What's acknowledged, what expires soon, and what woke up")
     al.add_argument("--prune", action="store_true", help="Remove the ones that ended (expired, or passing since)")
     sub.add_parser("schema", help="Print the v1 event schema as JSON Schema")
@@ -147,7 +168,7 @@ def main(argv=None) -> int:
         from pathlib import Path
         from assay import diff
         return diff.main(Path.cwd(), args.baseline, args.current, args.format)
-    if args.cmd in ("init", "test", "accept", "upload", "ack", "acks"):
+    if args.cmd in ("init", "test", "accept", "upload", "ack", "acks", "golden", "calibrate"):
         from pathlib import Path
         from assay import local
         root = Path.cwd()
@@ -159,7 +180,20 @@ def main(argv=None) -> int:
             return local.ack(root, args.case, args.checks, args.reason, args.for_, args.by, args.run)
         if args.cmd == "acks":
             return local.list_acks(root, args.prune)
-
+        if args.cmd == "calibrate":
+            return local.calibrate_cmd(root, args.baseline, args.format, args.judge, args.repeat)
+        if args.cmd == "golden":
+            try:
+                if args.golden_cmd == "add":
+                    return local.golden_add(root, args.case, args.score, args.by,
+                                            [t.strip() for t in args.tags.split(",") if t.strip()], args.run,
+                                            args.input_, args.output, args.note)
+                if args.golden_cmd == "stats":
+                    return local.golden_stats(root)
+                return local.golden_suggest(root, args.n, args.field)
+            except (local.SetupError, ValueError) as exc:  # a bad assay.toml, or a golden set that doesn't read
+                print(exc, file=sys.stderr)
+                return 2
         if args.cmd == "test":
             send = {"url": args.url, "key": args.key, "tenant": args.send_tenant} if args.upload else None
             return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,

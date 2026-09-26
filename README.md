@@ -152,6 +152,7 @@ None of it is real data.
 | [CI and pull requests](docs/ci.md) | The GitHub Action, the PR comment, rerunning what failed, timeouts |
 | [Security](docs/security.md) | What the checks catch in the agent, and what a pull request can and can't do to the evaluation |
 | [Agents](docs/agents.md) | Evaluating the trajectory: lifecycle, plan adherence, the LLM judge, conversations, MCP, behavior |
+| [Judge calibration](docs/calibration.md) | A golden set a person scored, and whether the judge's scores track it, on every change |
 | [Results you can trust](docs/verdicts.md) | One verdict per check, and whether the judge was given the right data |
 | [Failure analysis](docs/failures.md) | Where a wrong answer started, failure causes, path contracts |
 | [Learning from production](docs/learning.md) | Production failures become regression tests, with the whole trace |

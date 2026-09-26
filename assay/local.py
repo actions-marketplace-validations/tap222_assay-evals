@@ -27,6 +27,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime
+from statistics import median
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -102,6 +103,13 @@ suite = 1.25             # the whole run's totals: every query a little bigger a
 # max_fragments = 8          # limits, whatever the baseline: fragments per query,
 # max_retrieved_tokens = 3000  # tokens of fragments per query,
 # max_context_tokens = 8000    # and input per model call
+
+# Judge calibration: your judge against golden.jsonl, outputs a person scored (`assay calibrate`).
+# [calibrate]
+# judge = "evals/judges.py:helpfulness"   # called as judge(input, output)
+# repeat = 5
+# score_range = [1, 5]
+# threshold = 3
 
 # Dollars per million tokens (input, output[, cached]): recorded model calls get their cost.
 # [prices]
@@ -223,7 +231,7 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
                     "answers": bool(pii.get("answers", True)), "answer_allow": set(answer_allow)},
             "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
             "behavior": _behavior_config(cfg.get("behavior") or {}), "judge": _judge_config(cfg.get("judge") or {}),
-            "prices": _prices_config(cfg.get("prices"))}
+            "prices": _prices_config(cfg.get("prices")), "calibrate": _calibrate_config(cfg.get("calibrate") or {})}
     if out["prices"] and "prices" not in out["judge"]:
         out["judge"]["prices"] = out["prices"]
     from assay import acks
@@ -232,6 +240,27 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
     except acks.AckError as exc:
         raise SetupError(str(exc))
     return with_trusted_policy(out) if policy else out
+
+
+def _calibrate_config(c: dict) -> dict:
+    from assay.calibrate import DEFAULTS
+    unknown = set(c) - set(DEFAULTS)
+    if unknown:
+        raise SetupError(f"{CONFIG}, [calibrate]: unknown {', '.join(sorted(unknown))}. Use {', '.join(DEFAULTS)}.")
+    out = {**DEFAULTS, **c}
+    for k in ("score_range", "label_range"):
+        v = out[k]
+        if v is not None and not (isinstance(v, list) and len(v) == 2 and all(isinstance(x, (int, float)) for x in v)
+                                  and v[0] < v[1]):
+            raise SetupError(f"{CONFIG}, [calibrate] {k}: [lowest, highest], e.g. [1, 5].")
+    try:
+        out["repeat"], out["concurrency"] = int(out["repeat"]), int(out["concurrency"])
+        out["min_drop"] = float(out["min_drop"])
+    except (TypeError, ValueError):
+        raise SetupError(f"{CONFIG}, [calibrate]: repeat, concurrency and min_drop are numbers.")
+    if out["repeat"] < 1:
+        raise SetupError(f"{CONFIG}, [calibrate] repeat: at least 1 (3 or more shows how much the judge swings).")
+    return out
 
 
 def _prices_config(p) -> Optional[dict]:
@@ -453,7 +482,7 @@ def _behavior_config(b: dict) -> dict:
 
 DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
                   "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True},
-                  "prices": None, "acks": [], "behavior": {"fail": True, "ratios": {}, "suite": behavior.SUITE_RATIO, "limits": {}},
+                  "prices": None, "acks": [], "calibrate": None, "behavior": {"fail": True, "ratios": {}, "suite": behavior.SUITE_RATIO, "limits": {}},
                   "judge": {"enabled": False, "model": "claude-opus-5", "redact": True, "provider": "anthropic"}}
 
 
@@ -1713,6 +1742,183 @@ def accept(root: Path, run_id: Optional[str], reason: str = "accepted with `assa
               f"{made[0]['until']:%Y-%m-%d} in {path.name}: quiet while no worse, then reported again. "
               f"`assay acks` lists them.")
     return 0
+
+
+# ---------- judge calibration (assay/calibrate.py) ----------
+
+def _calib_cfg(root: Path) -> dict:
+    from assay.calibrate import DEFAULTS
+    cfg = find_config(root)
+    return cfg.get("calibrate") or dict(DEFAULTS)
+
+
+def golden_add(root: Path, case: str, score: float, by: Optional[str], tags: List[str], run_id: Optional[str],
+               input_: Optional[str], output: Optional[str], note: Optional[str]) -> int:
+    """`assay golden add CASE --score N`: a recorded output, labeled; a second labeler adds a label."""
+    from assay import acks, calibrate
+    ccfg = _calib_cfg(root)
+    path = root / ccfg["golden"]
+    items = calibrate.load_golden(path) if path.exists() else []
+    lo, hi = ccfg["label_range"] or ccfg["score_range"]
+    if not lo <= score <= hi:
+        print(f"--score {score:g}: the labels go from {lo:g} to {hi:g} ([calibrate] label_range).", file=sys.stderr)
+        return 2
+    by = by or acks.who()
+    mine = next((x for x in items if x["id"] == case), None)
+    if mine is not None:  # another label for an item that's there: how much people agree
+        if any(lab.get("by") == by for lab in mine["labels"]):
+            mine["labels"] = [{**lab, "score": score} if lab.get("by") == by else lab for lab in mine["labels"]]
+            print(f"{case}: {by}'s label is now {score:g}.")
+        else:
+            mine["labels"].append({"by": by, "score": score})
+            print(f"{case}: labeled {score:g} by {by} too ({len(mine['labels'])} labels).")
+        mine["tags"] = sorted(set(mine["tags"]) | set(tags))
+        calibrate.save_golden(path, items)
+        return 0
+    if output is None:
+        engine, state = _open(root)
+        run_id = run_id or (state or {}).get("last")
+        if engine is None or not run_id:
+            print("No recorded run to take the output from: run `assay test` first, or give --output.", file=sys.stderr)
+            return 2
+        heads = [h for h in agents.run_trajectories(engine, TENANT, run_id) if (h["case_id"] or "") == case
+                 or (h["case_id"] or "").endswith(case)]
+        if not heads:
+            print(f"No recorded run of {case!r} in {run_id} with an answer: give --output (and --input).",
+                  file=sys.stderr)
+            return 2
+        tid = heads[0]["trajectory_id"]
+        traj = EventsSource(engine, TENANT).trajectories([tid]).get(tid) or {}
+        output = traj.get("answer")
+        if input_ is None:
+            input_ = (learn._inputs(engine, TENANT, [tid]).get(tid) or {}).get("input")
+        case = heads[0]["case_id"] or case
+    item = {"id": case, "input": input_, "output": output, "labels": [{"by": by, "score": score}],
+            "tags": sorted(set(tags))}
+    if note:
+        item["note"] = note
+    calibrate.save_golden(path, items + [item])
+    print(f"Added {case} to {path.name}, labeled {score:g} by {by}. It's {len(items) + 1} items now.")
+    return 0
+
+
+def golden_stats(root: Path) -> int:
+    from assay import calibrate
+    ccfg = _calib_cfg(root)
+    try:
+        items = calibrate.load_golden(root / ccfg["golden"])
+    except calibrate.CalibrationError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    cov = calibrate.coverage(items, tuple(ccfg["label_range"] or ccfg["score_range"]))
+    print(f"{ccfg['golden']}: {_n(cov['items'], 'item')}, labeled by "
+          + ", ".join(f"{k} ({v})" for k, v in cov["labelers"].items()))
+    width = max(cov["levels"].values(), default=0) or 1
+    for lv, n in cov["levels"].items():
+        print(f"  {lv:>3}  {'█' * max(1 if n else 0, round(20 * n / width)):<20} {n}")
+    if cov["missing"]:
+        print(_paint(f"Nothing labeled {', '.join(map(str, cov['missing']))}: calibration can't tell how the judge "
+                     f"does there. `assay golden suggest` picks outputs to label.", "yellow"))
+    ag = cov["labeler_agreement"]
+    if ag:
+        print(f"People agree: exact {ag['exact']:.0%}, within one {ag['within_one']:.0%}, on {_n(ag['items'], 'item')} "
+              f"labeled twice. No judge will do much better than that.")
+    else:
+        print(_paint("No item has two labels: how much people agree, the ceiling for the judge, is unknown. A second "
+                     "person labeling 20 of them (`assay golden add ID --score N --by NAME`) says.", "dim"))
+    if cov["tags"]:
+        print("Tags: " + ", ".join(f"{t} ({n})" for t, n in cov["tags"].items()))
+    return 0
+
+
+def golden_suggest(root: Path, n: int, field: Optional[str]) -> int:
+    """Recorded outputs to label next, spread over the judge's scores so the set spans poor to great."""
+    from assay import calibrate
+    ccfg = _calib_cfg(root)
+    field = field or ccfg.get("field")
+    if not field:
+        print("Which check is the judge? `assay golden suggest --field helpful`, or [calibrate] field.", file=sys.stderr)
+        return 2
+    have = set()
+    if (root / ccfg["golden"]).exists():
+        have = {x["id"] for x in calibrate.load_golden(root / ccfg["golden"])}
+    engine, _ = _open(root)
+    if engine is None:
+        print("No recorded runs yet: run `assay test` first.", file=sys.stderr)
+        return 2
+    t = store.eval_results
+    with engine.connect() as conn:
+        rows = conn.execute(select(t.c.case_id, t.c.score).where((t.c.tenant == TENANT) & (t.c.field == field)
+                                                                  & t.c.score.isnot(None)
+                                                                  & (t.c.run_id != BASELINE))).all()
+    scores: Dict[str, List[float]] = defaultdict(list)
+    for r in rows:
+        if r.case_id not in have:
+            scores[r.case_id].append(r.score)
+    if not scores:
+        print(f"No recorded scores for {field} outside the golden set.", file=sys.stderr)
+        return 2
+    ranked = sorted(((c, median(v)) for c, v in scores.items()), key=lambda cv: cv[1])
+    k = min(n, len(ranked))
+    picks = [ranked[round(i * (len(ranked) - 1) / max(1, k - 1))] for i in range(k)] if k > 1 else ranked[:1]
+    picks = list(dict.fromkeys(picks))
+    print(f"Label these next: spread over what the judge scored them ({field}), so the set spans poor to great, "
+          f"not only the typical:")
+    for case, s in picks:
+        print(f"  judged {s:>5.2f}  {case}")
+    print("\n`assay golden add CASE --score N` labels one (your score, not the judge's).")
+    return 0
+
+
+def calibrate_cmd(root: Path, baseline: Optional[str] = None, fmt: str = "text", judge_spec: Optional[str] = None,
+                  repeat: Optional[int] = None, rt=None) -> int:
+    """`assay calibrate`: the judge over the golden set, compared with the last calibration that passed.
+    0 as good as before, 1 worse, 2 nothing to run."""
+    from assay import calibrate
+    try:
+        ccfg = {**_calib_cfg(root)}
+        if repeat:
+            ccfg["repeat"] = repeat
+        spec = judge_spec or ccfg["judge"]
+        items = calibrate.load_golden(root / ccfg["golden"])
+        judge = calibrate.load_judge(spec, root)
+    except (calibrate.CalibrationError, SetupError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    results, report = calibrate.run_judge(judge, items, ccfg, rt)
+    a = calibrate.analyze(items, results, ccfg)
+    home = ensure_home(root)
+    engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
+    state = _state(home)
+    base_id = None if baseline == "none" else baseline or state.get("calibration_baseline")
+    before = None
+    if base_id:
+        c = store.calibrations
+        with engine.connect() as conn:
+            row = conn.execute(select(c.c.result).where((c.c.tenant == TENANT) & (c.c.run_id == base_id))).first()
+        if row is None and baseline:
+            print(f"No calibration {baseline}.", file=sys.stderr)
+            return 2
+        before = row and row.result["calibration"]
+    cmp = calibrate.compare(a, before, ccfg) if before else None
+    run_id = calibrate.new_id()
+    stored = calibrate.as_json(a, cmp)
+    passed = not (cmp and cmp["regressed"])
+    with engine.begin() as conn:
+        conn.execute(store.calibrations.insert().values(tenant=TENANT, run_id=run_id, created_at=datetime.utcnow(),
+                                                        judge=spec, golden=calibrate.digest(items), passed=passed,
+                                                        result=json.loads(json.dumps(stored, default=str))))
+    if passed:
+        state["calibration_baseline"] = run_id
+        _save_state(home, state)
+    s = report.to_dict()
+    cost = f"estimated ${s['cost_usd']:,.2f}" if s["cost_usd"] is not None else "cost unknown (set [prices])"
+    line = f"{_n(s['llm_calls'], 'LLM call')}, {s['retries']} retries, {cost}, {report.seconds:.1f}s"
+    if fmt == "json":
+        print(json.dumps({"run_id": run_id, "passed": passed, **stored}, indent=1, default=str))
+    else:
+        print(calibrate.text(run_id, spec, a, ccfg, cmp, base_id, line, _paint))
+    return 0 if passed else 1
 
 
 # ---------- sending a run to a server ----------
