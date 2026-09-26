@@ -617,7 +617,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         # Runs this batch ended (or added late data to) are evaluated now, not after a delay.
         lifecycle.after_ingest(engine, tenant, {e.run_id for e in events if getattr(e, "run_id", None)},
                                settings.abandon_minutes)
-        return {"accepted": len(events), "by_type": counts}
+        dup = counts.pop("duplicate_checks", 0)
+        return {"accepted": len(events), "by_type": counts} | ({"duplicate_checks": dup} if dup else {})
 
     @app.get("/v1/schema", tags=["ingest"], summary="The v1 event schema, as JSON Schema")
     def get_schema():

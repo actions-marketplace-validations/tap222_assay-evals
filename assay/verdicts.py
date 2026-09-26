@@ -7,8 +7,10 @@
   EVALUATOR_ERROR  couldn't be judged: the evaluator failed, or was given data that
                    doesn't match the trace (assay/audit.py)
   INFRA_ERROR      couldn't be judged: a timeout, rate limit, 5xx or connection error
-  MISSING          no result arrived: the evaluator reported on most of the run's cases,
-                   but not this one (its job didn't run, or dropped it)
+  MISSING          no result arrived: the evaluator reported on this case in the baseline,
+                   or on most of this run's cases, but not on this one here (its job didn't
+                   run, or dropped it). An evaluator that stopped running altogether shows
+                   up this way too, against the baseline.
 
 A check is a case, field and evaluator (flaky.check_key); its attempts decide it. Only
 FAIL says anything bad about the AI. The error verdicts and MISSING say the evaluation
@@ -55,23 +57,45 @@ def of_check(state: dict, rows: list, findings: Optional[List[str]] = None) -> t
     return "FAIL", reason + note
 
 
-def missing(rows: list) -> List[dict]:
-    """Checks that never arrived: for each evaluator that reported on most of the run's cases,
-    the cases it didn't report on. Assay's own checks are made for every run they apply to."""
-    cases = {r.case_id for r in rows}
+def _external(rows: list) -> tuple:
+    """({evaluator: cases it reported on}, {evaluator: its fields}) for evaluators other than Assay's
+    own, whose checks are made for every run they apply to."""
     by_eval: Dict[str, set] = defaultdict(set)
     fields: Dict[str, Counter] = defaultdict(Counter)
     for r in rows:
         if r.evaluator and not r.evaluator.startswith("assay."):
             by_eval[r.evaluator].add(r.case_id)
             fields[r.evaluator][r.field] += 1
-    out = []
+    return by_eval, fields
+
+
+def missing(rows: list, base_rows: Optional[list] = None) -> List[dict]:
+    """Checks that never arrived, per evaluator: the cases of this run it reported on in the
+    baseline but not now, and, for one that reported on most of this run's cases, the rest."""
+    cases = {r.case_id for r in rows}
+    by_eval, fields = _external(rows)
+    base_eval, base_fields = _external(base_rows or [])
+    # A new version of an evaluator (faithfulness@2 → @3) replaces the old one: not missing.
+    now_names = {e.split("@")[0] for e in by_eval}
+    out, seen = [], set()
+
+    def add(ev, case, field, reason):
+        if (case, ev) not in seen:
+            seen.add((case, ev))
+            out.append({"case_id": case, "field": field, "evaluator": ev, "verdict": "MISSING", "reason": reason})
+    for ev, before in sorted(base_eval.items()):
+        if ev not in by_eval and ev.split("@")[0] in now_names:
+            continue
+        expected, got = before & cases, by_eval.get(ev, set())
+        field = (fields.get(ev) or base_fields[ev]).most_common(1)[0][0]
+        for case in sorted(expected - got):
+            add(ev, case, field, f"{ev} reported on {len(expected)} of these cases in the baseline, none in this run"
+                if not got else f"{ev} reported on this case in the baseline, not in this run")
     for ev, covered in sorted(by_eval.items()):
         if len(covered) >= MISSING_COVERAGE * len(cases) and covered != cases:
             field = fields[ev].most_common(1)[0][0]
             for case in sorted(cases - covered):
-                out.append({"case_id": case, "field": field, "evaluator": ev, "verdict": "MISSING",
-                            "reason": f"{ev} reported on {len(covered)} of {len(cases)} cases, not this one"})
+                add(ev, case, field, f"{ev} reported on {len(covered)} of {len(cases)} cases, not this one")
     return out
 
 
@@ -82,7 +106,8 @@ BY_ROLE = {"evaluator": "EVALUATOR_ERROR", "evaluator_input": "EVALUATOR_ERROR",
 
 
 def compute(rows: list, states: Dict[tuple, dict], audited: Dict[str, List[str]],
-            roles: Optional[Dict[tuple, str]] = None, causes: Optional[Dict[tuple, str]] = None) -> dict:
+            roles: Optional[Dict[tuple, str]] = None, causes: Optional[Dict[tuple, str]] = None,
+            base_rows: Optional[list] = None) -> dict:
     """Every check's verdict in a run, and how many of each. roles/causes: per check, what its
     failure cause makes of it, and the cause's name."""
     roles, causes = roles or {}, causes or {}
@@ -97,6 +122,6 @@ def compute(rows: list, states: Dict[tuple, dict], audited: Dict[str, List[str]]
                       "PASS": f"accepted: {why}"}.get(verdict, why)
         checks.append({"case_id": key[0], "field": key[1] or None, "evaluator": key[2] or None,
                        "verdict": verdict, "reason": reason, "attempts": len(attempts)})
-    checks += missing(rows)
+    checks += missing(rows, base_rows)
     counts = Counter(c["verdict"] for c in checks)
     return {"counts": {v: counts.get(v, 0) for v in VERDICTS}, "checks": checks}

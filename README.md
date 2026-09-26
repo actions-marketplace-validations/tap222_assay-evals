@@ -856,11 +856,19 @@ Every check in an evaluation run gets one verdict:
 | `INCONCLUSIVE` | plausibly worse but too few attempts to tell, or an intended change nobody has accepted |
 | `EVALUATOR_ERROR` | couldn't be judged: the evaluator errored, fails values that differ only in format, contradicts itself, or was given the wrong data |
 | `INFRA_ERROR` | couldn't be judged: a timeout, rate limit, 5xx or connection error |
-| `MISSING` | no result: the evaluator reported on most of the run's cases, but not this one |
+| `MISSING` | no result: the evaluator reported on this case in the baseline, or on most of the run's cases, but not on this one now |
 
 Send a check the evaluator couldn't make as `status="error"` with the reason. The failure-cause
 analysis decides the rest, so the verdicts agree with the release call. Missing results keep a
-release from advancing ("rerun"). `GET /v1/evals/runs/{run}/verdicts?source=…&verdict=FAIL`
+release from advancing ("rerun"). An evaluator job that didn't trigger at all is caught against
+the baseline: "faithful@2 reported on 48 of these cases in the baseline, none in this run". A new
+version of an evaluator (`faithful@3`) replaces the old one, so it isn't reported missing.
+
+A retried or twice-delivered evaluator job sends the same judgement again under a new id. Assay
+keeps the first, so it counts as one attempt, and `/v1/ingest` answers with `duplicate_checks`:
+how many it dropped. That needs the check to name its trace (`run_id`) or its attempt, to tell a
+repeat from a real second attempt. Two different judgements of the same output are both kept,
+and the check is an `EVALUATOR_ERROR`: the evaluator contradicts itself. `GET /v1/evals/runs/{run}/verdicts?source=…&verdict=FAIL`
 lists them, and the Failures page shows the counts.
 
 `assay test` lists what couldn't be judged apart, never as a regression, and exits **3**

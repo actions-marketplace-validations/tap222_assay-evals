@@ -316,6 +316,9 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
         _upsert(conn, engine, store.event_stage_runs, rows["stages"], ["tenant", "run_id"])
         _upsert(conn, engine, store.event_calls, rows["calls"], ["tenant", "call_id"])
         _upsert(conn, engine, store.trace_feedback, rows["feedback"], ["tenant", "feedback_id"])
+        rows["checks"], dup = _drop_duplicate_checks(conn, tenant, rows["checks"])
+        if dup:
+            counts["duplicate_checks"] = dup
         _upsert(conn, engine, store.eval_results, rows["checks"], ["tenant", "result_id"])
         _upsert(conn, engine, store.event_errors, rows["errors"], ["tenant", "error_id"])
         _upsert(conn, engine, store.agent_references, rows["refs"], ["tenant", "case_id"])
@@ -335,6 +338,41 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
     if prompts:
         discover_prompts(engine, prompts, tenant, "started_at")
     return counts
+
+
+def _judgement(r) -> Optional[tuple]:
+    """What makes two check results the same judgement: the same output (run, or attempt), judged
+    by the same evaluator with the same outcome. None when there's nothing to tell attempts apart by."""
+    g = r.get if isinstance(r, dict) else lambda k: getattr(r, k)
+    if g("document_id") is None and g("attempt") is None:
+        return None
+    return (g("run_id"), g("case_id"), g("attempt"), g("document_id"), g("field"), g("evaluator"), g("status"),
+            g("score"))
+
+
+def _drop_duplicate_checks(conn, tenant: str, checks: List[dict]) -> tuple:
+    """A retried or twice-delivered evaluator job sends the same judgement again under a new id:
+    keep the first, so it counts once. (checks to write, how many were dropped). A resent event
+    (same id) isn't a duplicate: it just updates its row. Different outcomes are both kept, so
+    the contradiction shows (EVALUATOR_ERROR)."""
+    if not checks:
+        return checks, 0
+    t = store.eval_results
+    runs = {c["run_id"] for c in checks}
+    seen = {}
+    for r in conn.execute(select(t.c.result_id, t.c.run_id, t.c.case_id, t.c.attempt, t.c.document_id, t.c.field,
+                                 t.c.evaluator, t.c.status, t.c.score)
+                          .where(and_(t.c.tenant == tenant, t.c.run_id.in_(list(runs))))):
+        key = _judgement(r)
+        if key is not None:
+            seen.setdefault(key, r.result_id)
+    keep = []
+    for c in checks:
+        key = _judgement(c)
+        if key is not None and seen.setdefault(key, c["result_id"]) != c["result_id"]:
+            continue
+        keep.append(c)
+    return keep, len(checks) - len(keep)
 
 
 def _head(run: dict) -> dict:

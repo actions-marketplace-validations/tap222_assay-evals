@@ -814,7 +814,7 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
         if r.result_id in audited:
             roles[flaky.check_key(r)] = "evaluator_input"
     from assay import verdicts
-    verdict = verdicts.compute(rows, states, audited, roles, causes)
+    verdict = verdicts.compute(rows, states, audited, roles, causes, base_rows)
     stability = _with_guards(flaky.summarize(states, tolerance, roles), back_total)
     lost = verdict["counts"]["MISSING"]
     if lost:  # results that never arrived: the run isn't done being judged

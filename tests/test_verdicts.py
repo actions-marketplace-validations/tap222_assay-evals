@@ -98,3 +98,38 @@ def test_a_stuck_evaluation_opens_an_alert_and_resolves_it(app):
     assert lifecycle.check_backlog(app.engine, 10) == {}
     alerts = app.get("/v1/alerts", params={"source": "events:t", "state": "all"}).json()
     assert all(a["state"] == "resolved" for a in alerts if a["kind"] == "evaluation")
+
+
+def test_an_evaluator_that_stopped_running_is_missing_against_the_baseline(app):
+    ev = []
+    for i in range(6):
+        ev.append(check(i, "before", f"c{i}", "pass", evaluator="exact@1", field="total"))
+        ev.append(check(i, "before", f"c{i}", "pass", evaluator="faithful@2", field="faithful"))
+        ev.append(check(i, "before", f"c{i}", "pass", evaluator="tone@1", field="tone"))
+        ev.append(check(i, "after", f"c{i}", "pass", evaluator="exact@1", field="total"))  # faithful@2 never ran
+        ev.append(check(i, "after", f"c{i}", "pass", evaluator="tone@2", field="tone"))  # a new version: fine
+    ev.append(check(0, "unrelated", "c0", "pass", evaluator="faithful@2", field="faithful"))  # another run's
+    assert app.post("/v1/ingest", json=ev, headers=H).status_code == 200
+    out = app.get("/v1/evals/runs/after/verdicts", params={**SRC, "baseline": "before"}).json()
+    assert out["counts"]["MISSING"] == 6
+    gone = [c for c in out["checks"] if c["verdict"] == "MISSING"]
+    assert {c["evaluator"] for c in gone} == {"faithful@2"} and {c["field"] for c in gone} == {"faithful"}
+    assert gone[0]["reason"] == "faithful@2 reported on 6 of these cases in the baseline, none in this run"
+    st = app.get("/v1/evals/runs/after/stability", params={**SRC, "baseline": "before"}).json()
+    assert st["outcome"] == "rerun" and any("never arrived from faithful@2" in r for r in st["reasons"])
+
+
+def test_the_same_judgement_sent_twice_counts_once(app):
+    def judged(i, status, score, attempt=0, run_id="trace-1"):
+        return {**check(i, "r", "c1", status, attempt=attempt), "score": score, "run_id": run_id}
+    r = app.post("/v1/ingest", json=[judged(0, "fail", 1), judged(1, "fail", 1)], headers=H)  # a retried job
+    assert r.json()["duplicate_checks"] == 1
+    r = app.post("/v1/ingest", json=[judged(2, "fail", 1)], headers=H)  # and again, in a later batch
+    assert r.json()["duplicate_checks"] == 1
+    assert "duplicate_checks" not in app.post("/v1/ingest", json=[judged(0, "fail", 1)], headers=H).json()  # a resend
+    c = app.get("/v1/evals/runs/r/verdicts", params=SRC).json()["checks"]
+    assert [(x["verdict"], x["attempts"]) for x in c] == [("FAIL", 1)]
+    # A second attempt is a real attempt; a different judgement of the same output is a contradiction.
+    app.post("/v1/ingest", json=[judged(3, "fail", 1, attempt=1), judged(4, "pass", 5)], headers=H)
+    c = app.get("/v1/evals/runs/r/verdicts", params=SRC).json()["checks"]
+    assert [(x["verdict"], x["attempts"]) for x in c] == [("EVALUATOR_ERROR", 3)]
