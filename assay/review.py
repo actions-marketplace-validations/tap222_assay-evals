@@ -230,14 +230,15 @@ def run(engine: Engine, source, tenant: str, judge, n: int = 50, days: float = 1
             continue
         rows.append({"tenant": tenant, "conversation": c, "trace_ids": [r["trajectory_id"] for r in convs[c]],
                      "day": day, "went_wrong": v["went_wrong"], "note": v.get("note"), "hint": v.get("hint"),
-                     "quotes": v.get("quotes"), "category_id": None, "model": v.get("model"), "created_at": now})
+                     "quotes": v.get("quotes"), "category_id": None, "model": v.get("model"), "created_at": now,
+                     "by": f"model:{v.get('model') or 'reader'}", "first_step": None, "superseded": False})
     with engine.begin() as conn:
         for r in rows:
             r["id"] = conn.execute(t.insert().values(**r)).inserted_primary_key[0]
         conn.execute(store.review_runs.insert().values(tenant=tenant, day=day, read=len(rows),
                                                        went_wrong=sum(r["went_wrong"] for r in rows),
                                                        cost_usd=report.cost_usd, created_at=now))
-    flagged = [r for r in rows if r["went_wrong"]]
+    flagged = [r for r in rows if r["went_wrong"]] + ungrouped(engine, tenant)  # people's notes too
     made = _categorize(engine, tenant, judge, flagged, now)
     return {"read": len(rows), "went_wrong": len(flagged), "not_read": len(chosen) - len(rows),
             "new_categories": made, "summary": report.to_dict()}
@@ -281,7 +282,8 @@ def categories(engine: Engine, tenant: str, now: Optional[datetime] = None, exam
     c, t, rr = store.review_categories, store.review_notes, store.review_runs
     with engine.connect() as conn:
         cats = {r.id: dict(r._mapping) for r in conn.execute(select(c).where(c.c.tenant == tenant))}
-        notes = [dict(r._mapping) for r in conn.execute(select(t).where(and_(t.c.tenant == tenant, t.c.went_wrong)))]
+        notes = [dict(r._mapping) for r in conn.execute(select(t).where(and_(t.c.tenant == tenant, t.c.went_wrong)))
+                 if not r.superseded]
         runs = [dict(r._mapping) for r in conn.execute(select(rr).where(rr.c.tenant == tenant))]
     week, before = now - timedelta(days=7), now - timedelta(days=14)
     read_now = sum(r["read"] for r in runs if r["created_at"] >= week)
@@ -298,6 +300,7 @@ def categories(engine: Engine, tenant: str, now: Optional[datetime] = None, exam
         b = sum(1 for n in mine if before <= n["created_at"] < week)
         out.append({"id": cid, "name": cat["name"], "description": cat["description"], "status": cat["status"],
                     "merged_into": cat["merged_into"], "notes": len(mine),
+                    "by_people": sum(1 for n in mine if not str(n.get("by") or "model:").startswith("model:")),
                     "share": a / read_now if read_now else None, "share_before": b / read_before if read_before else None,
                     "examples": [{"conversation": n["conversation"], "trace_ids": n["trace_ids"], "note": n["note"],
                                   "quotes": n["quotes"], "day": n["day"]} for n in mine[:examples]],
@@ -403,3 +406,110 @@ def runtime_for(settings):
     from assay import judge as judge_mod
     return judge_mod.runtime({"concurrency": settings.judge_concurrency, "rate_limit": settings.judge_rate_limit,
                               "budget_usd": settings.review_budget_usd})
+
+
+# ---------- a person reading: the review queue ----------
+
+def ungrouped(engine: Engine, tenant: str) -> List[dict]:
+    """People's notes that found something wrong and aren't in a category yet."""
+    t = store.review_notes
+    with engine.connect() as conn:
+        return [dict(r._mapping) for r in conn.execute(select(t).where(and_(
+            t.c.tenant == tenant, t.c.went_wrong, t.c.category_id.is_(None))))
+            if not str(r.by or "model:").startswith("model:") and not r.superseded]
+
+
+def turns(engine: Engine, tenant: str, runs: List[dict], redact: bool = True) -> List[dict]:
+    """A conversation as a person reads it: [{"role": user | assistant | tool, "text" | tool fields,
+    "trace_id", "seq"}], each step addressable, so the first failure can be pointed at."""
+    from assay import learn
+    from assay.sources.events import EventsSource
+    ids = [r["trajectory_id"] for r in runs]
+    trajs = EventsSource(engine, tenant).trajectories(ids)
+    inputs = learn._inputs(engine, tenant, ids)
+    scrub = learn.redact if redact else (lambda v: v)
+    out = []
+    for r in runs:
+        tid = r["trajectory_id"]
+        tr = trajs.get(tid) or {"steps": []}
+        said = (inputs.get(tid) or {}).get("input")
+        if said is not None:
+            out.append({"role": "user", "text": scrub(learn._text(said)), "trace_id": tid, "seq": None})
+        for s in tr["steps"]:
+            if s["kind"] == "user":
+                out.append({"role": "user", "text": scrub(s.get("text") or ""), "trace_id": tid, "seq": s["seq"]})
+            elif s["kind"] in ("tool", "retrieval", "resource"):
+                out.append({"role": "tool", "name": s.get("name"), "args": scrub(s.get("args")),
+                            "result": scrub(s.get("result")), "error": s.get("error"), "trace_id": tid, "seq": s["seq"]})
+            elif s["kind"] == "reason" and s.get("text"):
+                out.append({"role": "thinking", "text": scrub(s["text"]), "trace_id": tid, "seq": s["seq"]})
+            elif s["kind"] == "answer":
+                out.append({"role": "assistant", "text": scrub(s.get("text") or ""), "trace_id": tid, "seq": s["seq"]})
+        if tr.get("answer") and not any(s["kind"] == "answer" for s in tr["steps"]):
+            out.append({"role": "assistant", "text": scrub(tr["answer"]), "trace_id": tid, "seq": None})
+    return out
+
+
+def queue(engine: Engine, source, tenant: str, days: float = 7, limit: int = 20,
+          now: Optional[datetime] = None) -> List[dict]:
+    """Conversations for a person to read, the ones most likely wrong first: flagged by learn.py, then
+    those the model thought went wrong, then a sample. Each with the model's note as a suggestion."""
+    from assay import learn
+    from assay.models import Window
+    now = now or datetime.utcnow()
+    since = now - timedelta(days=days)
+    convs = conversations(engine, tenant, since, now)
+    t = store.review_notes
+    with engine.connect() as conn:
+        notes = [dict(r._mapping) for r in conn.execute(select(t).where(t.c.tenant == tenant))]
+    people = {n["conversation"] for n in notes if not str(n.get("by") or "model:").startswith("model:")}
+    model = {n["conversation"]: n for n in notes if str(n.get("by") or "model:").startswith("model:")
+             and not n.get("superseded")}
+    of = {r["trajectory_id"]: c for c, runs in convs.items() for r in runs}
+    try:
+        flagged = [of[a["trace_id"]] for a in learn.score(source, Window(since, now), engine)["anomalous"]
+                   if a["trace_id"] in of]
+    except Exception:
+        flagged = []
+    left = [c for c in convs if c not in people]
+    wrong = [c for c in left if model.get(c, {}).get("went_wrong")]
+    rest = [c for c in left if c not in set(flagged) | set(wrong)]
+    random.Random(f"{tenant}|queue").shuffle(rest)
+    order = list(dict.fromkeys([c for c in flagged if c in left] + wrong + rest))[:limit]
+    out = []
+    for c in order:
+        m = model.get(c)
+        out.append({"conversation": c, "trace_ids": [r["trajectory_id"] for r in convs[c]],
+                    "flagged": c in flagged, "turns": turns(engine, tenant, convs[c]),
+                    "suggestion": None if m is None else {"id": m["id"], "went_wrong": m["went_wrong"],
+                                                          "note": m["note"], "hint": m["hint"], "quotes": m["quotes"]}})
+    return out
+
+
+def add_note(engine: Engine, tenant: str, conversation: str, by: str, went_wrong: bool,
+             note: Optional[str] = None, first_step: Optional[dict] = None, hint: Optional[str] = None,
+             accept: Optional[int] = None, trace_ids: Optional[List[str]] = None) -> dict:
+    """A person's note on a conversation: their own, or the model's suggestion accepted (accept= its id).
+    It replaces the model's note on that conversation in every count."""
+    t = store.review_notes
+    now = datetime.utcnow()
+    with engine.begin() as conn:
+        base = None
+        if accept is not None:
+            base = conn.execute(select(t).where(and_(t.c.tenant == tenant, t.c.id == accept,
+                                                     t.c.conversation == conversation))).first()
+            if base is None:
+                raise ValueError(f"No suggestion {accept} for this conversation.")
+        if went_wrong and not (note or (base and base.note)):
+            raise ValueError("Say what went wrong: a note, or accept the suggestion.")
+        row = {"tenant": tenant, "conversation": conversation, "trace_ids": trace_ids or (base.trace_ids if base else []),
+               "day": now.strftime("%Y-%m-%d"), "went_wrong": went_wrong,
+               "note": (note or (base.note if base else None) or "")[:500] if went_wrong else None,
+               "hint": (hint or (base.hint if base else None)) if went_wrong else None,
+               "quotes": base.quotes if base and not note else None,
+               "category_id": base.category_id if base and not note else None,
+               "model": None, "created_at": now, "by": by[:256], "first_step": first_step, "superseded": False}
+        conn.execute(t.update().where(and_(t.c.tenant == tenant, t.c.conversation == conversation))
+                     .values(superseded=True))
+        row["id"] = conn.execute(t.insert().values(**row)).inserted_primary_key[0]
+    return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in row.items()}

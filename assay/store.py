@@ -329,6 +329,9 @@ review_notes = Table(
     Column("category_id", Integer, index=True),
     Column("model", String(128)),
     Column("created_at", DateTime, nullable=False, index=True),
+    Column("by", String(256)),  # who wrote it: a person, or model:<name>
+    Column("first_step", JSON),  # the first upstream failure: {"trace_id", "seq"}
+    Column("superseded", Boolean),  # a person's note on the same conversation replaced it
 )
 
 review_categories = Table(

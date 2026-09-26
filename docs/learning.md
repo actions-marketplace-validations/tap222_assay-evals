@@ -122,12 +122,20 @@ a few hundred conversations a week. So Assay reads them, and a person reviews ca
    count, its share of what was read this week against last week, and example conversations with
    their quotes.
 3. **A person reviews categories, not conversations:** confirm, rename, merge or dismiss them.
+   And reads conversations too, in the dashboard's Review tab: one conversation a screen, tool
+   calls collapsed, the likeliest wrong first. They write what went wrong in their own words and
+   mark the first step that failed (the upstream one, not what followed from it). The model's
+   note is shown as a suggestion to accept, edit or reject. A person's note replaces the model's
+   on that conversation in every count, is grouped into categories with the rest, and is kept
+   apart as theirs (`by_people` on a category).
 4. **The loop.** A category becomes candidate test cases, drafted as a pattern's are, with the note
    as their provenance. It also becomes simulated-user personas built from its real conversations,
    for `assay_sdk.simulate`, so a failure nobody wrote a test for becomes one.
 
 ```
 POST /v1/review/run?source=events:acme&sample=50        read, note and group (a model call per conversation)
+GET  /v1/review/queue?source=events:acme                 conversations for a person, with the model's note
+POST /v1/review/notes?source=…                           {"conversation", "went_wrong", "note", "first_step", "accept"}
 GET  /v1/review/categories?source=events:acme            what was found, share now and the week before
 PUT  /v1/review/categories/{id}?source=…                 {"status": "confirmed"}, {"merge_into": 7}, {"name": "..."}
 POST /v1/review/categories/{id}/candidates?source=…      draft test cases from it

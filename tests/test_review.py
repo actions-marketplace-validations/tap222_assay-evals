@@ -103,3 +103,37 @@ def test_quotes_are_checked():
     assert "aren't in the conversation" in review.check_note({"went_wrong": True, "note": "x", "quotes": ["lost it"]}, text)
     assert review.check_note({"went_wrong": False}, text) is None
     assert "isn't the note" in review.check_note("nope", text)
+
+
+def test_a_person_reads_the_queue_and_their_notes_replace_the_models(app):
+    app.post("/v1/review/run", params={**SRC, "sample": 10})
+    Q = app.get("/v1/review/queue", params=SRC).json()
+    assert len(Q) == 6 and all(c["turns"] for c in Q)
+    assert [c["suggestion"]["went_wrong"] for c in Q[:2]] == [True, True]  # the likeliest wrong first
+    one = Q[0]
+    roles = [t["role"] for t in one["turns"]]
+    assert roles[0] == "user" and "tool" in roles and roles[-1] == "assistant"
+    tool = next(t for t in one["turns"] if t["role"] == "tool")
+    assert tool["name"] == "lookup_policy" and tool["seq"] == 0
+    # Accept the model's suggestion: it becomes the person's note, in the same category.
+    r = app.post("/v1/review/notes", params=SRC, json={"conversation": one["conversation"], "went_wrong": True,
+                                                       "accept": one["suggestion"]["id"],
+                                                       "first_step": {"trace_id": tool["trace_id"], "seq": 0}})
+    assert r.status_code == 200 and not r.json()["by"].startswith("model:")
+    cats = app.get("/v1/review/categories", params=SRC).json()
+    assert cats[0]["notes"] == 2 and cats[0]["by_people"] == 1  # replaced, not counted twice
+    # Reject the other: nothing went wrong, in the person's judgement; the model's note stops counting.
+    two = Q[1]
+    app.post("/v1/review/notes", params=SRC, json={"conversation": two["conversation"], "went_wrong": False})
+    assert app.get("/v1/review/categories", params=SRC).json()[0]["notes"] == 1
+    # A note of their own on one the model thought fine, grouped on the next run.
+    fine = next(c for c in Q if c["suggestion"] and not c["suggestion"]["went_wrong"])
+    assert app.post("/v1/review/notes", params=SRC, json={"conversation": fine["conversation"],
+                                                          "went_wrong": True}).status_code == 422  # say what
+    app.post("/v1/review/notes", params=SRC, json={"conversation": fine["conversation"], "went_wrong": True,
+                                                   "note": "It never said when the parcel would arrive."})
+    left = {c["conversation"] for c in app.get("/v1/review/queue", params=SRC).json()}
+    assert not left & {one["conversation"], two["conversation"], fine["conversation"]}
+    app.post("/v1/review/run", params={**SRC, "sample": 10})  # people's notes are grouped with the rest
+    cat = app.get("/v1/review/categories", params=SRC).json()[0]
+    assert (cat["notes"], cat["by_people"]) == (3, 2)  # and O-3, read right by the model this time

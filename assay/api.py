@@ -927,6 +927,32 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                           n=sample if sample is not None else settings.review_sample, days=days, rt=rt,
                           redact=settings.judge_redact)
 
+    @app.get("/v1/review/queue", tags=["results"],
+             summary="Conversations for a person to read, the likeliest wrong first, with the model's note as a suggestion")
+    def review_queue(source: str, days: float = 7, limit: int = 20, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        from assay import review
+        return review.queue(engine, runner.CachedSource(resolve(p, source)), _tenant(source), days, min(limit, 100))
+
+    class NoteIn2(BaseModel):
+        conversation: str = Field(..., max_length=128)
+        went_wrong: bool
+        note: Optional[str] = Field(None, max_length=500)
+        hint: Optional[str] = Field(None, max_length=80)
+        first_step: Optional[Dict[str, Any]] = Field(None, description='the first upstream failure: {"trace_id", "seq"}')
+        accept: Optional[int] = Field(None, description="the model's suggestion to accept, by its id")
+        trace_ids: Optional[List[str]] = None
+
+    @app.post("/v1/review/notes", tags=["operate"], summary="A person's note on a conversation (open coding)")
+    def review_note(source: str, body: NoteIn2, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        from assay import review, sso
+        try:
+            return review.add_note(engine, _tenant(source), body.conversation, sso.actor_of(p), body.went_wrong,
+                                   body.note, body.first_step, body.hint, body.accept, body.trace_ids)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+
     @app.get("/v1/review/categories", tags=["results"],
              summary="Failure categories found by reading conversations: share now and the week before, examples")
     def review_categories(source: str, p: Principal = Depends(require("read"))):
