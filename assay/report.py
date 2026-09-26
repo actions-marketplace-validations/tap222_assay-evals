@@ -23,7 +23,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Engine
 
 from assay import store
@@ -117,8 +117,9 @@ def production(engine: Engine, source, tenant: str, since: datetime, until: date
             c.c.tenant == tenant, c.c.created_at >= since, c.c.created_at < until)))]
     at = store.agent_trajectories
     with engine.connect() as conn:
-        firsts = conn.execute(select(at.c.task, at.c.started_at).where(and_(at.c.tenant == tenant, at.c.run_id.is_(None),
-                                                                            at.c.task.is_not(None)))).all()
+        firsts = conn.execute(select(at.c.task, at.c.started_at).where(and_(
+            at.c.tenant == tenant, at.c.run_id.is_(None), at.c.task.is_not(None),
+            or_(at.c.origin.is_(None), at.c.origin != "synthetic")))).all()
     first_seen: Dict[str, datetime] = {}
     for task, ts in firsts:
         first_seen[task] = min(first_seen.get(task, ts), ts)
@@ -198,7 +199,8 @@ def markdown(r: dict) -> str:
     p = r.get("production")
     if p:
         out += ["", "## Failure modes in production", ""]
-        rows = [(c["name"], "reading conversations", c["share"], c["share_before"]) for c in p["categories"]]
+        rows = [(c["name"], "reading conversations", c["share"], c["share_before"]) for c in p["categories"]
+                if not c.get("only_synthetic")]
         rows += [(x["name"], f"{x['traces']:,} traces", None, None) for x in p["patterns"]]
         if rows:
             out += ["| Failure mode | Found by | Share now | Before |", "|---|---|---|---|"]
@@ -220,6 +222,8 @@ def markdown(r: dict) -> str:
             out += ["", "## Fixed, and staying fixed", "", *good, *back]
         odd = [f"- A new kind of task: {_md(t)}" for t in p["new_tasks"]]
         odd += [f"- A new failure mode: {_md(n)}" for n in p["new_categories"]]
+        odd += [f"- “{_md(c['name'])}” was found only in synthetic runs: check it happens to real users"
+                for c in p["categories"] if c.get("only_synthetic")]
         odd += [f"- {_md(x['name'])} ({x['traces']:,} traces)" for x in p["rare_paths"]]
         if odd:
             out += ["", "## Surprising usage", "", *odd]

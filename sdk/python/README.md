@@ -147,6 +147,10 @@ measured on: `golden_examples(split="train", k=8)` returns them with their label
 and `assay calibrate` fails a judge that read dev or test (see
 [calibration](../../docs/calibration.md)).
 
+`with assay.tagged(origin="synthetic"):` gives every run started inside its tags, including runs
+the code opens itself; `assay synth run` uses it so generated traffic is never counted as
+production.
+
 `assay.instrument()` records Anthropic, OpenAI, Gemini, Ollama and LiteLLM calls through the
 same reading, with the tool calls asked for and why each call stopped.
 

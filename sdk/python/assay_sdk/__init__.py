@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-__all__ = ["init", "run", "feedback", "check", "correction", "expect", "prompt", "flush", "shutdown", "Run"]
+__all__ = ["init", "run", "tagged", "feedback", "check", "correction", "expect", "prompt", "flush", "shutdown", "Run"]
 __version__ = "0.2.0"
 
 log = logging.getLogger("assay_sdk")
@@ -461,6 +461,10 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
     An exception inside the block ends the run as failed (and is re-raised)."""
     c = _c()
     rid = run_id or uuid.uuid4().hex
+    scope = _tags.get()
+    if scope is not None:  # inside tagged(): this run carries its tags too
+        tags = {**scope["tags"], **(tags or {})}
+        scope["runs"].append(rid)
     recorded = c.sample >= 1 or random.random() < c.sample
     r = Run(c, rid, recorded)
     r.test = _test(test)
@@ -493,6 +497,20 @@ def run(task: Optional[str] = None, *, run_id: Optional[str] = None, kind: str =
 
 
 _current: "contextvars.ContextVar[Optional[Run]]" = contextvars.ContextVar("assay_run", default=None)
+_tags: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar("assay_tags", default=None)
+
+
+@contextmanager
+def tagged(**tags):
+    """Every run started inside carries these tags, including runs the code under test opens itself
+    (@assay.agent, assay.run). Yields the list of run ids started inside. assay synth runs generated
+    queries with tagged(origin="synthetic", ...), so they're never counted as production."""
+    scope = {"tags": {k: v for k, v in tags.items() if v is not None}, "runs": []}
+    token = _tags.set(scope)
+    try:
+        yield scope["runs"]
+    finally:
+        _tags.reset(token)
 
 
 def current() -> Optional[Run]:
@@ -589,5 +607,5 @@ from assay_sdk.auto import agent, instrument, pipeline, step, tool  # noqa: E402
 from assay_sdk.llm import Judge, Response, normalize, normalize_args  # noqa: E402
 from assay_sdk.runtime import EvalRuntime, Report, Sample  # noqa: E402
 from assay_sdk.faithfulness import faithfulness  # noqa: E402
-from assay_sdk.simulate import Persona, Simulation, simulate  # noqa: E402
+from assay_sdk.simulate import Persona, Simulation, load_personas, simulate  # noqa: E402
 from assay_sdk.golden import golden_examples  # noqa: E402

@@ -271,6 +271,20 @@ def _categorize(engine: Engine, tenant: str, judge, notes: List[dict], now: date
 
 # ---------- categories ----------
 
+def synthetic(engine: Engine, tenant: str) -> Dict[str, dict]:
+    """Synthetic runs (assay synth): {trajectory id: the tuple it was generated from}."""
+    t, rt = store.agent_trajectories, store.runs
+    with engine.connect() as conn:
+        ids = [r.trajectory_id for r in conn.execute(select(t.c.trajectory_id).where(and_(
+            t.c.tenant == tenant, t.c.origin == "synthetic")))]
+        out = {i: {} for i in ids}
+        for k in range(0, len(ids), 500):
+            for r in conn.execute(select(rt.c.run_id, rt.c.tags).where(and_(rt.c.tenant == tenant,
+                                                                            rt.c.run_id.in_(ids[k:k + 500])))):
+                out[r.run_id] = {key[4:]: v for key, v in (r.tags or {}).items() if key.startswith("dim.")}
+    return out
+
+
 def _resolve(cats: Dict[int, dict], cid: Optional[int]) -> Optional[int]:
     seen = set()
     while cid in cats and cats[cid]["status"] == "merged" and cats[cid]["merged_into"] and cid not in seen:
@@ -289,6 +303,13 @@ def categories(engine: Engine, tenant: str, now: Optional[datetime] = None, exam
         notes = [dict(r._mapping) for r in conn.execute(select(t).where(and_(t.c.tenant == tenant, t.c.went_wrong)))
                  if not r.superseded and r.by != SEARCHED]  # a search match counts once a person accepts it
         runs = [dict(r._mapping) for r in conn.execute(select(rr).where(rr.c.tenant == tenant))]
+    synth = synthetic(engine, tenant)
+    at = store.agent_trajectories
+    with engine.connect() as conn:
+        made = {r.conversation_id or r.trajectory_id for r in conn.execute(
+            select(at.c.trajectory_id, at.c.conversation_id).where(and_(at.c.tenant == tenant, at.c.origin == "synthetic")))}
+    for n in notes:
+        n["synthetic"] = n["conversation"] in made or any(x in synth for x in n["trace_ids"] or [])
     week, before = now - timedelta(days=7), now - timedelta(days=14)
     read_now = sum(r["read"] for r in runs if r["created_at"] >= week)
     read_before = sum(r["read"] for r in runs if before <= r["created_at"] < week)
@@ -300,14 +321,17 @@ def categories(engine: Engine, tenant: str, now: Optional[datetime] = None, exam
     out = []
     for cid, cat in sorted(cats.items()):
         mine = sorted(by.get(cid, []), key=lambda n: n["created_at"], reverse=True)
-        a = sum(1 for n in mine if n["created_at"] >= week)
-        b = sum(1 for n in mine if before <= n["created_at"] < week)
+        real = [n for n in mine if not n["synthetic"]]  # how common a failure is: production only
+        a = sum(1 for n in real if n["created_at"] >= week)
+        b = sum(1 for n in real if before <= n["created_at"] < week)
         out.append({"id": cid, "name": cat["name"], "description": cat["description"], "status": cat["status"],
                     "merged_into": cat["merged_into"], "notes": len(mine),
                     "by_people": sum(1 for n in mine if not str(n.get("by") or "model:").startswith("model:")),
+                    "synthetic": len(mine) - len(real), "only_synthetic": bool(mine) and not real,
                     "share": a / read_now if read_now else None, "share_before": b / read_before if read_before else None,
                     "examples": [{"conversation": n["conversation"], "trace_ids": n["trace_ids"], "note": n["note"],
-                                  "quotes": n["quotes"], "day": n["day"]} for n in mine[:examples]],
+                                  "quotes": n["quotes"], "day": n["day"], "synthetic": n["synthetic"]}
+                                 for n in mine[:examples]],
                     "trace_ids": [x for n in mine for x in n["trace_ids"]]})
     return sorted(out, key=lambda x: (x["status"] in ("dismissed", "merged"), -(x["share"] or 0), -x["notes"]))
 
@@ -500,6 +524,8 @@ def features(engine: Engine, tenant: str, convs: Dict[str, List[dict]]) -> Dict[
             tr = trajs.get(r["trajectory_id"])
             if tr:
                 f |= agents.features(tr) | {f"status={tr.get('status')}"}
+                if tr.get("origin") == "synthetic":
+                    f.add("synthetic")
             said = (inputs.get(r["trajectory_id"]) or {}).get("input")
             f |= {f"w:{w}" for w in _WORD.findall(learn._text(said).lower())}
         out[c] = f
@@ -559,11 +585,13 @@ def queue(engine: Engine, source, tenant: str, days: float = 7, limit: int = 20,
     else:
         flagged, order = [], spread
     names = {c["id"]: c["name"] for c in categories(engine, tenant)}
+    synth = synthetic(engine, tenant)
     out = []
     for c in order[:limit]:
         m = model.get(c) if suggest else None
+        made = next((synth[r["trajectory_id"]] for r in convs[c] if r["trajectory_id"] in synth), None)
         out.append({"conversation": c, "trace_ids": [r["trajectory_id"] for r in convs[c]],
-                    "flagged": c in flagged, "turns": turns(engine, tenant, convs[c]),
+                    "flagged": c in flagged, "turns": turns(engine, tenant, convs[c]), "synthetic": made,
                     "suggestion": None if m is None else {
                         "id": m["id"], "went_wrong": m["went_wrong"], "note": m["note"], "hint": m["hint"],
                         "quotes": m["quotes"], "searched": m.get("by") == SEARCHED,

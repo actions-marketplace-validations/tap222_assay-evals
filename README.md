@@ -38,7 +38,8 @@ REGRESSIONS
 - **What caused it.** The prompt, model, tools, input and settings that changed next to each
   regression, or "nothing on your side changed".
 - **From production back to tests.** Flagged traces and reviewed conversations become candidate
-  test cases.
+  test cases. Before there's traffic, `assay synth` generates queries from dimensions you define,
+  kept apart from production.
 
 `assay connect` attaches Assay to an existing app (through its database, a few lines of code, or a
 proposed test per model call), with any model provider. `assay demo && assay serve` shows it on

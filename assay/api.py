@@ -949,6 +949,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(422, str(exc))
 
+    class DimIn(BaseModel):
+        name: str = Field(..., max_length=128)
+        values: List[str] = Field(..., min_length=2, max_length=50)
+
+    class CompareIn(BaseModel):
+        dimensions: List[DimIn] = Field(..., min_length=1, max_length=20)
+
+    @app.post("/v1/synthetic/compare", tags=["results"],
+              summary="Synthetic runs against production on the same dimensions (a model call per new conversation)")
+    def synthetic_compare(source: str, body: CompareIn, days: float = 30, sample: int = 100,
+                          p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        from assay import review, synth
+        dims = [synth.Dimension(d.name, d.values) for d in body.dimensions]
+        return synth.compare(engine, _tenant(source), reviewer(), dims, days, max(0, min(sample, 1000)),
+                             rt=review.runtime_for(settings), redact=settings.judge_redact)
+
     @app.get("/v1/review/saturation", tags=["results"],
              summary="Whether new reviews still find new failure modes")
     def review_saturation(source: str, window: int = 20, p: Principal = Depends(require("read"))):

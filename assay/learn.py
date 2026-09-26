@@ -271,8 +271,8 @@ def score(source, window: Window, engine: Engine, threshold: float = THRESHOLD) 
     details = source.document_details(ids) if hasattr(source, "document_details") else \
         {i: d for i in ids if (d := source.document_detail(i))}
     trajs = source.trajectories(ids) if hasattr(source, "trajectories") else {}
-    # Evaluation runs aren't production: leave test-case trajectories out.
-    tests = {d for d, tr in trajs.items() if tr.get("run_id")}
+    # Evaluation runs and synthetic ones (assay synth) aren't production: leave them out.
+    tests = {d for d, tr in trajs.items() if tr.get("run_id") or tr.get("origin") == "synthetic"}
     docs = [d for d in docs if d.document_id not in tests]
     trajs = {d: tr for d, tr in trajs.items() if d not in tests}
     rules = contracts_mod.load(engine, source.name)

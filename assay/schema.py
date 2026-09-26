@@ -498,7 +498,8 @@ def _head(run: dict) -> dict:
             "case_id": run.get("test_case"), "attempt": run.get("attempt"), "task": run.get("task"),
             "started_at": run.get("started_at"), "status": run.get("status") or "running",
             "lineage": run.get("version"), "outcome": run.get("outcome"),
-            "conversation_id": run.get("conversation_id"), "turn": run.get("turn"), "user_id": run.get("user_id")}
+            "conversation_id": run.get("conversation_id"), "turn": run.get("turn"), "user_id": run.get("user_id"),
+            "origin": "synthetic" if (run.get("tags") or {}).get("origin") == "synthetic" else None}
 
 
 def _merge(rows: List[dict], key: str) -> List[dict]:

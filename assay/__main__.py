@@ -141,6 +141,31 @@ def main(argv=None) -> int:
     gg.add_argument("--vs", help="Another judge's check: pick the runs the two scored furthest apart")
     gg.add_argument("--disagree", action="store_true",
                     help="Pick runs the judge passed but a deterministic check failed")
+    sy = sub.add_parser("synth", help="Synthetic data for error analysis: dimensions, tuples, queries, runs through "
+                                      "the app, and a comparison with real traffic")
+    ss = sy.add_subparsers(dest="synth_cmd", required=True)
+    st = ss.add_parser("tuple", help='A tuple written by hand: one value per dimension, "Dimension=value" each')
+    st.add_argument("pairs", nargs="+")
+    st.add_argument("--note", help="What it's there to test")
+    ss.add_parser("check", help="Coverage per value, and values the system prompt never mentions")
+    sg = ss.add_parser("tuples", help="More tuples: every combination filtered by a model (default), or --direct")
+    sg.add_argument("--direct", action="store_true", help="Ask a model for realistic combinations instead")
+    sg.add_argument("-n", type=int, default=50, help="With --direct: how many")
+    sg.add_argument("--no-filter", action="store_true", help="Keep every combination, unfiltered")
+    sg.add_argument("--force", action="store_true", help="Generate before 20 are written by hand")
+    sq = ss.add_parser("queries", help="Each tuple as the message a user would send, in a prompt of its own")
+    sq.add_argument("--per", type=int, default=1, help="Queries per tuple")
+    ss.add_parser("personas", help="Each tuple as a persona, for multi-turn runs (assay_sdk.simulate)")
+    sr = ss.add_parser("run", help="Send the queries (or --personas) through the app, recorded as synthetic runs")
+    sr.add_argument("--app", help='The entry point, as "app/bot.py:answer" (default: [synthetic] app)')
+    sr.add_argument("--personas", action="store_true", help="Simulated conversations instead of single queries")
+    sr.add_argument("--limit", type=int)
+    sc = ss.add_parser("compare", help="Synthetic runs against production on the same dimensions (a server)")
+    sc.add_argument("--source", default="events:default")
+    sc.add_argument("--days", type=float, default=30)
+    sc.add_argument("--sample", type=int, default=100, help="Production conversations to place (a model call each)")
+    sc.add_argument("--url")
+
     cb = sub.add_parser("calibrate", help="Run the judge over the golden set: ranking, agreement, bias, consistency; "
                                           "compared with the last calibration that passed")
     cb.add_argument("--baseline", help="A calibration id, or 'none'")
@@ -191,6 +216,10 @@ def main(argv=None) -> int:
         from pathlib import Path
         from assay import diff
         return diff.main(Path.cwd(), args.baseline, args.current, args.format)
+    if args.cmd == "synth":
+        from pathlib import Path
+        from assay import synth
+        return synth.cli(Path.cwd(), args)
     if args.cmd in ("init", "test", "accept", "upload", "ack", "acks", "golden", "calibrate", "report", "log"):
         from pathlib import Path
         from assay import local

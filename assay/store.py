@@ -244,6 +244,18 @@ agent_trajectories = Table(
     Column("conversation_id", String(128), index=True),  # the turns of one conversation share it
     Column("turn", Integer),  # this run's place in it, from 0
     Column("user_id", String(128), index=True),  # who asked, pseudonymous: asking again elsewhere is a signal
+    Column("origin", String(16)),  # synthetic: generated to test (assay synth), never counted as production
+)
+
+# Production conversations placed on the dimensions synthetic data was generated from (assay/synth.py),
+# to compare the two: {dimension: value, or null for none of them}.
+synthetic_labels = Table(
+    "synthetic_labels", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("conversation", String(128), primary_key=True),
+    Column("dimensions", String(64), primary_key=True),  # a fingerprint of the dimensions it was placed on
+    Column("values", JSON, nullable=False),
+    Column("created_at", DateTime, nullable=False),
 )
 
 # How each test-case run behaved (assay/behavior.py): cost, latency, steps, context, tools offered,

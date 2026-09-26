@@ -1458,7 +1458,8 @@ async function renderReview(){
     return`<div class="turn ${x.role}"><b>${x.role==="user"?"User":"Assistant"}</b> ${pick}<p style="white-space:pre-wrap;margin:4px 0 0">${esc(x.text)}</p></div>`};
   const steps=c.turns.map((x,i)=>`<option value="${i}">${i+1}. ${esc(x.role==="tool"?x.name||"tool":x.role)}</option>`).join("");
   box.innerHTML=`<div class="panel stack">
-    <div class="panel-head"><div><h2>Review <span class="note">${S.ri+1} of ${L.length}</span></h2><p class="sub">Read the whole conversation, write what went wrong in your own words, and mark the first thing that failed. Your notes become the categories; the model's are only suggestions.${c.flagged?" This one was flagged by production signals.":""}</p></div></div>
+    <div class="panel-head"><div><h2>Review <span class="note">${S.ri+1} of ${L.length}</span></h2><p class="sub">Read the whole conversation, write what went wrong in your own words, and mark the first thing that failed. Your notes become the categories; the model's are only suggestions.${c.flagged?" This one was flagged by production signals.":""}</p>
+    ${c.synthetic?`<p><b>Synthetic</b> <span class="note">generated to test (${esc(Object.entries(c.synthetic).map(([k,v])=>k+": "+v).join(", "))}); it's never counted as production.</span></p>`:""}</div></div>
     ${gate}${tools}
     <div class="stack" id="rv-turns">${c.turns.map(turn).join("")||`<p class="note">No turns recorded.</p>`}</div></div>
   <div class="panel stack">

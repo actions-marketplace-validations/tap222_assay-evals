@@ -75,6 +75,21 @@ class Simulation:
     status: str  # PASS | FAIL | INVALID | ERROR
 
 
+def load_personas(path: str = "synthetic/personas.jsonl") -> List[Persona]:
+    """The personas `assay synth personas` wrote, one per tuple: [Persona(goal, traits, facts, name)]."""
+    from pathlib import Path
+    p = Path(path)
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text().splitlines():
+        if line.strip():
+            x = json.loads(line)
+            out.append(Persona(goal=x.get("goal", ""), traits=x.get("traits") or "an ordinary user",
+                               facts=x.get("facts") or {}, name=x.get("id") or "user"))
+    return out
+
+
 def _takes_history(fn: Callable) -> bool:
     try:
         ps = [p for p in inspect.signature(fn).parameters.values()
