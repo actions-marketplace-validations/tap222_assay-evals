@@ -84,6 +84,29 @@ def test_a_run_that_goes_quiet_is_abandoned_then_evaluated(app):
     assert app.get("/v1/agents/lifecycle", params=SRC).json()["abandoned"] == 1
 
 
+
+def test_each_agent_has_its_own_abandon_limit(app):
+    r = app.put("/v1/agents/limits", json={"source": "events:t", "abandon_minutes": {"research": 120, "*": 10}},
+                headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"source": "events:t", "default": 30.0, "abandon_minutes": {"*": 10.0, "research": 120.0}}
+    send(app, ev("run.start", "deep", task="research"), tool("deep", 0, "search"),
+         ev("run.start", "quick", task="support"), tool("quick", 0, "lookup"))
+    later = lambda m: datetime.utcnow() + timedelta(minutes=m)
+    assert lifecycle.abandon(app.engine, 30, now=later(11)) == 1  # support: this source's default, 10
+    assert lifecycle.abandon(app.engine, 30, now=later(60)) == 0  # research keeps thinking
+    assert lifecycle.abandon(app.engine, 30, now=later(121)) == 1
+    lifecycle.sweep(app.engine, 30)
+    assert evaluation(app, "quick")["checks"][0]["reason"] == "Never finished after step 0: no events for 10 minutes."
+    assert evaluation(app, "deep")["checks"][0]["reason"] == "Never finished after step 0: no events for 120 minutes."
+    assert app.get("/v1/agents/lifecycle", params=SRC).json()["abandon_limits"] == {"*": 10.0, "research": 120.0}
+
+    r = app.put("/v1/agents/limits", json={"abandon_minutes": {"*": None, "research": 0}}, headers=H)
+    assert r.status_code == 422 and "research" in r.json()["detail"]
+    r = app.put("/v1/agents/limits", json={"source": "events:t", "abandon_minutes": {"*": None}}, headers=H)
+    assert r.json()["abandon_minutes"] == {"research": 120.0}  # null removes it
+
+
 def test_late_data_is_evaluated_again(app):
     send(app, ev("run.start", "late"), tool("late", 0, "search", {"q": "x"}), ev("run.end", "late"))
     first = evaluation(app, "late")

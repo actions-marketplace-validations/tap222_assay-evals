@@ -444,6 +444,17 @@ cost_rates = Table(
 )
 
 
+# How long an agent's run can go quiet before it's marked abandoned (assay/lifecycle.py).
+# task "*" is the source's default; with neither, the server's ASSAY_ABANDON_MINUTES.
+agent_limits = Table(
+    "agent_limits", metadata,
+    Column("tenant", String(64), primary_key=True),
+    Column("task", String(128), primary_key=True),
+    Column("abandon_minutes", Float, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+
 api_keys = Table(
     "api_keys", metadata,
     Column("id", Integer, primary_key=True),

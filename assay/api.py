@@ -37,6 +37,13 @@ class RateIn(BaseModel):
     rates: Dict[str, Optional[float]] = Field(..., description="Rate key → value; null removes it")
 
 
+class LimitsIn(BaseModel):
+    source: Optional[str] = Field(None, description="Defaults to your own source")
+    abandon_minutes: Dict[str, Optional[float]] = Field(
+        ..., description='Agent (the run\'s task) → minutes a run can go quiet before it\'s marked abandoned; '
+                         '"*" for every other agent of this source; null removes it')
+
+
 class BackfillRequest(BaseModel):
     source: str
     days: int = Field(30, ge=1, le=180, description="How many past days to replay, one run per day")
@@ -559,7 +566,34 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         check_source(p, source)
         return lifecycle.overview(engine, _tenant(source)) | {
             "abandon_minutes": settings.abandon_minutes, "backlog_minutes": settings.backlog_minutes,
+            "abandon_limits": _limits(source),
             "sweep": scheduler.last_sweep and {k: v for k, v in scheduler.last_sweep.items() if k != "backlog"}}
+
+    def _limits(source: str) -> Dict[str, float]:
+        return {task: m for (_, task), m in sorted(lifecycle.limits(engine, _tenant(source)).items())}
+
+    @app.get("/v1/agents/limits", tags=["results"],
+             summary="How long each agent's runs can go quiet before they're marked abandoned")
+    def get_agent_limits(source: Optional[str] = None, p: Principal = Depends(require("read"))):
+        src = source or f"events:{p.tenant}"
+        check_source(p, src)
+        return {"source": src, "default": settings.abandon_minutes, "abandon_minutes": _limits(src)}
+
+    @app.put("/v1/agents/limits", tags=["operate"],
+             summary="Give a slow agent longer before its quiet runs are marked abandoned")
+    def put_agent_limits(body: LimitsIn, p: Principal = Depends(require("manage"))):
+        src = body.source or f"events:{p.tenant}"
+        check_source(p, src)
+        if not src.startswith("events:"):
+            raise HTTPException(422, "Abandon limits are for agent runs, sent as events: source events:<tenant>.")
+        bad = [k for k, m in body.abandon_minutes.items() if m is not None and not 0 < m <= 7 * 24 * 60]
+        if bad:
+            raise HTTPException(422, f"Limits are minutes, more than 0 and at most a week (10080): {', '.join(bad)}.")
+        long = [k for k in body.abandon_minutes if not k or len(k) > 128]
+        if long:
+            raise HTTPException(422, "An agent is its runs' task: 1 to 128 characters.")
+        lifecycle.set_limits(engine, _tenant(src), body.abandon_minutes)
+        return get_agent_limits(src, p)
 
     # ---------- the v1 event schema ----------
 

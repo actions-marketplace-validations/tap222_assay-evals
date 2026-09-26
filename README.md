@@ -761,7 +761,13 @@ delay. Each run goes through a lifecycle:
 - **running:** `run.start` (or its first step) has arrived, and `run.end` hasn't. It isn't
   judged half-way.
 - **ended:** `run.end` says `completed` or `failed`. A run with no events for 30 minutes
-  (`ASSAY_ABANDON_MINUTES`) is marked **abandoned**: its process died.
+  (`ASSAY_ABANDON_MINUTES`) is marked **abandoned**: its process died. An agent that's
+  quiet for longer between steps can be given its own limit, by its runs' `task`:
+
+  ```bash
+  curl -X PUT $ASSAY_URL/v1/agents/limits -H "Authorization: Bearer $ASSAY_KEY" \
+    -d '{"abandon_minutes": {"deep_research": 180, "*": 10}}'   # "*": this source's other agents; null removes one
+  ```
 - **evaluated:** in the same request that ended it, once its child runs (`parent_run_id`)
   have ended too.
 - **evaluated again:** if more events arrive after that, e.g. a late step.
@@ -779,6 +785,7 @@ marks quiet runs abandoned and evaluates anything left over.
 | Endpoint | Returns |
 |---|---|
 | `GET /v1/agents/lifecycle?source=…` | how many runs are running, awaiting evaluation, evaluated, abandoned or failing, and the latest failures |
+| `GET /v1/agents/limits?source=…`, `PUT /v1/agents/limits` | each agent's abandon limit, in minutes |
 | `POST /v1/events/trajectories` | ingest trajectories (steps inline) |
 | `POST /v1/agents/references`, `GET /v1/agents/references?source=…` | what cases expect |
 | `GET /v1/agents/runs?source=…` | agent runs, newest first |

@@ -4,8 +4,8 @@ An agent can take ten seconds or five minutes. Evaluating after a fixed delay
 judges the slow ones half-way. So a run moves through states instead:
 
   running    run.start (or its first step) arrived; run.end hasn't
-  ended      run.end said completed or failed, or the run went quiet for
-             ABANDON_MINUTES and is marked abandoned (the process died)
+  ended      run.end said completed or failed, or the run went quiet for its
+             agent's abandon limit and is marked abandoned (the process died)
   evaluated  checked once it ended, and once its child runs ended too
   again      events arriving after the evaluation (a late step) queue it again
 
@@ -17,6 +17,11 @@ Every run gets the checks that need no reference: it finished, it kept the
 critical path contracts, it didn't loop, and no tool error went unrecovered. A
 test-case run also gets its case's checks (assay/agents.py), stored as its test
 run's results, so an evaluation run fills in as its cases finish.
+
+The abandon limit is per agent (the run's task): an agent that thinks for an hour
+between steps can be given longer than one that answers in seconds. A source sets
+them with PUT /v1/agents/limits; task "*" is its default, and the server's
+ASSAY_ABANDON_MINUTES applies to the rest.
 """
 from __future__ import annotations
 
@@ -45,6 +50,35 @@ def _heads():
 
 def _last_event(t):
     return func.coalesce(t.c.updated_at, t.c.finished_at, t.c.started_at)
+
+
+Limits = Dict[tuple, float]  # (tenant, task) → minutes; task "*" is the tenant's default
+
+
+def limits(engine: Engine, tenant: Optional[str] = None) -> Limits:
+    t = store.agent_limits
+    q = select(t.c.tenant, t.c.task, t.c.abandon_minutes)
+    if tenant is not None:
+        q = q.where(t.c.tenant == tenant)
+    with engine.connect() as conn:
+        return {(r.tenant, r.task): r.abandon_minutes for r in conn.execute(q)}
+
+
+def limit_for(lim: Limits, default: float, tenant: str, task: Optional[str]) -> float:
+    """How long a run of this agent can go quiet before it's abandoned."""
+    return lim.get((tenant, task or "")) or lim.get((tenant, "*")) or default
+
+
+def set_limits(engine: Engine, tenant: str, minutes: Dict[str, Optional[float]]) -> Limits:
+    """Set (or, with None, remove) agents' abandon limits. Returns the tenant's limits."""
+    t = store.agent_limits
+    now = datetime.utcnow()
+    with engine.begin() as conn:
+        for task, m in minutes.items():
+            conn.execute(t.delete().where(and_(t.c.tenant == tenant, t.c.task == task)))
+            if m is not None:
+                conn.execute(t.insert().values(tenant=tenant, task=task, abandon_minutes=m, updated_at=now))
+    return limits(engine, tenant)
 
 
 def pending(engine: Engine, tenant: Optional[str] = None, ids: Optional[Iterable[str]] = None,
@@ -136,6 +170,7 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
     for h in heads:
         by_tenant[h["tenant"]].append(h)
     for tenant, hs in by_tenant.items():
+        lim = limits(engine, tenant)
         source = EventsSource(engine, tenant)
         rules = contracts.load(engine, source.name)
         trajs = source.trajectories([h["trajectory_id"] for h in hs])
@@ -152,7 +187,8 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
             if traj is None:
                 continue
             try:
-                found, case_rows = _checks_for_run(tenant, h, traj, rules, refs, abandon_minutes, abandoned_why)
+                found, case_rows = _checks_for_run(tenant, h, traj, rules, refs,
+                                                   limit_for(lim, abandon_minutes, tenant, h["task"]), abandoned_why)
             except Exception as exc:  # one run that can't be checked mustn't hold up the rest, or itself
                 log.exception("Couldn't evaluate %s", h["trajectory_id"])
                 found, case_rows = [{"check": "evaluation", "status": "error",
@@ -178,20 +214,23 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
 
 def abandon(engine: Engine, minutes: float = ABANDON_MINUTES, tenant: Optional[str] = None,
             ids: Optional[Iterable[str]] = None, now: Optional[datetime] = None) -> int:
-    """Mark running runs abandoned: quiet for `minutes`, or (ids) known to be over, e.g. the
-    process that ran them has exited. Returns how many."""
+    """Mark running runs abandoned: quiet for their agent's limit (`minutes` where none is set),
+    or (ids) known to be over, e.g. the process that ran them has exited. Returns how many."""
     t = _heads()
     now = now or datetime.utcnow()
     cond = [t.c.status == "running"]
+    lim = {} if ids is not None else limits(engine, tenant)
     if ids is not None:
         cond.append(t.c.trajectory_id.in_(list(ids)))
-    else:
-        cond.append(_last_event(t) < now - timedelta(minutes=minutes))
+    else:  # quiet for at least the shortest limit; each run's own is checked below
+        cond.append(_last_event(t) < now - timedelta(minutes=min([minutes, *lim.values()])))
     if tenant is not None:
         cond.append(t.c.tenant == tenant)
     with engine.begin() as conn:
-        rows = conn.execute(select(t.c.tenant, t.c.trajectory_id, _last_event(t).label("last"))
+        rows = conn.execute(select(t.c.tenant, t.c.trajectory_id, t.c.task, _last_event(t).label("last"))
                             .where(and_(*cond))).all()
+        if ids is None:
+            rows = [r for r in rows if r.last < now - timedelta(minutes=limit_for(lim, minutes, r.tenant, r.task))]
         for r in rows:
             key = lambda tbl, col: and_(tbl.c.tenant == r.tenant, col == r.trajectory_id)
             # finished_at is the last sign of life; updated_at moves, so it's evaluated after this.
