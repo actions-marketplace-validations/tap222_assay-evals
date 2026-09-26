@@ -132,10 +132,27 @@ svg.workflow{width:100%;height:auto;display:block}
 svg.workflow .wnode{cursor:pointer}
 svg.workflow .wnode:hover rect:first-child,svg.workflow .wnode:focus rect:first-child{filter:drop-shadow(0 2px 6px rgba(0,0,0,.18))}
 svg.workflow .wnode:focus{outline:none}
-svg.workflow .wtitle{font:600 13px var(--mono);fill:var(--ink)}
-svg.workflow .wsub{font:11px var(--body);fill:var(--muted)}
-svg.workflow .wbadge{font:600 11px var(--mono);fill:#fff}
-svg.workflow .elabel{font:11px var(--mono);fill:var(--muted)}
+svg.workflow .wtitle{font:600 14px var(--body);fill:var(--ink)}
+svg.workflow .wsub{font:10.5px var(--mono);fill:var(--muted)}
+svg.workflow .wbadge{font:700 9.5px var(--mono);fill:var(--surface);letter-spacing:.04em}
+svg.workflow .elabel{font:10.5px var(--mono);fill:var(--muted)}
+svg.workflow .wbar{font:10.5px var(--mono);fill:var(--good)}
+svg.workflow .wdia{font:700 12px var(--body);fill:var(--surface)}
+svg.workflow .wdia2{font:9.5px var(--mono);fill:var(--surface);opacity:.9}
+svg.workflow .whead{font:700 30px var(--display);fill:var(--ink);letter-spacing:-.01em}
+svg.workflow .wlede{font:12px var(--mono);fill:var(--muted)}
+svg.workflow .wlegend{font:11px var(--mono);fill:var(--ink-2)}
+svg.workflow .etitle{font:700 14px var(--body);fill:var(--accent-ink)}
+svg.workflow .edetail{font:10.5px var(--mono);fill:var(--ink-2)}
+svg.workflow .egroup{font:11px var(--mono);fill:var(--c-fb)}
+svg.workflow .ekind{font:600 9.5px var(--mono);fill:var(--c-fb);letter-spacing:.05em}
+svg.workflow .ctitle{font:700 14px var(--body);fill:var(--ink)}
+svg.workflow .ecard{cursor:default}
+svg.workflow.linking .wnode:not(.hl),svg.workflow.linking .ecard:not(.hl){opacity:.28;transition:opacity .15s}
+svg.workflow .ecard.hl rect:first-child{stroke:var(--accent);stroke-width:2;stroke-dasharray:none}
+svg.workflow.compact .wtitle{font-size:12.5px}
+svg.workflow.compact .wsub{font-size:9.5px}
+svg.workflow.compact .wbadge{font-size:8.5px}
 table.lineage th.hl,table.lineage td.hl{box-shadow:inset 2px 0 0 var(--accent),inset -2px 0 0 var(--accent)}
 .pathbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .pathbar button{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 10px;font:12px var(--mono);cursor:pointer}
@@ -358,7 +375,7 @@ function chart(h,m){
 async function loadSources(){
   const s=await api("/v1/sources");
   const all=[...new Set([...s.configured,...s.with_results])];
-  const keep=store.get("assay-source");
+  const keep=new URLSearchParams(location.search).get("source")||store.get("assay-source");  // ?source= for a link to one pipeline
   $("#source").innerHTML=all.length?all.map(x=>`<option ${x===keep?"selected":""}>${esc(x)}</option>`).join(""):`<option value="">No sources yet</option>`;
 }
 async function refresh(){
@@ -372,8 +389,8 @@ async function refresh(){
 function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
-  ["overview","workflow","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
-  if(["failures","agents","learn","trace"].includes(tab()))render();
+  ["overview","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
+  if(["failures","agents","learn","trace","workflow"].includes(tab()))render();  // drawn from events, no measure run needed
 }
 
 /* ---------- overview ---------- */
@@ -984,62 +1001,254 @@ const HEALTH={ok:"var(--good)",warn:"var(--warn)",bad:"var(--bad)"};
 const dominant=v=>Object.entries(v||{}).sort((a,b)=>b[1]-a[1])[0]?.[0];
 // The pipeline as a graph. Ranks go left to right and wrap into rows so a
 // 20-step pipeline stays readable; steps sharing a rank (branches) stack.
-function flowGraph(g,{selected=null,compact=false}={}){
-  const nodes=g.nodes,byId=Object.fromEntries(nodes.map(n=>[n.id,n]));
-  const ranks=[...new Set(nodes.map(n=>Math.round(n.position)))].sort((a,b)=>a-b);
-  const perRow=compact?7:5,BW=compact?150:196,BH=compact?58:92,GX=compact?34:52,GY=compact?46:70,PAD=14;
-  const col={},rowOf={},stack={};
-  ranks.forEach((r,i)=>{const row=Math.floor(i/perRow);nodes.filter(n=>Math.round(n.position)===r).forEach((n,k)=>{col[n.id]=i%perRow;rowOf[n.id]=row;stack[n.id]=k})});
-  const rows=Math.max(...Object.values(rowOf))+1;
-  const maxStack=r=>Math.max(1,...nodes.filter(n=>rowOf[n.id]===r).map(n=>stack[n.id]+1));
-  const rowY=[];let yAcc=PAD;for(let r=0;r<rows;r++){rowY.push(yAcc);yAcc+=maxStack(r)*(BH+14)+GY}
-  const W=PAD*2+perRow*BW+(perRow-1)*GX,H=yAcc-GY+PAD;
-  const pos=id=>({x:PAD+col[id]*(BW+GX),y:rowY[rowOf[id]]+stack[id]*(BH+14)});
-  let s="";
-  g.edges.forEach(e=>{if(!byId[e.from]||!byId[e.to])return;const a=pos(e.from),b=pos(e.to);
-    const w=1+5*e.share,hot=selected&&(e.from===selected||e.to===selected),viol=e.violations>0;
-    let d,lx,ly;
-    if(rowOf[e.from]===rowOf[e.to]&&col[e.to]>col[e.from]){const x1=a.x+BW,y1=a.y+BH/2,x2=b.x,y2=b.y+BH/2;d=`M${x1},${y1} C${x1+GX/2},${y1} ${x2-GX/2},${y2} ${x2},${y2}`;lx=(x1+x2)/2;ly=(y1+y2)/2-6}
-    else{const x1=a.x+BW/2,y1=a.y+BH,x2=b.x+BW/2,y2=b.y;const my=rowY[rowOf[e.to]]-GY/2;d=`M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;lx=(x1+x2)/2;ly=my-4}
-    s+=`<path d="${d}" fill="none" stroke="${viol?"var(--bad)":hot?"var(--accent)":"var(--line-strong)"}" stroke-width="${Math.max(w,viol?2:0).toFixed(1)}" opacity="${hot||viol?1:.8}" ${viol?`stroke-dasharray="6 4"`:""} marker-end="url(#arrow)">${viol?`<title>${e.violations} document(s) broke a path contract here</title>`:""}</path>`;
-    if(e.share<0.98&&!compact)s+=`<text x="${lx}" y="${ly}" text-anchor="middle" class="elabel">${e.documents.toLocaleString()} (${Math.round(e.share*100)}%)</text>`});
-  nodes.forEach(n=>{const {x,y}=pos(n.id),sel=n.id===selected,err=n.errors||0,v=dominant(n.errors_by_verdict);
-    const term=n.kind==="start"||n.kind==="end",cv=n.contract_violations||[];
-    const cvN=cv.reduce((a,v)=>a+v.documents,0);
-    const cvText=cv.every(v=>v.kind==="must_include")?`✕ ${cvN} skipped it`:`✕ ${cvN} broke ${cv.length>1?cv.length+" contracts":"contract"}`;
-    s+=`<g class="wnode" data-step="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.id)}">
-      <rect x="${x}" y="${y}" width="${BW}" height="${BH}" rx="${term?BH/2:8}" fill="var(--surface)" stroke="${sel?"var(--accent)":term?"var(--line-strong)":HEALTH[n.health]}" stroke-width="${sel?3:term?1.2:2}"/>
-      ${term?"":`<rect x="${x}" y="${y}" width="5" height="${BH}" rx="2" fill="${HEALTH[n.health]}"/>`}
-      <text x="${x+(term?BW/2:14)}" y="${y+(compact?20:22)}" text-anchor="${term?"middle":"start"}" class="wtitle">${esc(term?(n.kind==="start"?"Received":"Done"):n.id)}</text>
-      ${term?`<text x="${x+BW/2}" y="${y+(compact?38:44)}" text-anchor="middle" class="wsub">${n.kind==="start"?`${n.documents.toLocaleString()} documents`:`${n.documents.toLocaleString()} completed · ${n.open_documents.toLocaleString()} open`}</text>
-        ${n.kind==="end"&&err&&!compact?`<text x="${x+BW/2}" y="${y+64}" text-anchor="middle" class="wsub" style="fill:var(--warn)">${err} error${err>1?"s":""} after the pipeline</text>`:""}`
-      :`<text x="${x+14}" y="${y+(compact?38:42)}" class="wsub">${n.documents.toLocaleString()} docs · ${(n.failure_rate*100).toFixed(1)}% failed${n.noop_rate>0.5?" · did nothing":""}</text>
-        ${compact?"":`<text x="${x+14}" y="${y+60}" class="wsub">${n.duration_p95_s!=null?`p95 ${esc(fmt(n.duration_p95_s,"seconds"))}`:""}${n.cost_per_document?` · ${esc(money(n.cost_per_document))}/doc`:""}${n.fallback_rate?` · ${(n.fallback_rate*100).toFixed(0)}% fallback`:""}</text>
-        ${n.prompt?`<text x="${x+14}" y="${y+78}" class="wsub" style="fill:${n.regression?"var(--bad)":"var(--accent-ink)"}">${n.regression?"⚠ ":""}${esc(n.prompt)}</text>`:""}`}`}
-      ${err?`<g><rect x="${x+BW-(compact?38:46)}" y="${y-9}" width="${compact?44:54}" height="20" rx="10" fill="${VERDICT[v]?.[1]||"var(--bad)"}"/><text x="${x+BW-(compact?16:19)}" y="${y+5}" text-anchor="middle" class="wbadge">${err} err</text></g>`:""}
-      ${(n.open_alerts||[]).length?`<circle cx="${x+10}" cy="${y+9}" r="6" fill="var(--bad)"><title>${n.open_alerts.length} open alert(s)</title></circle>`:""}
-      ${cv.length?`<rect x="${x-5}" y="${y-5}" width="${BW+10}" height="${BH+10}" rx="${term?BH/2+5:12}" fill="none" stroke="var(--bad)" stroke-width="1.5" stroke-dasharray="5 4"/>
-        <g><rect x="${x+10}" y="${y+BH-10}" width="${cvText.length*6.8+16}" height="20" rx="10" fill="${cv.some(v=>v.severity==="critical")?"var(--bad)":"var(--warn)"}"/><text x="${x+18}" y="${y+BH+4}" class="wbadge">${esc(cvText)}</text>
-        <title>${esc(cv.map(v=>`${v.label}: ${v.documents} document(s)`).join("\n"))}</title></g>`:""}
-    </g>`});
-  return `<svg class="workflow" viewBox="0 0 ${W} ${H}" style="min-width:${compact?Math.min(W,760):Math.min(W,900)}px" role="img" aria-label="Pipeline workflow">
-    <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line-strong)"/></marker></defs>${s}</svg>`;
+// The pipeline as a diagram, from what documents actually did (GET /v1/workflow). The most-travelled
+// path runs left to right, wrapping into rows; a step that splits documents gets a routing diamond,
+// with the branch hanging below the row; rare side paths sit below too, dashed red if they break a
+// contract. Steps that report success but do no work are grey stubs; steps that call models share a
+// bar that names the models. Health is the border; errors, alerts and regressions are pills.
+function flowGraph(g,{selected=null,compact=false,days=null}={}){
+  const byId=Object.fromEntries(g.nodes.map(n=>[n.id,n])),outE={},inE={};
+  g.nodes.forEach(n=>{outE[n.id]=[];inE[n.id]=[]});
+  g.edges.forEach(e=>{if(byId[e.from]&&byId[e.to]){outE[e.from].push(e);inE[e.to].push(e)}});
+  const total=Math.max(1,g.documents||0),C=compact;
+  const agent=(g.evaluation?.components||[]).some(c=>c.kind==="agents"),unit=agent?"run":"document",docs=agent?"runs":"docs";
+  const BW=C?148:176,BH=C?52:96,TW=C?96:124,GX=C?30:42,DG=C?84:150,DS=C?40:56,MAXW=C?1120:1340,PAD=C?10:26;
+  const HEAD=C?0:78,BAR=C?16:22,LANE_GAP=C?20:30,ROW_GAP=C?40:58;
+  // The main path: from "received", always the edge most documents took.
+  const start=g.nodes.find(n=>n.kind==="start"),end=g.nodes.find(n=>n.kind==="end");
+  const main=[],onMain=new Set();let cur=start;
+  while(cur&&!onMain.has(cur.id)){main.push(cur.id);onMain.add(cur.id);if(cur.kind==="end")break;
+    const nx=outE[cur.id].filter(e=>!onMain.has(e.to)).sort((a,b)=>b.documents-a.documents)[0];cur=nx&&byId[nx.to]}
+  if(end&&!onMain.has(end.id)){main.push(end.id);onMain.add(end.id)}
+  const next=Object.fromEntries(main.map((id,i)=>[id,main[i+1]]));
+  const isStub=n=>n.kind!=="start"&&n.kind!=="end"&&n.noop_rate>0.5;
+  const isModel=n=>(n.calls||0)>0||(n.models||[]).length>0;
+  // Off the main path: a branch (5% or more of documents) routes through a diamond; the rest are side paths.
+  const off=g.nodes.filter(n=>!onMain.has(n.id));
+  const anchor={},branchOf={};
+  off.forEach(n=>{const e=inE[n.id].filter(e=>onMain.has(e.from)).sort((a,b)=>b.documents-a.documents)[0]
+    ||inE[n.id].sort((a,b)=>b.documents-a.documents)[0];anchor[n.id]=e?e.from:main[0];
+    if(e&&onMain.has(e.from)&&e.documents/total>=0.05)(branchOf[e.from]??=[]).push(n.id)});
+  const routes=id=>!!branchOf[id];
+  // Rows: pack the main path left to right.
+  const W0=id=>byId[id].kind==="start"?TW:BW;
+  const rows=[[]];let x=PAD;
+  main.forEach((id,i)=>{const gap=i===0?0:(routes(main[i-1])?DG:GX),w=W0(id),nx=main[i+1];
+    const need=routes(id)&&nx?w+DG+W0(nx):w;  // a routing step keeps the step after it on its row
+    if(rows[rows.length-1].length&&x+gap+need>MAXW-PAD){rows.push([]);x=PAD}
+    else x+=rows[rows.length-1].length?gap:0;
+    rows[rows.length-1].push({id,x,w});x+=w});
+  const P={};rows.forEach((r,ri)=>r.forEach(c=>{P[c.id]={x:c.x,w:c.w,row:ri}}));
+  // Off-path nodes sit by the main step after their anchor: a branch below the row, a rare side path above it.
+  const isBranch=id=>(branchOf[anchor[id]]||[]).includes(id);
+  const below={},above={};off.forEach(n=>{const s=next[anchor[n.id]]||anchor[n.id];((isBranch(n.id)?below:above)[s]??=[]).push(n.id)});
+  const hasBar=r=>r.some(c=>isModel(byId[c.id])),has=(m,r)=>r.some(c=>(m[c.id]||[]).length);
+  let y=PAD+HEAD;const rowY=[],barY=[],laneY=[],topY=[];
+  rows.forEach((r,ri)=>{topY.push(has(above,r)?y:null);if(has(above,r))y+=BH+LANE_GAP;
+    rowY.push(y);let b=y+BH;barY.push(hasBar(r)?b+(C?10:14):null);if(hasBar(r))b=barY[ri]+BAR;
+    laneY.push(has(below,r)?b+LANE_GAP:null);if(has(below,r))b=laneY[ri]+BH+(C?16:24);y=b+ROW_GAP});
+  main.forEach(id=>{P[id].y=rowY[P[id].row]});
+  const hang=(m,ys)=>{const lanes={};main.filter(s=>m[s]).forEach(s=>m[s].forEach(id=>{const p=P[s],r=p.row;
+    const x0=Math.max(p.x,(lanes[r]??-1e9)+16);P[id]={x:x0,w:BW,y:ys[r],row:r,off:true};lanes[r]=x0+BW}))};
+  hang(below,laneY);hang(above,topY);
+  const Wd=Math.max(...Object.values(P).map(p=>p.x+p.w))+PAD+(C?16:24),Ht=y-ROW_GAP+PAD+(C?0:44);
+  const cx=id=>P[id].x+P[id].w/2,cy=id=>P[id].y+BH/2;
+  // Orthogonal paths with rounded corners.
+  const ortho=(pts,r=8)=>{let d=`M${pts[0][0]},${pts[0][1]}`;for(let i=1;i<pts.length-1;i++){const [x0,y0]=pts[i-1],[x1,y1]=pts[i],[x2,y2]=pts[i+1];
+      const r1=Math.min(r,Math.hypot(x1-x0,y1-y0)/2,Math.hypot(x2-x1,y2-y1)/2),ux=Math.sign(x1-x0),uy=Math.sign(y1-y0),vx=Math.sign(x2-x1),vy=Math.sign(y2-y1);
+      d+=` L${x1-ux*r1},${y1-uy*r1} Q${x1},${y1} ${x1+vx*r1},${y1+vy*r1}`}
+    const l=pts[pts.length-1];return d+` L${l[0]},${l[1]}`};
+  const pct=v=>v>=0.995?"100%":v<0.01?"<1%":`${Math.round(v*100)}%`;
+  let edges="",labels="",nodesS="",bars="";
+  const arrow=(pts,{bad=false,dashed=false,muted=false}={})=>{edges+=`<path d="${ortho(pts)}" fill="none" stroke="${bad?"var(--bad)":muted?"var(--line-strong)":"var(--ink-2)"}" stroke-width="${C?1.3:1.6}" ${dashed||bad?`stroke-dasharray="5 4"`:""} marker-end="url(#${bad?"arrow-bad":muted?"arrow-muted":"arrow"})"/>`};
+  const label=(x,y,t,{anchor="middle",color="var(--muted)",bold=false}={})=>{if(!C)labels+=`<text x="${x}" y="${y}" text-anchor="${anchor}" class="elabel" style="fill:${color}${bold?";font-weight:600":""}">${esc(t)}</text>`};
+  const drawn=new Set(),mark=e=>drawn.add(e.from+"→"+e.to),edge=(a,b)=>g.edges.find(e=>e.from===a&&e.to===b);
+  // Main path, and each routing diamond.
+  const diamond={};
+  main.forEach((id,i)=>{const nx=main[i+1];if(!nx)return;const a=P[id],b=P[nx],e=edge(id,nx);if(e)mark(e);
+    if(routes(id)&&a.row===b.row){const dx=a.x+a.w+DG/2,dy=cy(id);diamond[id]={x:dx,y:dy};
+      arrow([[a.x+a.w,dy],[dx-DS/2-1,dy]]);arrow([[dx+DS/2,dy],[b.x-2,cy(nx)]]);
+      if(e)label((dx+DS/2+b.x)/2,dy-8,pct(e.documents/total),{color:"var(--good)",bold:true});return}
+    if(a.row===b.row){arrow([[a.x+a.w,cy(id)],[b.x-2,cy(nx)]],{bad:e&&e.violations>0});
+      if(e&&e.documents/total<0.9)label((a.x+a.w+b.x)/2,cy(id)-8,pct(e.documents/total));return}
+    const wy=(topY[b.row]??rowY[b.row])-ROW_GAP/2,rx=a.x+a.w+(C?12:18);  // a row wraps: down the right, back along the gap
+    arrow([[a.x+a.w,cy(id)],[rx,cy(id)],[rx,wy],[cx(nx),wy],[cx(nx),b.y-2]],{bad:e&&e.violations>0})});
+  // Branches and side paths.
+  off.forEach(n=>{const id=n.id,p=P[id],a=anchor[id],inn=edge(a,id)||inE[id][0];if(!inn)return;mark(inn);
+    const bad=inn.violations>0||(n.contract_violations||[]).length>0,share=inn.documents/total,d=diamond[a];
+    if(d&&branchOf[a]?.includes(id)){const k0=branchOf[a].indexOf(id);
+      const clear=p.x>d.x&&!Object.entries(P).some(([o,q])=>o!==id&&q.off&&q.y===p.y&&q.x<p.x&&q.x+q.w>d.x);  // nothing in between
+      const k=clear?0:Math.max(1,k0);
+      if(k===0)arrow([[d.x,d.y+DS/2],[d.x,cy(id)],[p.x-2,cy(id)]]);  // the first goes straight in
+      else{const bus=p.y+BH+(C?9:13)+(k-1)*(C?4:5),tx=p.x+Math.min(28,p.w/4);  // the rest: along under the lane, up into the box
+        arrow([[d.x,d.y+DS/2],[d.x,bus],[tx,bus],[tx,p.y+BH+2]])}
+      label(k===0?p.x-8:p.x+Math.min(28,p.w/4)+6,k===0?cy(id)-7:p.y+BH+(C?9:13)+(k-1)*(C?4:5)-4,`${pct(share)}`,
+        {anchor:k===0?"end":"start",color:"var(--good)",bold:true})}
+    else{const up=p.y<P[a].y,sx=Math.min(P[a].x+P[a].w-(C?14:22),p.x-18);  // a side path: up out of its step, across
+      arrow([[sx,up?P[a].y:P[a].y+BH],[sx,cy(id)],[p.x-2,cy(id)]],{bad});
+      label(sx-6,up?P[a].y-8:P[a].y+BH+14,`${pct(share)} · ${inn.documents.toLocaleString()}`,{anchor:"end",color:bad?"var(--bad)":"var(--muted)"})}
+    const back=outE[id].sort((x,y)=>y.documents-x.documents)[0];if(!back||!P[back.to])return;mark(back);
+    const t=P[back.to];
+    const bx=p.x+Math.min(p.w,t.w)*0.28;  // clear of the pills along the edges
+    if(t.x<=bx&&bx<=t.x+t.w&&!P[back.to].off)arrow(p.y<t.y?[[bx,p.y+BH],[bx,t.y-2]]:[[bx,p.y],[bx,t.y+BH+2]],{bad:back.violations>0});
+    else{const tx=t.x+t.w*0.72;arrow([[p.x+p.w,cy(id)],[tx,cy(id)],[tx,t.row===p.row?t.y+BH+2:t.y-2]],{bad:back.violations>0})}});
+  // What's left: rare edges to the end are counted on it; anything else is drawn thin and dashed.
+  let early=0;const track={};g.edges.forEach(e=>{if(drawn.has(e.from+"→"+e.to)||!P[e.from]||!P[e.to])return;
+    if(e.to===end?.id&&e.documents/total<0.05){early+=e.documents;return}
+    if(e.documents/total<0.05&&!e.violations)return;
+    const a=P[e.from],b=P[e.to],r=Math.min(a.row,b.row),k=track[r]=(track[r]??0)+1;
+    const top=(a.off||b.off?Math.min(a.y,b.y):(topY[r]??rowY[r]))-(C?8:12)-(k-1)*(C?7:10);
+    arrow([[cx(e.from),a.y],[cx(e.from),top],[cx(e.to),top],[cx(e.to),b.y-2]],{muted:true,bad:e.violations>0});
+    label((cx(e.from)+cx(e.to))/2,top-5,`${pct(e.documents/total)} · ${e.documents.toLocaleString()}`)});
+  // Model-call bars: one per run of neighbouring steps that call models.
+  rows.forEach((r,ri)=>{let grp=[];const flush=()=>{if(!grp.length)return;const ns=grp.map(c=>byId[c.id]),x0=grp[0].x,x1=grp[grp.length-1].x+grp[grp.length-1].w,by=barY[ri];
+      const models=[...new Set(ns.flatMap(n=>n.models||[]))],fb=Math.max(0,...ns.map(n=>n.fallback_rate||0)),cost=ns.reduce((s,n)=>s+(n.cost_per_document||0),0);
+      grp.forEach(c=>{bars+=`<line x1="${c.x+c.w/2}" y1="${rowY[ri]+BH}" x2="${c.x+c.w/2}" y2="${by}" stroke="var(--good)" stroke-width="1.3"/>`});
+      const fits=t=>t.length*6.35<=x1-x0-16,tail=`${fb?` · ${pct(fb)} fallback`:""}${cost?` · ${money(cost)}/doc`:""}`;
+      const text=[`model calls: ${models.join(" · ")||"unnamed"}${tail}`,`${models.join(" · ")}${tail}`,`model calls: ${models.length} model${models.length===1?"":"s"}${tail}`,`${models.length} model${models.length===1?"":"s"}${tail}`,
+        `${models.length} model${models.length===1?"":"s"}`].find(t=>C?false:fits(t))||`model calls · ${models.length}`;
+      bars+=`<g><rect x="${x0}" y="${by}" width="${x1-x0}" height="${BAR}" rx="5" fill="var(--good-bg)" stroke="var(--good)" stroke-width="1"/>
+        <text x="${(x0+x1)/2}" y="${by+BAR/2+4}" text-anchor="middle" class="wbar">${esc(text)}</text><title>${esc(ns.map(n=>`${n.id}: ${(n.models||[]).join(", ")||"model calls"}`).join("\n"))}</title></g>`;grp=[]};
+    r.forEach(c=>{if(isModel(byId[c.id]))grp.push(c);else flush()});flush()});
+  // Where the evaluation connects (GET /v1/workflow's evaluation): per step, the parts that touch it.
+  const EV=!C&&g.evaluation,comps=EV?g.evaluation.components.filter(c=>c.kind!=="gates"):[],touches={};
+  comps.forEach((c,i)=>c.steps.forEach(sid=>(touches[sid]??=[]).push(i)));
+  // Steps.
+  const pill=(x,y,t,fill,title)=>{const w=t.length*(C?5.6:6.4)+(C?10:14);return {w,s:`<g><rect x="${x-w}" y="${y}" width="${w}" height="${C?15:18}" rx="${C?7.5:9}" fill="${fill}"/><text x="${x-w/2}" y="${y+(C?11:13)}" text-anchor="middle" class="wbadge">${esc(t)}</text>${title?`<title>${esc(title)}</title>`:""}</g>`}};
+  const pretty=id=>{const s=id.replace(/[_-]+/g," ");return s.charAt(0).toUpperCase()+s.slice(1)};
+  Object.entries(P).forEach(([id,p])=>{const n=byId[id],{x,y,w}=p,sel=id===selected,stub=isStub(n),cv=n.contract_violations||[];
+    const term=n.kind==="start"||n.kind==="end";
+    const stroke=sel?"var(--accent)":n.kind==="end"?"var(--good)":stub?"var(--muted)":n.health==="bad"?"var(--bad)":n.health==="warn"?"var(--warn)":"var(--line-strong)";
+    const fill=n.kind==="end"?"var(--good-bg)":stub?"var(--sunk)":"var(--surface)";
+    let lines=[];
+    if(n.kind==="start")lines=[`${n.documents.toLocaleString()} ${unit}s`];
+    else if(n.kind==="end")lines=[`${n.documents.toLocaleString()} done · ${(n.open_documents||0).toLocaleString()} open`,early&&!C?`${early.toLocaleString()} ended early`:""];
+    else if(stub)lines=[`${C?"no work":"does no work"} · ${(n.runs||n.documents).toLocaleString()} runs`,C?"":"reports success anyway"];
+    else lines=[`${n.documents.toLocaleString()} ${docs} · ${(n.failure_rate*100).toFixed(1)}% failed`,
+      C?"":[n.duration_p95_s!=null?`p95 ${fmt(n.duration_p95_s,"seconds")}`:"",n.cost_per_document?`${money(n.cost_per_document)}/doc`:""].filter(Boolean).join(" · "),
+      C?"":n.prompt?(n.regression?`⚠ ${n.prompt}`:n.prompt):""];
+    lines=lines.filter(Boolean);if(n.kind==="end"&&!C)lines=lines.slice(0,2);
+    const title=n.kind==="start"?"Received":n.kind==="end"?"Done":pretty(id);
+    nodesS+=`<g class="wnode" data-step="${esc(id)}" tabindex="0" role="button" aria-label="${esc(title)}">
+      <rect x="${x}" y="${y}" width="${w}" height="${BH}" rx="${n.kind==="start"?BH/2:8}" fill="${fill}" stroke="${stroke}" stroke-width="${sel?2.6:n.health==="bad"&&!term?1.9:1.3}" ${stub?`stroke-dasharray="5 4"`:""}/>
+      <text x="${x+w/2}" y="${y+(C?20:26)}" text-anchor="middle" class="wtitle"${stub?` style="fill:var(--muted)"`:""}>${esc(title.length>(C?17:21)?title.slice(0,C?16:20)+"…":title)}</text>
+      ${lines.map((l,i)=>`<text x="${x+w/2}" y="${y+(C?36:47)+i*15}" text-anchor="middle" class="wsub"${l.startsWith("⚠ ")?` style="fill:var(--bad)"`:l===n.prompt?` style="fill:var(--accent-ink)"`:""}>${esc(l.length>(C?22:26)?l.slice(0,C?21:25)+"…":l)}</text>`).join("")}
+      <title>${esc([id,...lines].join("\n"))}</title>`;
+    let px=x+w-8;const py=y-(C?8:10);  // pills, right to left along the top edge
+    const add=pl=>{nodesS+=pl.s;px-=pl.w+5};
+    if(n.errors)add(pill(px,py,`${n.errors} ERR`,"var(--bad)",Object.entries(n.errors_by_verdict||{}).map(([k,v])=>`${(VERDICT[k]||[k])[0]}: ${v}`).join("\n")||`${n.errors} reported errors started here`));
+    if((n.open_alerts||[]).length&&!C)add(pill(px,py,`${n.open_alerts.length} ALERT${n.open_alerts.length>1?"S":""}`,"var(--warn)",n.open_alerts.map(a=>a.message).join("\n")));
+    if(stub&&!C)add(pill(px,py,"STUB","var(--muted)","Reports success on every document and does no work"));
+    if(EV&&(touches[id]||[]).length){const st=g.evaluation.steps[id]||{},why=[st.checked_fields?.length?`checked: ${st.checked_fields.join(", ")}`:"",
+        st.contracts?.length?`contracts: ${st.contracts.join("; ")}`:"",st.measures?.length?`${st.measures.length} measures sliced by this step`:"",
+        st.prompts?.length?`prompts: ${st.prompts.join(", ")}`:"",st.errors?`${st.errors} reported errors start here`:""].filter(Boolean).join("\n");
+      add(pill(px,py,`⊙ ${touches[id].length}`,"var(--accent)",`Assay evaluates this step (${touches[id].length} parts):\n${why}`))}
+    if(cv.length){const cvN=cv.reduce((a,v)=>a+v.documents,0),t=cv.every(v=>v.kind==="must_include")?`✕ ${cvN} skipped it`:`✕ ${cvN} broke a contract`;
+      nodesS+=`<rect x="${x-5}" y="${y-5}" width="${w+10}" height="${BH+10}" rx="12" fill="none" stroke="var(--bad)" stroke-width="1.4" stroke-dasharray="5 4"/>`;
+      const pl=pill(x+w-(C?6:10),y+BH-(C?7:9),t,"var(--bad)",cv.map(v=>`${v.label}: ${v.documents} document(s)`).join("\n"));nodesS+=pl.s}
+    nodesS+=`</g>`});
+  // Routing diamonds, on top of the arrows into them.
+  let dia="";Object.entries(diamond).forEach(([id,d])=>{const h=DS/2,ways=1+(branchOf[id]||[]).length;
+    dia+=`<g><polygon points="${d.x},${d.y-h} ${d.x+h},${d.y} ${d.x},${d.y+h} ${d.x-h},${d.y}" fill="var(--good)"/>
+      <text x="${d.x}" y="${d.y+(C?3:1)}" text-anchor="middle" class="wdia">${C?"route":"routes"}</text>${C?"":`<text x="${d.x}" y="${d.y+12}" text-anchor="middle" class="wdia2">${ways} ways</text>`}
+      <title>${esc(`After ${id}, documents go ${ways} ways`)}</title></g>`});
+  let evalS="",Hf=Ht;
+  if(EV){const top=Ht-(C?0:44)-PAD+6,mid=Wd/2,AW=Math.min(640,Wd-2*PAD),AH=54,ay=top+46;
+    const ev=g.evaluation,cn=ev.connection;
+    evalS+=`<path d="M${mid},${top} L${mid},${ay-2}" stroke="var(--c-fb)" stroke-width="1.5" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow-gold)"/>
+      <text x="${mid+10}" y="${top+26}" class="elabel" style="fill:var(--c-fb)">each step's output + lineage · read-only, never writes back</text>
+      <g><rect x="${mid-AW/2}" y="${ay}" width="${AW}" height="${AH}" rx="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"/>
+      <text x="${mid}" y="${ay+22}" text-anchor="middle" class="etitle">Assay evaluation</text>
+      <text x="${mid}" y="${ay+40}" text-anchor="middle" class="edetail">${esc(`${cn.title} ${cn.detail}`.length*6.3>AW-24?`${cn.title} ${cn.detail}`.slice(0,Math.floor((AW-24)/6.3)-1)+"…":`${cn.title} ${cn.detail}`)}</text></g>`;
+    const gy=ay+AH+40,GW=Wd-2*PAD,cols=4,CG=14,CW=(GW-32-(cols-1)*CG)/cols,CH=132,nrow=Math.ceil(comps.length/cols);
+    evalS+=`<path d="M${mid},${ay+AH} L${mid},${gy-2}" stroke="var(--c-fb)" stroke-width="1.5" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow-gold)"/>
+      <rect x="${PAD}" y="${gy}" width="${GW}" height="${40+nrow*(CH+CG)}" rx="10" fill="none" stroke="var(--c-fb)" stroke-width="1.3" stroke-dasharray="6 4"/>
+      <text x="${PAD+16}" y="${gy+24}" class="egroup">What Assay evaluates on this pipeline · reads only, never changes what it does</text>`;
+    const TONE={good:"var(--good)",warn:"var(--warn)",bad:"var(--bad)",neutral:"var(--muted)"},fit=(t,w)=>t.length*6.1>w?t.slice(0,Math.floor(w/6.1)-1)+"…":t;
+    const wrap=(t,w,n=2)=>{const words=t.split(" "),out=[""];for(const wd of words){const l=out[out.length-1];
+      if((l+" "+wd).trim().length*6.1<=w)out[out.length-1]=(l+" "+wd).trim();else if(out.length<n)out.push(wd);else{out[n-1]=fit(out[n-1]+" "+wd,w);break}}return out};
+    comps.forEach((c,i)=>{const cx0=PAD+16+(i%cols)*(CW+CG),cy0=gy+38+Math.floor(i/cols)*(CH+CG),on=c.tone!=="neutral";
+      const status=c.status.toUpperCase(),sw=Math.min(status.length*6.2+14,CW-24);
+      const where=c.steps.length?`at: ${c.steps.map(x=>x.replace(/[_-]+/g," ")).join(", ")}`:c.hint?`→ ${c.hint}`:c.kind==="agents"?"each run as a whole: its path and its answer":"the release as a whole";
+      evalS+=`<g class="ecard" data-i="${i}" tabindex="0"><rect x="${cx0}" y="${cy0}" width="${CW}" height="${CH}" rx="8" fill="${on?"var(--warn-bg)":"var(--sunk)"}" stroke="${on?"var(--c-fb)":"var(--line-strong)"}" stroke-width="1.2" stroke-dasharray="5 3"/>
+        <text x="${cx0+12}" y="${cy0+20}" class="ekind">${esc(c.kind.toUpperCase())}</text>
+        <rect x="${cx0+CW-12-sw}" y="${cy0+9}" width="${sw}" height="17" rx="8.5" fill="${TONE[c.tone]}"/><text x="${cx0+CW-12-sw/2}" y="${cy0+21}" text-anchor="middle" class="wbadge">${esc(fit(status,sw-8))}</text>
+        <text x="${cx0+12}" y="${cy0+44}" class="ctitle"${on?"":` style="fill:var(--muted)"`}>${esc(c.title)}</text>
+        ${wrap(c.detail,CW-24).map((l,k)=>`<text x="${cx0+12}" y="${cy0+64+k*14}" class="edetail">${esc(l)}</text>`).join("")}
+        ${wrap(where,CW-24).map((l,k)=>`<text x="${cx0+12}" y="${cy0+100+k*14}" class="edetail" style="fill:${c.steps.length?"var(--accent-ink)":"var(--muted)"}">${esc(l)}</text>`).join("")}
+        <title>${esc([c.title,c.detail,c.status,where].join("\n"))}</title></g>`});
+    const ly=gy+40+nrow*(CH+CG)+44,LW=Math.min(460,GW*0.42),LH=64,lx=mid-LW-30,gx=mid+60,GWd=Math.min(420,GW*0.38);
+    const gate=ev.components.find(c=>c.kind==="gates"),led=ev.ledger;
+    evalS+=`<path d="M${mid},${gy+40+nrow*(CH+CG)} L${mid},${ly-6}" stroke="var(--c-fb)" stroke-width="1.5" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow-gold)"/>
+      <g><path d="M${lx},${ly+8} a${LW/2},9 0 0 0 ${LW},0 v${LH-16} a${LW/2},9 0 0 1 -${LW},0 z" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"/>
+      <ellipse cx="${lx+LW/2}" cy="${ly+8}" rx="${LW/2}" ry="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"/>
+      <text x="${lx+LW/2}" y="${ly+36}" text-anchor="middle" class="etitle">Measures ledger</text>
+      <text x="${lx+LW/2}" y="${ly+54}" text-anchor="middle" class="edetail">${esc(fit(led.measures?`${led.measures} measures · by ${led.dimensions.map(d=>d.replace(/_/g," ")).slice(0,4).join(" × ")||"overall"}`:"no measure runs yet",LW-30))}</text></g>
+      <path d="M${lx+LW},${ly+LH/2} L${gx-2},${ly+LH/2}" stroke="var(--accent)" stroke-width="1.6" fill="none" marker-end="url(#arrow-blue)"/>
+      <text x="${(lx+LW+gx)/2}" y="${ly+LH/2-8}" text-anchor="middle" class="elabel" style="fill:var(--accent-ink)">real signal</text>
+      <g><rect x="${gx}" y="${ly}" width="${GWd}" height="${LH}" rx="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"/>
+      <text x="${gx+GWd/2}" y="${ly+26}" text-anchor="middle" class="etitle">Release gates</text>
+      <text x="${gx+GWd/2}" y="${ly+44}" text-anchor="middle" class="edetail">${esc(gate?`${gate.status} · advance, hold or roll back`:"advance, hold or roll back")}</text></g>`;
+    Hf=ly+LH+PAD+74}
+  const head=C?"":`<text x="${PAD}" y="${PAD+30}" class="whead">Pipeline</text>
+    <text x="${PAD}" y="${PAD+54}" class="wlede">drawn from what ${total.toLocaleString()} ${unit}s did${days?` in the last ${days} day${days>1?"s":""}`:""} · the main path runs left to right · click a step</text>`;
+  const legend=C?"":(()=>{const items=[["var(--line-strong)","healthy",false],["var(--warn)","worth a look",false],["var(--bad)","failing or alerting",false],
+      ["var(--good)","routing · model calls",false],["var(--muted)","stub: reports success, does no work",true],["var(--bad)","breaks a path contract",true]];
+    if(EV)items.splice(4,0,["var(--accent)","⊙ n: parts of Assay's evaluation on a step",false],["var(--c-fb)","evaluates, never routes",true]);
+    const lines=[[]];let run=PAD;items.forEach(it=>{const w=18+it[1].length*6.9+26;if(run+w>Wd-PAD&&lines[lines.length-1].length){lines.push([]);run=PAD}lines[lines.length-1].push(it);run+=w});
+    let s="";lines.forEach((ln,li)=>{let lx=PAD;const ly=Hf-PAD-8-(lines.length-1-li)*22;ln.forEach(([c,t,dash])=>{s+=`<rect x="${lx}" y="${ly-10}" width="12" height="12" rx="2" fill="${dash?"none":c}" stroke="${c}" stroke-width="1.4" ${dash?`stroke-dasharray="3 2"`:""}/><text x="${lx+18}" y="${ly}" class="wlegend">${esc(t)}</text>`;lx+=18+t.length*6.9+26})});return s})();
+  const mk=(id,c)=>`<marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="${C?7:8}" markerHeight="${C?7:8}" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,0.5 L10,5 L0,9.5 z" fill="${c}"/></marker>`;
+  return `<svg class="workflow${C?" compact":""}" viewBox="0 0 ${Wd} ${Hf}" style="min-width:${C?Math.min(Wd,760):Math.min(Wd,980)}px" role="img" aria-label="Pipeline workflow">
+    <defs>${mk("arrow","var(--ink-2)")}${mk("arrow-bad","var(--bad)")}${mk("arrow-muted","var(--line-strong)")}${mk("arrow-gold","var(--c-fb)")}${mk("arrow-blue","var(--accent)")}</defs>
+    ${head}${edges}${bars}${dia}${nodesS}${labels}${evalS}${legend}</svg>`;
 }
-function wireFlow(root,onPick){root.querySelectorAll(".wnode").forEach(n=>{const go=()=>onPick(n.dataset.step);n.onclick=go;n.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();go()}}})}
+// What the diagram shows, in words: where documents split, what does no work, what breaks a rule.
+function flowSummary(g){
+  const byId=Object.fromEntries(g.nodes.map(n=>[n.id,n])),total=Math.max(1,g.documents||0),
+    pretty=id=>{const t=id.replace(/[_-]+/g," ");return t.charAt(0).toUpperCase()+t.slice(1)};
+  const out={};g.edges.forEach(e=>(out[e.from]??=[]).push(e));
+  const splits=Object.entries(out).filter(([id,es])=>byId[id]&&byId[id].kind!=="start"&&es.filter(e=>e.documents/total>=0.05).length>1)
+    .map(([id,es])=>{const big=es.filter(e=>e.documents/total>=0.05).sort((a,b)=>b.documents-a.documents);
+      return `after <b>${esc(pretty(id))}</b>, ${big.map(e=>`${Math.round(e.documents/total*100)}% go to ${esc(pretty(e.to==="(done)"?"done":e.to))}`).join(" and ")}`});
+  const stubs=g.nodes.filter(n=>n.kind!=="start"&&n.kind!=="end"&&n.noop_rate>0.5).map(n=>`<b>${esc(pretty(n.id))}</b>`);
+  const broken=g.nodes.filter(n=>(n.contract_violations||[]).length).map(n=>`<b>${esc(pretty(n.id))}</b> (${esc(n.contract_violations.map(v=>v.label).join("; "))})`);
+  const worst=g.nodes.filter(n=>n.errors).sort((a,b)=>b.errors-a.errors)[0];
+  const parts=[];
+  if(splits.length)parts.push(`${splits.length===1?"The only point where documents split is":"Documents split"} ${splits.join("; ")}.`);
+  else parts.push("Every document takes the same path.");
+  if(worst)parts.push(`Most reported errors start at <b>${esc(pretty(worst.id))}</b> (${worst.errors.toLocaleString()}).`);
+  if(stubs.length)parts.push(`${stubs.join(" and ")} ${stubs.length===1?"reports":"report"} success on every document but ${stubs.length===1?"does":"do"} no work.`);
+  if(broken.length)parts.push(`Path contracts are broken at ${broken.join(", ")}.`);
+  const ev=g.evaluation;
+  if(ev){const comps=ev.components.filter(c=>c.kind!=="gates"),stages=g.nodes.filter(n=>n.kind!=="start"&&n.kind!=="end");
+    const covered=stages.filter(n=>comps.some(c=>c.steps.includes(n.id))).length;
+    const fix=comps.filter(c=>c.tone==="bad"||c.tone==="warn").map(c=>`${esc(c.title.toLowerCase())} (${esc(c.status)})`);
+    const idle=comps.filter(c=>c.tone==="neutral"&&c.hint).map(c=>`${esc(c.title.toLowerCase())}: ${esc(c.hint)}`);
+    parts.push(`Assay reads each step's output and lineage and never writes back: ${covered} of ${stages.length} steps are evaluated${fix.length?`, and ${fix.join(", ")} need a look`:""}.`);
+    if(idle.length)parts.push(`Not connected yet: ${idle.join("; ")}.`)}
+  return `<p class="note" style="max-width:860px;margin:0">${parts.join(" ")}</p>`;
+}
+function wireFlow(root,onPick,g){root.querySelectorAll(".wnode").forEach(n=>{const go=()=>onPick(n.dataset.step);n.onclick=go;n.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();go()}}});
+  const comps=g?.evaluation?.components,svg=root.querySelector("svg.workflow");if(!comps||!svg)return;
+  const light=(steps,cards)=>{svg.classList.add("linking");svg.querySelectorAll(".wnode").forEach(n=>n.classList.toggle("hl",steps.includes(n.dataset.step)));
+    svg.querySelectorAll(".ecard").forEach(c=>c.classList.toggle("hl",cards.includes(+c.dataset.i)))};
+  const off=()=>{svg.classList.remove("linking");svg.querySelectorAll(".hl").forEach(x=>x.classList.remove("hl"))};
+  svg.querySelectorAll(".ecard").forEach(c=>{const i=+c.dataset.i,on=()=>light(comps[i].steps,[i]);c.onmouseenter=on;c.onfocus=on;c.onmouseleave=off;c.onblur=off});
+  svg.querySelectorAll(".wnode").forEach(n=>{const id=n.dataset.step,cards=comps.map((c,i)=>c.steps.includes(id)?i:-1).filter(i=>i>=0);
+    n.addEventListener("mouseenter",()=>cards.length&&light([id],cards));n.addEventListener("mouseleave",off)})}
 
 async function renderWorkflow(){
   const days=+(store.get("assay-wf-days")||7);
   let g=null,err="";try{g=await api(`/v1/workflow?${q({source:src(),days})}`)}catch(e){err=e.message}
   if(!g||g.nodes.length<=2){$("#tab-workflow").innerHTML=`<div class="empty">${esc(err||"No stage runs yet. Send stage runs (one per step per document) and the pipeline appears here.")}</div>`;return}
   const sel=S.wfStep;
-  $("#tab-workflow").innerHTML=`<div class="panel stack">
-    <div class="panel-head"><div><h2>Pipeline</h2><p class="sub">Drawn from what ${g.documents.toLocaleString()} documents actually did in the last ${days} days. Border color is each step's health, the badge counts reported errors that started there, and arrow width is how many documents took that path. Click a step.</p></div>
-      <select id="wf-days" aria-label="Window">${[1,7,30].map(x=>`<option value="${x}" ${x===days?"selected":""}>${x} day${x>1?"s":""}</option>`).join("")}</select></div>
-    <div class="scroll">${flowGraph(g,{selected:sel})}</div>
-    <div class="legend"><span><i style="background:var(--good)"></i>healthy</span><span><i style="background:var(--warn)"></i>worth a look</span><span><i style="background:var(--bad)"></i>failing, alerting, or a prompt regression</span><span><i style="background:none;border:1.5px dashed var(--bad)"></i>breaks a path contract</span>${Object.entries(VERDICT).slice(0,6).map(([k,[l,c]])=>`<span><i style="background:${c}"></i>${esc(l)}</span>`).join("")}</div>
+  $("#tab-workflow").innerHTML=`<div class="panel stack" style="position:relative">
+      <select id="wf-days" aria-label="Window" style="position:absolute;top:18px;right:18px;z-index:1">${[1,7,30].map(x=>`<option value="${x}" ${x===days?"selected":""}>${x} day${x>1?"s":""}</option>`).join("")}</select>
+    <div class="scroll">${flowGraph(g,{selected:sel,days})}</div>
+    ${flowSummary(g)}
   </div><div id="wf-detail"></div><div id="wf-contracts"></div>`;
   $("#wf-days").onchange=e=>{store.set("assay-wf-days",e.target.value);renderWorkflow()};
-  wireFlow($("#tab-workflow"),st=>{location.hash="workflow/"+encodeURIComponent(st)});
+  wireFlow($("#tab-workflow"),st=>{location.hash="workflow/"+encodeURIComponent(st)},g);
   if(sel)renderStepDetail(g,sel,days);
   renderContracts(g,days);
 }
@@ -1654,7 +1863,7 @@ async function render(){
   if(t==="workflow")S.wfStep=hp[1]?decodeURIComponent(hp[1]):null;
   document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
-  if(!S.overview&&!["gates","connect","failures","diff","agents","learn","trace"].includes(t))return;
+  if(!S.overview&&!["gates","connect","failures","diff","agents","learn","trace","workflow"].includes(t))return;  // these don't need a measure run
   try{
     if(t==="overview"){renderOverview();overviewFlow()}
     if(t==="workflow")await renderWorkflow();

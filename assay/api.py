@@ -489,6 +489,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         rules = contracts.load(engine, source)
         if rules:
             contracts.annotate(graph, contracts.check(src, window, rules))
+        from assay import workflow_eval  # where Assay's evaluation connects to this pipeline
+        graph["evaluation"] = workflow_eval.describe(engine, src, source, window, graph, settings)
         return graph
 
     @app.get("/v1/workflow/steps/{stage}/errors", tags=["results"],
