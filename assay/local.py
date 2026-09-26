@@ -47,7 +47,7 @@ TENANT = "local"
 EXAMPLE = "tests/ai/test_support.py"
 CHECK_NAMES = {"plan_quality": "Plan quality", "consistency": "Consistency", "completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state",
                "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts",
-               "plan": "Plan adherence"}
+               "plan": "Plan adherence", "injection": "Prompt injection"}
 PII_EVALUATOR = "assay.pii@1"
 
 CONFIG_TEMPLATE = '''\
@@ -729,7 +729,7 @@ def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
 
 CATEGORIES = [  # (name, which checks): the first that matches a check's field takes it
     ("Tool selection", lambda f: f == "tool_calls" or f.startswith(("expect.must_call", "expect.must_not_call"))),
-    ("Security", lambda f: f in ("safety", "pii") or f.startswith("expect.must_get_approval")),
+    ("Security", lambda f: f in ("safety", "pii", "injection") or f.startswith("expect.must_get_approval")),
     ("Completion", lambda f: f in ("completed", "efficiency")
      or f.startswith(("expect.must_resolve", "expect.max_steps", "expect.must_answer"))),
     ("Planning", lambda f: f in ("plan", "plan_quality")),
@@ -823,7 +823,7 @@ def _code(text, n: int = 120) -> str:
 
 
 # What a reviewer should read first: safety, then what the agent decided, then what it did, then cost.
-RANK = ("Safety", "PII", "expect.must_get_approval", "Approval for", "Outcome", "expect.must_resolve", "Finished",
+RANK = ("Safety", "Prompt injection", "PII", "expect.must_get_approval", "Approval for", "Outcome", "expect.must_resolve", "Finished",
         "Tool usage", "Plan adherence", "Consistency", "Plan quality", "expect.must_call", "expect.must_not_call", "End state", "Answer", "Your asserts")
 
 
