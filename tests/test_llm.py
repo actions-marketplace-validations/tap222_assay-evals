@@ -263,7 +263,7 @@ def test_instrument_records_gemini_ollama_and_litellm_the_same_way(tmp_path, mon
 def test_the_built_in_judge_with_another_provider():
     from assay import judge
     create = Recorder({"model": "gpt-5", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(
-        {"consistency": {"applicable": True, "score": 4, "reason": "Agrees with step 1."},
+        {"consistency": {"applicable": True, "score": 4, "reason": "Agrees with step 0."},
          "plan_quality": {"applicable": False, "score": 1, "reason": "no plan"}})}}]})
     traj = {"answer": "Done.", "status": "completed", "steps": [{"seq": 0, "kind": "answer", "text": "Done."}]}
     out = judge.judge(traj, "Do it", model="gpt-5", provider="openai", client=N(chat=N(completions=N(create=create))))

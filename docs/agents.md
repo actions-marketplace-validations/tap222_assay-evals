@@ -182,6 +182,28 @@ left aren't judged, and they aren't failures. The cost is an estimate from `[jud
 `assay_sdk.EvalRuntime`, which you can run your own evaluators with too
 ([SDK guide](../sdk/python/README.md#many-samples-at-once-evalruntime)).
 
+**What kind of failure.** A failing score names its kind, and the kinds keep hallucinations
+apart, since each needs another fix:
+
+| Kind | The answer… |
+|---|---|
+| `fabricated` | states a fact no step or source contains |
+| `contradicts_source` | says the opposite of a tool result or a source it was given |
+| `unsupported_inference` | draws a conclusion the steps it cites don't support |
+| `contradicts_itself` | says in one part what another part denies |
+| `incomplete`, `policy_refusal`, `unworkable`, `inefficient`, `other` | the rest |
+
+The report counts failures by kind, next to the baseline's (`Failures by kind: 2 contradicts
+source (0 before) · 1 fabricated (0 before)`), and so do `assay diff` and the PR comment. Your own
+evaluators name kinds the same way (`category` in a verdict, or `run.check(..., category=)`).
+
+**The judge shows its evidence.** A contradiction inside a long answer (paragraph 3 against
+paragraph 7) is listed as two exact quotes from the answer. Assay checks the quotes itself, word
+for word. A contradiction whose quotes aren't in the answer is left out, and a verdict whose only
+evidence is made up is asked for again, then recorded as `INVALID`, never as a score. The same
+goes for a reason that cites a step the trace doesn't have. The judge's claim has to be backed by
+the text, not taken on trust.
+
 Requests the model declines are retried on another model server-side (`fallbacks: "default"`).
 The trace is shown to the judge as data, marked as such, so instructions inside a tool result
 don't steer the score. Long tool results are cut, and the cut is marked.

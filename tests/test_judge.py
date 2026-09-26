@@ -261,9 +261,9 @@ def test_judge_limits_in_assay_toml():
 def test_the_judge_names_the_kind_of_failure():
     no_plan = {"answer": "Refunded.", "status": "completed", "steps": [{"seq": 0, "kind": "answer", "text": "Refunded."}]}
     v = verdict(consistency=(2, "Says refunded; nothing did."))
-    v["consistency"]["category"] = "grounding"
+    v["consistency"]["category"] = "grounding"  # an earlier rubric's name: read as fabricated
     out = judge.judge(no_plan, "x", client=Fake(v))["consistency"]
-    assert (out["status"], out["category"]) == ("fail", "grounding")
+    assert (out["status"], out["category"]) == ("fail", "fabricated")
     v["consistency"].update(score=4, category="none")
     assert judge.judge(no_plan, "x", client=Fake(v))["consistency"]["category"] is None
     assert "policy_refusal" in judge.SCHEMA["properties"]["consistency"]["properties"]["category"]["enum"]

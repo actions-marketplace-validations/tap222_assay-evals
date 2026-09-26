@@ -803,6 +803,7 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     out.update(scores(engine, tenant, run_id, rows, base_rows, skip))
     out["trust"] = trust(engine, tenant, rows)
     out["surface"] = surface_shift(engine, tenant, rows, base_rows) if baseline else []
+    out["kinds"] = failure_kinds(rows, base_rows)
     return out
 
 
@@ -901,6 +902,25 @@ def scores(engine, tenant: str, run_id: str, rows: list, base_rows: list, skip: 
 
 def _floor(f: dict) -> str:
     return f"{f['min']:g}–{f['max']:g}" if f["min"] != f["max"] else f"{f['min']:g}"
+
+
+# ---------- what kinds of failure ----------
+
+def failure_kinds(rows: list, base_rows: list) -> dict:
+    """Failures by the kind their evaluator named (fabricated, contradicts_source, ...): {"now", "before"}.
+    A hallucination that fabricates needs another fix than one that contradicts its source."""
+    from assay.judge import LEGACY
+    def count(rs):
+        return dict(Counter(LEGACY.get(r.category, r.category) for r in rs
+                            if r.status == "fail" and getattr(r, "category", None)).most_common())
+    now = count(rows)
+    return {"now": now, "before": count(base_rows), "compared": bool(base_rows)} if now else {}
+
+
+def kinds_text(k: dict) -> str:
+    before = k.get("before") or {}
+    return " · ".join(f"{n} {kind.replace('_', ' ')}" + (f" ({before.get(kind, 0)} before)" if k.get("compared") else "")
+                      for kind, n in k["now"].items())
 
 
 # ---------- a score that rose with the answers' surface ----------
@@ -1659,6 +1679,13 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     out += ack_markdown(result)
     for x in result.get("surface") or []:
         out += [f"> {_md(x['text'])}", ""]
+    if result.get("kinds"):
+        out += [f"**Failures by kind:** {_md(kinds_text(result['kinds']))}", ""]
+    if result.get("unchanged"):
+        u = result["unchanged"]
+        out += [f"**Nothing on your side changed** since the baseline (commit `{u['commit']}`, no uncommitted "
+                f"changes, the same config and prompts): the model underneath changed, or a service a tool calls "
+                f"did.", ""]
     tr = result.get("trust") or {}
     if tr:
         out += ["**Judges**", ""] + [f"- {_md(_label(f))}: {_md(trust_text(f, x))}" for f, x in tr.items()] + [""]
@@ -1717,6 +1744,8 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
         out.append(line)
     out.append("")
     out += trust_block
+    if result.get("kinds"):
+        out += [_paint("Failures by kind", "bold"), f"  {kinds_text(result['kinds'])}", ""]
     problems = c["problems"]
     if problems:
         what = "regressed" if baseline and all(p["kind"] == "regression" for p in problems) else "failing"
@@ -1933,6 +1962,18 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     if junit:
         write_junit(junit, run_id, result, verdict(result, bool(baseline))[1])
     state["last"] = run_id
+    revs = state.setdefault("revisions", {})
+    revs[run_id] = revision(root, engine, run_id)
+    for old in list(revs)[:-200]:
+        revs.pop(old)
+    same = None if passed else unchanged(state, run_id, result["summary"]["buckets"]["regressed"], known)
+    if same:  # zero changes on your side: the model underneath (or the service behind a tool) changed
+        result["unchanged"] = same
+        whose = "this case's" if same["cases"] == 1 else "these cases'"
+        text += "\n" + _paint(f"Nothing on your side changed since {whose} "
+                              f"baseline: the same commit ({same['commit']}), no uncommitted changes, the same "
+                              f"{CONFIG} and the same prompt versions. The model underneath changed, or a service a "
+                              f"tool calls did.", "yellow")
     inconclusive = passed and bool(result["not_judged"])
     baseline_before = dict(state.get("baseline_cases") or {})
     if passed and not inconclusive:
@@ -1964,6 +2005,41 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
             f.write(md + "\n")
     return code, text
+
+
+# ---------- what changed on your side: the code, the config, the prompts ----------
+
+def _git(root: Path, *args: str) -> Optional[str]:
+    try:
+        r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def revision(root: Path, engine, run_id: str) -> dict:
+    """What this run ran: the commit, a digest of uncommitted changes, of assay.toml, and of the prompt
+    and model versions its results record. Two runs with the same revision ran the same code."""
+    import hashlib
+    h = lambda s: hashlib.sha256(s.encode()).hexdigest()[:12]
+    commit = os.environ.get("GITHUB_SHA") or (_git(root, "rev-parse", "HEAD") or "").strip() or None
+    keep = ["--", ".", ":(exclude).assay", f":(exclude){CONFIG[:-5]}.acks.toml"]  # acknowledgements change no code
+    changes = (_git(root, "diff", "HEAD", *keep) or "") + (_git(root, "status", "--porcelain", *keep) or "") \
+        if commit else ""
+    cfg = (root / CONFIG).read_text() if (root / CONFIG).exists() else ""
+    lineage = sorted({json.dumps(r.lineage, sort_keys=True) for r in _rows(engine, run_id) if r.lineage})
+    return {"commit": commit, "changes": h(changes) if changes.strip() else None, "config": h(cfg),
+            "prompts": h("|".join(lineage)) if lineage else None}
+
+
+def unchanged(state: dict, run_id: str, cases: List[str], bases: Dict[str, str]) -> Optional[dict]:
+    """The regressed cases' baselines ran exactly this run's revision: nothing on your side changed."""
+    revs = state.get("revisions") or {}
+    now = revs.get(run_id) or {}
+    runs = {bases.get(c) for c in cases}
+    if not now.get("commit") or not cases or None in runs or any(revs.get(r) != now for r in runs):
+        return None
+    return {"commit": now["commit"][:7], "cases": len(cases)}
 
 
 def _migrate(engine, home: Path, state: dict) -> dict:

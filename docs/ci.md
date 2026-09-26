@@ -51,3 +51,31 @@ skipped with a warning and the job doesn't fail over it. Outside the action,
 - **A process that won't exit:** with `pytest --assay`, a session that finished but whose
   process is still running 30 seconds later (a thread or event loop that never stopped) exits
   with the session's own result (`ASSAY_EXIT_GRACE` sets the wait, `0` turns it off).
+
+## Nightly: failures with nothing changed on your side
+
+The models you call change underneath you. A provider updates a model under its name, or tests
+a variant on some of your traffic, and what passed last week fails this week with no change of
+yours. A pull request never sees that; a scheduled run does:
+
+```yaml
+on:
+  schedule: [{cron: "0 5 * * *"}]   # every morning, on the default branch
+jobs:
+  assay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: tap222/docai-eval@main
+```
+
+Every `assay test` run records what it ran: the commit, a digest of uncommitted changes, of
+`assay.toml`, and of the prompt and model versions its results record. When a run regresses and
+its cases' baselines ran exactly the same, the report says so:
+
+```
+Nothing on your side changed since these cases' baseline: the same commit (3f9a2c1), no uncommitted changes, the same assay.toml and the same prompt versions. The model underneath changed, or a service a tool calls did.
+```
+
+That's the difference between "we broke it" and "it broke under us", and it decides who looks
+first.
