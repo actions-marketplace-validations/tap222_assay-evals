@@ -24,6 +24,16 @@ Every field is a check of its own, and it says which way it went wrong:
   missing    the document has a value, and nothing was extracted
   invented   nothing is there, and a value was extracted: usually the costliest error
 
+Given the document's text (text=), a wrong or invented value also says how it was made up:
+
+  format      the right value in the wrong shape: day and month swapped, a decimal separator
+              read wrong, the same words spelled or ordered differently
+  inferred    a guess from context: the value is in the document, just not as this field (the
+              state named most often for governing law, the seller's name as the buyer)
+  fabricated  the value is nowhere in the document
+
+Format errors are told apart without the text; the other two need it.
+
 Zero is a value, not an empty one: 0 extracted where the document has nothing is invented, and
 nothing extracted where it says 0 is missing, so the two errors stay apart.
 
@@ -53,10 +63,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 __all__ = ["Text", "Number", "Money", "Date", "LineItems", "score_document", "check_rules", "total_of",
            "before", "required", "rule", "DocumentScore", "FieldScore", "EVALUATOR", "classify_document",
            "score_split", "SplitScore", "score_ocr", "OcrScore", "score_locations", "appears_in", "score_table",
-           "TableScore", "spot_check", "SPOT_CHECKS", "superseded_values", "SUPERSEDED"]
+           "TableScore", "FORMAT", "INFERRED", "FABRICATED", "spot_check", "SPOT_CHECKS", "superseded_values", "SUPERSEDED"]
 
 EVALUATOR = "assay.documents@1"
 CORRECT, WRONG, MISSING, INVENTED = "correct", "wrong", "missing", "invented"
+FORMAT, INFERRED, FABRICATED = "format", "inferred", "fabricated"
+_MADE_UP = {FORMAT: "the right value in the wrong shape", INFERRED: "it's in the document, but not as this field",
+            FABRICATED: "it's nowhere in the document"}
 
 
 class Unreadable(ValueError):
@@ -85,6 +98,10 @@ class _Field:
         """What the difference looks like, when it's a common one."""
         return None
 
+    def reshaped(self, expected: Any, actual: Any) -> bool:
+        """The right information in the wrong shape (both values as read)."""
+        return False
+
 
 class Text(_Field):
     """Text, ignoring case and spacing (and punctuation, with ignore_punctuation). exact=True: as is."""
@@ -98,6 +115,11 @@ class Text(_Field):
             return s
         s = re.sub(r"\s+", " ", s).strip().lower()
         return re.sub(r"[^\w\s]", "", s).strip() if self.ignore_punctuation else s
+
+    def reshaped(self, expected, actual):  # "INV17" for "INV-17", "Doe, Jane" for "Jane Doe"
+        e, a = str(expected).lower(), str(actual).lower()
+        return re.sub(r"[\W_]+", "", e) == re.sub(r"[\W_]+", "", a) or \
+            sorted(re.findall(r"\w+", e)) == sorted(re.findall(r"\w+", a))
 
 
 _CURRENCY = re.compile(r"[$€£¥₹]|\b(usd|eur|gbp|jpy|inr|chf|cad|aud)\b", re.I)
@@ -154,6 +176,11 @@ class Number(_Field):
                 return "the sign is wrong"
         return None
 
+    def reshaped(self, expected, actual):  # a decimal or thousands separator read the other way
+        return bool(expected and actual) and any(
+            abs(actual - expected * k) < 1e-6 * max(1, abs(expected * k)) or
+            abs(actual * k - expected) < 1e-6 * max(1, abs(expected)) for k in (10, 100, 1000))
+
 
 class Money(Number):
     """An amount: currency symbols and codes, thousands separators and "1.234,56" are read, and
@@ -187,6 +214,13 @@ class Money(Number):
                 return f"the currency is {actual[1]}, not {expected[1]}"
             return super().why(expected[0], actual[0])
         return super().why(expected, actual)
+
+    def reshaped(self, expected, actual):
+        if self.currency:
+            if expected[1] and actual[1] and expected[1] != actual[1]:
+                return False
+            return super().reshaped(expected[0], actual[0])
+        return super().reshaped(expected, actual)
 
 
 _SYMBOL = {"$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY", "₹": "INR"}
@@ -240,6 +274,10 @@ class Date(_Field):
             return "the year is wrong"
         return None
 
+    def reshaped(self, expected, actual):  # 03/04 for 04/03
+        return expected.year == actual.year and expected.day == actual.month and expected.month == actual.day \
+            and expected != actual
+
 
 def _year(s: str) -> int:
     y = int(s)
@@ -269,6 +307,8 @@ class FieldScore:
     counts: Dict[str, float] = dc_field(default_factory=dict)  # tp, fp, fn (and rows and cells, for line items)
     share: float = 1.0  # how much of it is right: 0 or 1, or the row F1 for line items
     part_of: Optional[str] = None  # a line-item column: the table it's part of, already counted there
+    made_up: Optional[str] = None  # a wrong or invented value: format | inferred | fabricated (None: not told)
+    grounded: bool = False  # scored with the document's text, so inferred and fabricated could be told apart
 
     @property
     def passed(self) -> Optional[bool]:
@@ -293,6 +333,15 @@ class DocumentScore:
 
     def wrong(self) -> List[FieldScore]:
         return [f for f in self.fields.values() if f.passed is False]
+
+    @property
+    def made_up(self) -> Dict[str, int]:
+        """Wrong and invented values by how they were made up: format, inferred, fabricated."""
+        out = {FORMAT: 0, INFERRED: 0, FABRICATED: 0}
+        for f in self.fields.values():
+            if f.made_up:
+                out[f.made_up] += 1
+        return out
 
     @property
     def cells(self) -> Dict[str, int]:
@@ -361,6 +410,25 @@ def _score_value(name: str, spec: _Field, exp: Any, act: Any) -> FieldScore:
     why = spec.why(e, a)
     return FieldScore(name, WRONG, exp, act, f"{spec.show(a)}, not {spec.show(e)}" + (f": {why}" if why else ""),
                       w, {"fp": 1, "fn": 1}, 0.0)
+
+
+def _made_up(spec: _Field, f: FieldScore, text: Optional[str]) -> Optional[str]:
+    """How a wrong or invented value was made up; None when it wasn't, or can't be told."""
+    if f.kind not in (WRONG, INVENTED) or empty(f.actual):
+        return None
+    if f.kind == WRONG:
+        try:
+            if spec.reshaped(spec.read(f.expected), spec.read(f.actual)):
+                return FORMAT
+        except Unreadable:
+            pass
+    if text is None:
+        return None
+    try:
+        found = _found(spec, f.actual, text)
+    except Unreadable:  # not a value of its type: look for it as it's written
+        found = _found(Text(), f.actual, text)
+    return INFERRED if found else FABRICATED
 
 
 def _cell_counts(spec: _Field, e: Any, a: Any) -> Dict[str, int]:
@@ -529,6 +597,7 @@ def _rules(rules: Sequence[Rule], extracted: Any) -> Dict[str, Tuple[Optional[bo
 def _record(run, name: str, f: FieldScore, confidence: Optional[float] = None) -> None:
     raw = json.dumps({"kind": f.kind, "weight": f.weight, "share": round(f.share, 6), **f.counts,
                       **({"part_of": f.part_of} if f.part_of else {}),
+                      **({"made_up": f.made_up} if f.made_up else {}), **({"grounded": True} if f.grounded else {}),
                       **({"confidence": float(confidence)} if confidence is not None else {})})
     if f.kind == "unreadable":
         run.check(name, "error", expected=f.expected, actual=f.actual, evaluator=EVALUATOR, reason=f.note,
@@ -550,13 +619,18 @@ def _record_rules(run, results: Dict[str, Tuple[Optional[bool], str]]) -> None:
 
 
 def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str, _Field]] = None,
-                   rules: Sequence[Rule] = (), confidence: Optional[Dict[str, float]] = None) -> DocumentScore:
+                   rules: Sequence[Rule] = (), confidence: Optional[Dict[str, float]] = None,
+                   text: Optional[str] = None) -> DocumentScore:
     """Score one document's extraction against its correct values, and record each field, the line
     items, `document` (all fields correct) and each rule as checks on `run` (None: only score).
 
     confidence: the extractor's confidence per field (0-1), where it gives one. Recorded with each
     field, so the report can say whether a confident value is a right one, which threshold would
-    auto-approve safely, and how many wrong values a threshold lets through."""
+    auto-approve safely, and how many wrong values a threshold lets through.
+
+    text: the document's text (its OCR). With it, each wrong or invented value says whether it was
+    inferred (in the document, not as this field) or fabricated (nowhere in it); format errors
+    (the right value in the wrong shape) are told without it. Line-item cells aren't sorted."""
     if schema is None:
         schema = {k: Text() for k in (expected or {})}
     fields: Dict[str, FieldScore] = {}
@@ -567,7 +641,11 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
             fields[name] = whole
             fields.update(cols)
         else:
-            fields[name] = _score_value(name, spec, e, a)
+            f = _score_value(name, spec, e, a)
+            f.made_up, f.grounded = _made_up(spec, f, text), text is not None
+            if f.made_up:
+                f.note = f"{f.note}; {f.made_up}: {_MADE_UP[f.made_up]}"
+            fields[name] = f
     doc = DocumentScore(fields, _rules(rules, extracted))
     if run is not None:
         for name, f in fields.items():

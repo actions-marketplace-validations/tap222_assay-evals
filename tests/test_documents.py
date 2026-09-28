@@ -117,7 +117,7 @@ def test_each_field_rule_and_the_document_is_a_check():
     assert by["invoice_date"]["status"] == "fail" and by["invoice_date"]["category"] == "wrong"
     assert by["invoice_date"]["reason"].startswith("wrong: 2026-04-03, not 2026-03-04")
     assert json.loads(by["invoice_date"]["raw_output"]) == {"kind": "wrong", "weight": 1.0, "share": 0.0,
-                                                             "fp": 1, "fn": 1}
+                                                             "fp": 1, "fn": 1, "made_up": "format"}
     doc = json.loads(by["document"]["raw_output"])
     assert doc["cells"] == {"tp": 6, "fp": 1, "fn": 1} and doc["f1"] == round(12 / 14, 6)
     assert by["document"]["status"] == "fail" and by["document"]["reason"] == "wrong: invoice_date (wrong)"
@@ -169,6 +169,8 @@ def test_a_pr_that_breaks_a_field_fails_and_says_which(project):
         in out.stdout
     # 17 cells a run (3 headers and 2 rows of 2 in inv-1, 3 and 1 row in the others); one read wrong
     assert "cell F1 94.1% (was 100%), precision 94.1%, recall 94.1%" in out.stdout
+    # 3 values a document, the line-item tables not counted; no text given, so only format is told
+    assert "made up, of 9 values extracted: 1 format (was 0) (inferred and fabricated need the text" in out.stdout
     line = next(x for x in out.stdout.splitlines() if x.strip().startswith("invoice_date"))
     assert "66.7%" in line and "1 wrong" in line  # precision and recall, 2 of 3
     assert "tests/test_invoices.py::test_inv_1  All fields correct, invoice_date" in out.stdout
@@ -588,3 +590,104 @@ def test_doc(assay_case):
     m = FieldAccuracy().compute(EventsSource(store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}"), "local"),
                                 Window(now - timedelta(days=1), now + timedelta(days=1)))
     assert m.overall.value == 1.0 and {r.slice_value for r in m.results if r.dimension == "field"} == {"number"}
+
+
+# ---------- how a value was made up: format, inferred, fabricated ----------
+
+DEED = {"county": Text(), "grantee": Text(), "recorded": Date(day_first=True), "parcel": Text(),
+        "price": Money(), "governing_law": Text()}
+DEED_TEXT = ("WARRANTY DEED. Jane Roe, grantor, conveys to John Doe, grantee, land in Kings County. "
+             "Recorded 04/03/2026. Price $1,250,000.00. The grantor resides in California; California "
+             "taxes are paid. This deed is governed by the laws of New York.")
+DEED_TRUTH = {"county": "Kings", "grantee": "John Doe", "recorded": "04/03/2026", "parcel": None,
+              "price": "1250000", "governing_law": "New York"}
+DEED_GOT = {"county": "Queens", "grantee": "Jane Roe", "recorded": "03/04/2026", "parcel": "12-345",
+            "price": "1,250.000", "governing_law": "California"}
+
+
+def test_a_made_up_value_says_how():
+    s = score_document(None, DEED_TRUTH, DEED_GOT, DEED, text=DEED_TEXT)
+    f = s.fields
+    assert f["county"].made_up == "fabricated"  # a guessed county, nowhere in the deed
+    assert f["parcel"].made_up == "fabricated" and f["parcel"].kind == "invented"
+    assert f["grantee"].made_up == "inferred"  # the grantor, given as the grantee
+    assert f["governing_law"].made_up == "inferred"  # the state mentioned most, not the one that governs
+    assert "inferred: it's in the document, but not as this field" in f["governing_law"].note
+    assert f["recorded"].made_up == "format" and f["price"].made_up == "format"
+    assert s.made_up == {"format": 2, "inferred": 2, "fabricated": 2}
+    # without the text only format errors can be told
+    blind = score_document(None, DEED_TRUTH, DEED_GOT, DEED)
+    assert blind.made_up == {"format": 2, "inferred": 0, "fabricated": 0} and not blind.fields["county"].grounded
+    # missing and correct values weren't made up
+    assert score_document(None, DEED_TRUTH, {**DEED_TRUTH, "county": ""}, DEED, text=DEED_TEXT).fields[
+        "county"].made_up is None
+
+
+def test_the_right_value_in_the_wrong_shape():
+    assert Text().reshaped("inv-17", "inv17") and Text().reshaped("jane doe", "doe, jane")
+    assert not Text().reshaped("john doe", "jane doe")
+    assert Number().reshaped(1234.56, 123456) and not Number().reshaped(1234.56, 1234.0)
+    m = Money(currency=True)
+    assert not m.reshaped(m.read("€100"), m.read("$1000"))  # another currency is other information
+    assert Date().reshaped(date(2026, 3, 4), date(2026, 4, 3)) and not Date().reshaped(date(2026, 3, 4),
+                                                                                       date(2026, 3, 5))
+
+
+DEEDS = f'''
+from assay_sdk.documents import score_document, Text, Money, Date
+DEED = {{"county": Text(), "grantee": Text(), "recorded": Date(day_first=True), "parcel": Text(),
+        "price": Money(), "governing_law": Text()}}
+TEXT = {DEED_TEXT!r}
+TRUTH = {DEED_TRUTH!r}
+GOT = {DEED_GOT!r}
+
+def test_deed_1(assay_case):
+    score_document(assay_case, TRUTH, GOT, DEED, text=TEXT)
+
+def test_deed_2(assay_case):
+    score_document(assay_case, TRUTH, TRUTH, DEED, text=TEXT)
+'''
+
+
+def test_made_up_values_in_the_report_and_on_the_dashboard(project):
+    from assay import coverage, store
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    (project / "tests").mkdir()
+    (project / "tests" / "test_deeds.py").write_text(DEEDS)
+    out = run(project)
+    # 6 values extracted in deed 1, 5 in deed 2 (no parcel)
+    assert "made up, of 11 values extracted: 2 format, 2 inferred, 2 fabricated" in out.stdout
+    assert "governing_law" in out.stdout and "1 wrong, 1 inferred" in out.stdout
+    engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
+    src, now = EventsSource(engine, "local"), datetime.utcnow()
+    w = Window(now - timedelta(days=1), now + timedelta(days=1))
+    got = {mid: REGISTRY[mid].compute(src, w) for mid in ("fabricated_value_rate", "inferred_value_rate",
+                                                           "format_error_rate")}
+    assert {mid: (m.overall.numerator, m.overall.denominator) for mid, m in got.items()} == {
+        "fabricated_value_rate": (2, 11), "inferred_value_rate": (2, 11), "format_error_rate": (2, 11)}
+    by_field = {r.slice_value: r.value for r in got["inferred_value_rate"].results if r.dimension == "field"}
+    assert by_field["grantee"] == 0.5 and by_field["county"] == 0
+    live = {m["id"]: m["status"] for m in coverage.compute(src, w)["measures"]}
+    assert live["inferred_value_rate"] == live["format_error_rate"] == "live"
+
+
+def test_inferred_and_fabricated_wait_for_the_text(project):
+    from assay import coverage, store
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    (project / "tests").mkdir()
+    (project / "tests" / "test_deeds.py").write_text(DEEDS.replace(", text=TEXT", ""))
+    out = run(project)
+    assert "made up, of 11 values extracted: 2 format (inferred and fabricated need the text" in out.stdout
+    engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
+    src, now = EventsSource(engine, "local"), datetime.utcnow()
+    w = Window(now - timedelta(days=1), now + timedelta(days=1))
+    inferred = REGISTRY["inferred_value_rate"].compute(src, w)
+    assert inferred.status == "unmeasured" and "text=" in inferred.reason
+    assert REGISTRY["format_error_rate"].compute(src, w).status == "measured"
+    live = {m["id"]: m for m in coverage.compute(src, w)["measures"]}
+    assert live["inferred_value_rate"]["status"] == "blocked"
+    assert live["inferred_value_rate"]["missing"] == ["fields scored with the document's text (score_document, text=)"]

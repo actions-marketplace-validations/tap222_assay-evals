@@ -788,8 +788,8 @@ def _row(doc: dict, c: dict, run_id: str, case: str, ts: datetime, n: int) -> di
 
 def seed_document_scores(engine: Engine, docs: List[dict], now: datetime, seed_value: int = 29) -> int:
     """A labelled sample of the demo's documents scored the way assay_sdk.documents does it: fields,
-    line items, types, splits, OCR, locations, tables, confidence, spot checks of published output
-    and superseded values, with the story the rest of the demo tells: day-first dates fixed by
+    line items, types, splits, OCR, locations, tables, confidence, made-up values, spot checks of
+    published output and superseded values, with the story the rest of the demo tells: day-first dates fixed by
     extract_fields v13, totals mangled by the validation release, contract/claim mix-ups cut by
     classify_document v8, two-column statements read out of order, and corrections for Globex
     Logistics that never reached output."""
@@ -824,22 +824,23 @@ def seed_document_scores(engine: Engine, docs: List[dict], now: datetime, seed_v
             if age < RELEASE_BUG_DAYS and rng.random() < 0.35:  # validation v2.4 moves the decimal point
                 got["total"] = f"{float(truth['total'].replace(',', '')) * 100:,.2f}"
                 conf["total"] = round(rng.uniform(0.93, 0.99), 3)
-            if rng.random() < 0.03:
-                got["vendor"] = rng.choice(VENDORS)
+            if rng.random() < 0.03:  # another vendor (fabricated), or the bill-to party (inferred)
+                other = rng.choice(VENDORS)
+                got["vendor"] = "Accounts Payable" if sum(map(ord, did)) % 2 else other
                 conf["vendor"] = round(rng.uniform(0.5, 0.8), 3)
             if rng.random() < 0.02:
                 got["reference"] = ""
             if rng.random() < 0.06 and got["line_items"]:
                 got["line_items"][-1]["amount"] = f"{float(got['line_items'][-1]['amount']) + 1:.2f}"
             run = _Collect()
+            pages = doc["page_count"] or 1
+            text = _text(truth, itype, pages)
             dx.score_document(run, truth, got, schema, rules=[dx.total_of("line_items.amount", equals="total")],
-                              confidence=conf)
+                              confidence=conf, text=text)
             mixups = {"contract": "insurance_claim", "insurance_claim": "contract"}
             wrong_type = itype in mixups and rng.random() < (0.12 if age >= TYPE_FIX_DAYS else 0.03)
             dx.classify_document(run, itype, mixups[itype] if wrong_type else itype,
                                  confidence=round(rng.uniform(0.85, 0.99), 3))
-            pages = doc["page_count"] or 1
-            text = _text(truth, itype, pages)
             lines = [text[i:i + 40] for i in range(0, len(text), 40)]
             read = list(lines)
             if itype == "bank_statement" and rng.random() < 0.5:  # two columns, read across

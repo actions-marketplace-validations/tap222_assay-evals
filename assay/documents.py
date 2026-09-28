@@ -5,7 +5,9 @@ documents have, how many were extracted right), from each check's counts: a wron
 false positive and a false negative, a missing one a false negative, an invented one a false
 positive. Per run, the share of documents with every field correct, the weighted share of
 fields right, and precision, recall and F1 over cells (each field one, each line-item cell one),
-pooled over the documents. Per rule, how many documents it held on.
+pooled over the documents. How wrong and invented values were made up: format (the right value
+in the wrong shape), inferred (in the document, not as this field), fabricated (nowhere in it),
+out of the values extracted. Per rule, how many documents it held on.
 
 Document types: a confusion matrix, and precision and recall per type. Splitting: files split
 right (every document on the right pages), documents right, and precision and recall over the
@@ -21,6 +23,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional
 
 EVALUATOR = "assay.documents@1"
+_MADE_UP = ("format", "inferred", "fabricated")
 
 
 def _raw(r) -> dict:
@@ -42,7 +45,7 @@ def summarize(rows: List) -> Optional[dict]:
     confusion: Dict[tuple, int] = defaultdict(int)
     split, ocr, where = defaultdict(int), defaultdict(int), defaultdict(float)
     worst_pages, ious = [], []
-    tables, cells = defaultdict(int), defaultdict(int)
+    tables, cells, made_up = defaultdict(int), defaultdict(int), defaultdict(int)
     table_notes = []
     for r in mine:
         raw = _raw(r)
@@ -105,17 +108,26 @@ def summarize(rows: List) -> Optional[dict]:
                 f[k] += float(raw.get(k) or 0)
             f[kind or "unknown"] += 1
             f["n"] += 1
+            if raw.get("made_up"):
+                f[raw["made_up"]] += 1
+            if not raw.get("part_of") and "rows" not in raw and (raw.get("tp") or raw.get("fp")):
+                made_up["values"] += 1
+                made_up["grounded"] += bool(raw.get("grounded"))
+                if raw.get("made_up"):
+                    made_up[raw["made_up"]] += 1
     out = {}
     for name, f in fields.items():
         tp, fp, fn = f["tp"], f["fp"], f["fn"]
         out[name] = {"precision": tp / (tp + fp) if tp + fp else None, "recall": tp / (tp + fn) if tp + fn else None,
-                     "n": int(f["n"]), **{k: int(f[k]) for k in ("correct", "wrong", "missing", "invented") if f[k]}}
+                     "n": int(f["n"]), **{k: int(f[k]) for k in ("correct", "wrong", "missing", "invented", *_MADE_UP)
+                                          if f[k]}}
     return {"documents": len({r.case_id for r in mine}), "checked": len(docs), "all_correct": sum(docs),
             "accuracy": sum(acc) / len(acc) if acc else None, "fields": dict(sorted(out.items())),
             "cells": {"precision": _ratio(cells["tp"], cells["tp"] + cells["fp"]),
                       "recall": _ratio(cells["tp"], cells["tp"] + cells["fn"]),
                       "f1": _ratio(2 * cells["tp"], 2 * cells["tp"] + cells["fp"] + cells["fn"])}
             if cells["tp"] + cells["fp"] + cells["fn"] else None,
+            "made_up": {k: made_up[k] for k in ("values", "grounded", *_MADE_UP)} if made_up["values"] else None,
             "rules": {k: {"held": v[0], "checked": v[1]} for k, v in sorted(rules.items())},
             "types": _types(confusion), "split": _split(split), "confidence": [list(x) for x in confident],
             "tables": {"n": tables["n"], "right": tables["right"], "shape_right": tables["shape_right"],
@@ -270,13 +282,19 @@ def _field_lines(now: dict, before: Optional[dict]) -> List[str]:
             f" (was {_pct(bc['f1'])})" if bc and abs(bc["f1"] - c["f1"]) >= 0.0005 else "") + \
             f", precision {_pct(c['precision'])}, recall {_pct(c['recall'])}"
     out = [head]
+    m, bm = now.get("made_up"), (before or {}).get("made_up")
+    if m and (any(m[k] for k in _MADE_UP) or bm and any(bm[k] for k in _MADE_UP)):
+        parts = [f"{m[k]} {k}" + (f" (was {bm[k]})" if bm and bm[k] != m[k] else "") for k in _MADE_UP
+                 if m[k] or (bm and bm[k]) or k != "format" and m["grounded"]]
+        out.append(f"  made up, of {m['values']} values extracted: " + ", ".join(parts)
+                   + ("" if m["grounded"] else " (inferred and fabricated need the text: score_document(..., text=))"))
     rows = [(k, v) for k, v in now["fields"].items() if v.get("wrong") or v.get("missing") or v.get("invented")
             or (before and (before["fields"].get(k) or {}).get("recall") not in (None, v.get("recall")))]
     if rows:
         width = max(len(k) for k, _ in rows)
         out.append(f"  {'':<{width}}  precision  recall")
         for k, v in rows[:15]:
-            errs = ", ".join(f"{v[e]} {e}" for e in ("wrong", "missing", "invented") if v.get(e))
+            errs = ", ".join(f"{v[e]} {e}" for e in ("wrong", "missing", "invented", *_MADE_UP) if v.get(e))
             out.append(f"  {k:<{width}}  {_pct(v['precision']):>9}  {_pct(v['recall']):>6}" + (f"   {errs}" if errs else ""))
         if len(rows) > 15:
             out.append(f"  … and {len(rows) - 15} more fields")
@@ -370,6 +388,9 @@ def markdown(now: dict, before: Optional[dict] = None) -> str:
         s += f" · weighted field accuracy {_pct(now['accuracy'])}"
     if now.get("cells"):
         s += f" · cell F1 {_pct(now['cells']['f1'])}"
+    m = now.get("made_up")
+    if m and any(m[k] for k in _MADE_UP):
+        s += " · made up: " + ", ".join(f"{m[k]} {k}" for k in _MADE_UP if m[k])
     worst = sorted(((k, v) for k, v in now["fields"].items() if v["recall"] is not None and v["recall"] < 1),
                    key=lambda kv: kv[1]["recall"])[:3]
     if worst:

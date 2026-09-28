@@ -78,6 +78,57 @@ class FieldAccuracy(_AwaitingTruth):
         return MeasureOutput(self.id, "measured", results)
 
 
+class _MadeUp(_AwaitingTruth):
+    """Of the values extracted, the share made up this way (assay_sdk.documents.score_document).
+    Line items aren't sorted, so their tables aren't counted."""
+    higher_is_better = False
+    dimensions = ("segment", "document_type", "field")
+    made_up: str = ""
+    grounded = True  # told apart only when the document's text was given
+
+    def compute(self, source, window: Window) -> MeasureOutput:
+        rows = source.field_scores(window, grounded=self.grounded) if hasattr(source, "field_scores") else None
+        if rows is None:
+            return super().compute(source, window)
+        if self.grounded and not rows:
+            return unmeasured(self.id, "No fields scored with the document's text yet: "
+                                       "score_document(..., text=ocr_text).")
+        from assay.measures.documents import _slices
+        return _slices(self.id, [r for r in rows if r["extracted"] and not r["table"]], self.dimensions,
+                       lambda g: (sum(r["made_up"] == self.made_up for r in g), len(g)))
+
+
+class FabricatedValues(_MadeUp):
+    """Values nowhere in the document: invented outright."""
+    id = "fabricated_value_rate"
+    name = "Fabricated values"
+    question = "Of the values extracted, how many appear nowhere in the document?"
+    made_up = "fabricated"
+    waiting_on = "fields scored with the document's text (assay_sdk.documents.score_document, text=)."
+
+
+class InferredValues(_MadeUp):
+    """Values that are in the document, just not as this field: a guess from context (the state
+    mentioned most for governing law, a county, the seller as the buyer). Right-looking, so the
+    costliest to miss in review."""
+    id = "inferred_value_rate"
+    name = "Inferred values"
+    question = "Of the values extracted, how many are guesses from context: in the document, but not this field?"
+    made_up = "inferred"
+    waiting_on = "fields scored with the document's text (assay_sdk.documents.score_document, text=)."
+
+
+class FormatErrors(_MadeUp):
+    """The right value in the wrong shape: day and month swapped, a decimal separator read wrong.
+    Told apart without the document's text."""
+    id = "format_error_rate"
+    name = "Format errors"
+    question = "Of the values extracted, how many hold the right information in the wrong shape?"
+    made_up = "format"
+    grounded = False
+    waiting_on = "a labelled evaluation set with correct values per field (assay_sdk.documents.score_document)."
+
+
 class SupersededValues(_AwaitingTruth):
     """From documents checked against the later ones that amend or replace them
     (assay_sdk.documents.superseded_values): of the values a later document changed, the share

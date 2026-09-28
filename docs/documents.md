@@ -43,6 +43,30 @@ separator read wrong?)", "the currency is USD, not EUR", "the sign is wrong", "t
 A correct value that can't be read (a date that isn't one) is the label's problem, not the
 extractor's: that check couldn't be judged, and isn't counted.
 
+## How a value was made up
+
+Not every made-up value is the same, and they're counted apart. Give `score_document` the
+document's text (its OCR) and each wrong or invented value says which kind it is:
+
+| Kind | What it is | Example |
+|---|---|---|
+| format | the right information in the wrong shape | 03/04 for 04/03; 1,250.00 for 1,250,000.00; "Doe, Jane" for "Jane Doe" |
+| inferred | a guess from context: the value is in the document, just not as this field | governing law "California", because California is mentioned a lot, when the contract says New York; the seller's name as the buyer |
+| fabricated | the value is nowhere in the document | a county that no page names; a parcel number on a deed that has none |
+
+```python
+s = score_document(run, expected, extracted, DEED_SCHEMA, text=ocr_text)
+s.made_up                         # {"format": 2, "inferred": 2, "fabricated": 2}
+s.fields["grantee"].note          # "jane roe, not john doe; inferred: it's in the document, but not as this field"
+```
+
+Inferred values are the ones to watch on recording documents such as deeds: a county, or which
+party is the grantor and which the grantee, look right to a reviewer because the words are
+there. They're read by type, like `appears_in`, so 1234.56 is found as "1,234.56" and a date as
+"4 March 2026". Format errors are told apart without the text; inferred and fabricated need it.
+Missing values weren't made up and aren't sorted. Line-item cells aren't sorted either, so their
+tables aren't counted in these shares.
+
 Zero is a value, not an empty one. Some benchmarks treat 0 and "" as the same; that hides the
 difference between a field left out and one read wrong. Here 0 extracted where the document has
 nothing is invented, and nothing extracted where it says 0 is missing.
@@ -313,9 +337,12 @@ total '1284.56'".
 
 ```
 Documents    3 · all fields correct 2/3 (66.7%, was 100%) · weighted field accuracy 95.8% (was 100%) · cell F1 94.1% (was 100%), precision 94.1%, recall 94.1%
+  made up, of 9 values extracted: 1 format (was 0) (inferred and fabricated need the text: score_document(..., text=))
                 precision  recall
-  invoice_date      66.7%   66.7%   1 wrong
+  invoice_date      66.7%   66.7%   1 wrong, 1 format
 ```
+
+With the document's text, the made-up line counts inferred and fabricated values too.
 
 It lists the fields with errors, or whose recall changed, with precision (of the values
 extracted, how many were right), recall (of the values the documents have, how many were
@@ -332,6 +359,7 @@ segment, with the usual expected range and alerts ([Measures](measures.md)):
 |---|---|
 | Severity-weighted field accuracy (`field_accuracy`), also by field | `score_document` |
 | Field cells right (`field_cell_f1`): F1 over header and line-item cells | `score_document` |
+| Fabricated values (`fabricated_value_rate`), inferred values (`inferred_value_rate`), format errors (`format_error_rate`): each a share of the values extracted, also by field | `score_document`, with `text=` for the first two |
 | Document splitting straight-through (`split_stp`) | `score_split` |
 | OCR characters wrong (`ocr_cer`), OCR digits wrong (`ocr_digit_error_rate`), OCR reading order (`ocr_reading_order`) | `score_ocr` |
 | Fields read from the right place (`location_accuracy`), also by field | `score_locations` |

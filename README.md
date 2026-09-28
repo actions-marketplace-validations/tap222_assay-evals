@@ -38,7 +38,9 @@ REGRESSIONS
   fails the run until a maintainer accepts it with a label: [security](docs/security.md).
 - **Document extraction.** Each field against its correct value, by type (dates, amounts,
   "1.234,56 €"), wrong, missing or invented; line items matched in any order; all fields correct
-  per document, and precision, recall and F1 over cells, headers and line items alike; rules such as line items adding up to the total; document types as a confusion
+  per document, and precision, recall and F1 over cells, headers and line items alike; made-up
+  values counted apart: fabricated (nowhere in the document), inferred (in it, but not as this
+  field) and format errors (the right value in the wrong shape); rules such as line items adding up to the total; document types as a confusion
   matrix; files split into documents; whether the extractor's confidence is safe to auto-approve
   on; OCR error rates (characters, words, digits) and reading order; tables' structure and cells;
   where on the page a value was read; values that aren't in the document's text; the escape rate
