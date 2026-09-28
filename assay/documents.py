@@ -12,8 +12,9 @@ complete (no row missing, made up or duplicated). Tables: TEDS beside the cells'
 how many documents it held on.
 
 Document types: a confusion matrix, and precision and recall per type. Splitting: files split
-right (every document on the right pages), documents right, and precision and recall over the
-pages a new document starts on. Confidence, where the extractor gives one: whether a confident
+right (every document on the right pages), documents right, precision and recall over the pages a
+new document starts on, panoptic quality, and the pages a reviewer must move to put it right (in
+minutes and money with [documents] seconds_per_drag and rework_per_hour). Confidence, where the extractor gives one: whether a confident
 value is a right one (expected calibration error), the lowest threshold whose auto-approved
 values reach the target accuracy, and at the threshold you use, how many wrong values it lets
 through.
@@ -99,6 +100,12 @@ def summarize(rows: List) -> Optional[dict]:
             for k in ("tp", "fp", "fn"):
                 split[k] += int(raw.get(k) or 0)
                 split["b_" + k] += int((raw.get("boundaries") or {}).get(k) or 0)
+            if raw.get("panoptic"):
+                split["scored"] += 1
+                for k in ("iou", "tp", "fp", "fn"):
+                    split["pq_" + k] += raw["panoptic"].get(k) or 0
+                split["drags"] += int(raw.get("drags") or 0)
+                split["pages"] += int(raw.get("pages") or 0)
         elif kind == "document":
             docs.append(r.status == "pass")
             if raw.get("accuracy") is not None:
@@ -259,7 +266,10 @@ def _split(s: Dict[str, int]) -> Optional[dict]:
     return {"files": s["files"], "right": s["right"], "multi": s["multi"], "multi_right": s["multi_right"],
             "precision": _ratio(s["tp"], s["tp"] + s["fp"]), "recall": _ratio(s["tp"], s["tp"] + s["fn"]),
             "boundary_precision": _ratio(s["b_tp"], s["b_tp"] + s["b_fp"]),
-            "boundary_recall": _ratio(s["b_tp"], s["b_tp"] + s["b_fn"])}
+            "boundary_recall": _ratio(s["b_tp"], s["b_tp"] + s["b_fn"]),
+            **({"pq": _ratio(s["pq_iou"], s["pq_tp"] + 0.5 * s["pq_fp"] + 0.5 * s["pq_fn"]),
+                "drags": int(s["drags"]), "pages": int(s["pages"]), "scored": int(s["scored"])}
+               if s.get("scored") else {})}
 
 
 MIN_APPROVED = 10  # fewer auto-approved values than this can't say a threshold is safe
@@ -310,7 +320,7 @@ def lines(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = None) 
     for k, v in broken.items():
         out.append(f"Rule         {k}: held on {v['held']} of {v['checked']}")
     out += _type_lines(now.get("types"), (before or {}).get("types"))
-    out += _split_lines(now.get("split"), (before or {}).get("split"))
+    out += _split_lines(now.get("split"), (before or {}).get("split"), cfg)
     out += _confidence_lines(now, before, cfg)
     out += _ocr_lines(now.get("ocr"), (before or {}).get("ocr"))
     tb, btb = now.get("tables"), (before or {}).get("tables")
@@ -417,16 +427,33 @@ def _type_lines(t: Optional[dict], b: Optional[dict]) -> List[str]:
     return out
 
 
-def _split_lines(s: Optional[dict], b: Optional[dict]) -> List[str]:
+def drag_cost(drags: int, cfg: Optional[dict]) -> str:
+    """ "about 4 minutes by hand ($2.00)", from [documents] seconds_per_drag and rework_per_hour."""
+    sec = (cfg or {}).get("seconds_per_drag")
+    if not sec or not drags:
+        return ""
+    minutes = drags * sec / 60
+    rate = (cfg or {}).get("rework_per_hour")
+    return (f", about {minutes:,.0f} minute{'s' * (round(minutes) != 1)} by hand" if minutes >= 1
+            else f", about {drags * sec:,.0f} seconds by hand") + (f" (${minutes / 60 * rate:,.2f})" if rate else "")
+
+
+def _split_lines(s: Optional[dict], b: Optional[dict], cfg: Optional[dict] = None) -> List[str]:
     if not s:
         return []
     share, was = _ratio(s["right"], s["files"]), _ratio(b["right"], b["files"]) if b else None
     line = f"Splitting    {s['files']} files · split right {s['right']}/{s['files']} ({_pct(share)}{_was(share, was)})"
     if s["multi"] and s["multi"] != s["files"]:
         line += f" · with several documents {s['multi_right']}/{s['multi']}"
-    return [line, f"             documents right: precision {_pct(s['precision'])}, recall {_pct(s['recall'])} · "
-                  f"where a document starts: precision {_pct(s['boundary_precision'])}, recall "
-                  f"{_pct(s['boundary_recall'])}"]
+    out = [line, f"             documents right: precision {_pct(s['precision'])}, recall {_pct(s['recall'])} · "
+                 f"where a document starts: precision {_pct(s['boundary_precision'])}, recall "
+                 f"{_pct(s['boundary_recall'])}"]
+    if s.get("pq") is not None:
+        bpq, bd = (b or {}).get("pq"), (b or {}).get("drags")
+        out.append(f"             panoptic quality {_pct(s['pq'])}{_paren_was(s['pq'], bpq)} · pages to move by hand "
+                   f"{s['drags']} of {s['pages']}" + (f" (was {bd})" if bd is not None and bd != s["drags"] else "")
+                   + drag_cost(s["drags"], cfg))
+    return out
 
 
 def _confidence_lines(now: dict, before: Optional[dict], cfg: Optional[dict]) -> List[str]:

@@ -200,10 +200,37 @@ otherwise says how it went wrong:
 - "pages 1-3 is one document, cut into 2"
 - "the document starting on page 3 was split at page 4" (a boundary a page or two off)
 
-The report gives the share of files split right (and of those holding several documents),
-precision and recall over documents (right when their first and last pages are), and over the
-pages a new document starts on. On the dashboard, **Document splitting straight-through**
-(`split_stp`) is the share of files holding several documents that split right.
+Each file is scored the ways the page stream segmentation literature does:
+
+| Score | What it counts |
+|---|---|
+| Where a document starts | precision and recall over the pages a new document starts on |
+| Documents right | precision and recall over documents, right only when their exact pages match |
+| Panoptic quality (`pq`) | documents matched when they share over half their pages, each match weighted by how much (IoU), over the matches plus half the documents unmatched on either side. A comparison of six metrics on the WooIR dataset found it the most fitting for this task. `sq` is the matches' mean IoU, `rq` the F1 of matching |
+| Pages to move by hand (`drags`) | the fewest pages a reviewer must drag to put the split right (minimum drags and drops): each correct document is kept as the predicted one it shares most pages with, one to one, and every other page moves once |
+
+Boundaries a page off and merges score very differently on these: pages 1-10 cut in half has
+half its boundaries wrong, no document right, a panoptic quality of 0 (half the pages isn't over
+half), and 5 pages to drag back.
+
+What a wrong split costs a reviewer, in time and money:
+
+```toml
+[documents]
+seconds_per_drag = 20      # one page dragged to where it belongs
+rework_per_hour = 36       # USD
+```
+
+```
+Splitting    2 files · split right 0/2 (0%, was 100%)
+             documents right: precision 33.3%, recall 16.7% · where a document starts: precision 100%, recall 25.0%
+             panoptic quality 37.0% (was 100%) · pages to move by hand 4 of 12 (was 0), about 1 minute by hand ($0.80)
+```
+
+On the dashboard: **Document splitting straight-through** (`split_stp`), the share of files
+holding several documents that split right; **Splitting panoptic quality** (`split_pq`); and
+**Pages moved by hand** (`split_drag_rate`), the share of pages a reviewer would drag, by segment
+and document type.
 
 ## Confidence: when is a value safe to approve without review?
 
@@ -442,7 +469,7 @@ segment, with the usual expected range and alerts ([Measures](measures.md)):
 | Severity-weighted field accuracy (`field_accuracy`), also by field | `score_document` |
 | Field cells right (`field_cell_f1`): F1 over header and line-item cells | `score_document` |
 | Fabricated values (`fabricated_value_rate`), inferred values (`inferred_value_rate`), format errors (`format_error_rate`): each a share of the values extracted, also by field | `score_document`, with `text=` for the first two |
-| Document splitting straight-through (`split_stp`) | `score_split` |
+| Document splitting straight-through (`split_stp`), panoptic quality (`split_pq`), pages moved by hand (`split_drag_rate`) | `score_split` |
 | OCR characters wrong (`ocr_cer`), OCR digits wrong (`ocr_digit_error_rate`), OCR reading order (`ocr_reading_order`) | `score_ocr` |
 | Fields read from the right place (`location_accuracy`), also by field | `score_locations` |
 | Table cells right (`table_cell_f1`), table similarity (`table_teds`) | `score_table` |

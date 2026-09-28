@@ -240,15 +240,74 @@ def test_a_document_type_is_right_or_it_says_what_it_was_taken_for():
 
 def test_a_split_says_what_went_wrong():
     merged = score_split(None, [(1, 2), (3, 3), (4, 6)], [(1, 2), (3, 6)])
-    assert not merged.correct and merged.notes == ["pages 3-6 came out as one document, which is 2"]
+    assert not merged.correct and merged.notes == ["pages 3-6 came out as one document, which is 2",
+                                                   "1 page to move by hand"]
     assert merged.boundaries == {"tp": 1, "fp": 0, "fn": 1}
     cut = score_split(None, [(1, 3)], [(1, 1), (2, 3)])
-    assert cut.notes == ["pages 1-3 is one document, cut into 2"]
+    assert cut.notes == ["pages 1-3 is one document, cut into 2", "1 page to move by hand"]
     shifted = score_split(None, [1, 3, 5], [1, 4, 5], page_count=6)  # first pages, with the page count
-    assert shifted.notes == ["the document starting on page 3 was split at page 4"] and shifted.right == [(5, 6)]
+    assert shifted.notes == ["the document starting on page 3 was split at page 4", "1 page to move by hand"]
+    assert shifted.right == [(5, 6)]
     assert score_split(None, [{"pages": [1, 2]}, {"start": 3, "end": 4}], [(1, 2), (3, 4)]).correct
     with pytest.raises(ValueError, match="page_count"):
         score_split(None, [1, 3], [1, 3])
+
+
+def test_a_split_has_its_panoptic_quality_and_the_pages_to_move():
+    s = score_split(None, [(1, 2), (3, 3), (4, 6)], [(1, 3), (4, 6)])
+    # (1,2)~(1,3) share 2 of 3 pages, (4,6) exact; page 3 alone matches nothing
+    assert s.panoptic == {"iou": pytest.approx(5 / 3), "tp": 2, "fp": 0, "fn": 1}
+    assert s.pq == pytest.approx((5 / 3) / 2.5) and s.sq == pytest.approx(5 / 6) and s.rq == pytest.approx(0.8)
+    assert s.drags == 1 and s.pages == 6  # drag page 3 out to a document of its own
+    halves = score_split(None, [(1, 10)], [(1, 5), (6, 10)])
+    assert halves.pq == 0 and halves.drags == 5  # half the pages isn't over half: no match
+    assert score_split(None, [(1, 3), (4, 6)], [(1, 2), (3, 4), (5, 6)]).drags == 2  # pages 3 and 4
+    assert score_split(None, [(1, 4)], [(1, 1), (2, 2), (3, 3), (4, 4)]).drags == 3
+    right = score_split(None, [(1, 2), (3, 6)], [(1, 2), (3, 6)])
+    assert right.pq == 1.0 and right.drags == 0 and right.notes == []
+    assert score_split(None, [(1, 4)], [(1, 2)]).drags == 2  # pages left out are dragged in
+
+
+SPLITS = '''
+import os
+from assay_sdk.documents import score_split
+TRUTH = [(1, 2), (3, 3), (4, 6)]
+
+def test_file_1(assay_case):
+    score_split(assay_case, TRUTH, TRUTH if os.environ.get("MODE") != "after" else [(1, 3), (4, 6)])
+
+def test_file_2(assay_case):
+    score_split(assay_case, TRUTH, TRUTH if os.environ.get("MODE") != "after" else [(1, 6)])
+'''
+
+
+def test_split_quality_and_its_cost_in_the_report_and_on_the_dashboard(project):
+    from assay import coverage, store
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    (project / "tests").mkdir()
+    (project / "tests" / "test_split.py").write_text(SPLITS)
+    (project / "assay.toml").write_text("[documents]\nseconds_per_drag = 20\nrework_per_hour = 36\n")
+    assert run(project).returncode == 0
+    out = run(project, env={"MODE": "after"})
+    # file 1: 2 matches, IoU 2/3 and 1, page 3 unmatched; 1 page to move.
+    # file 2, all in one: (4,6) is 3 of its 6 pages, not over half: nothing matches; keep (4,6), move 3.
+    # PQ (5/3) / (2 + 0.5 * 1 + 0.5 * 4) = 37.0%; 4 pages at 20 s, $36 an hour: 80 s, $0.80
+    assert "panoptic quality 37.0% (was 100%) · pages to move by hand 4 of 12 (was 0), " \
+           "about 1 minute by hand ($0.80)" in out.stdout
+    engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
+    src, now = EventsSource(engine, "local"), datetime.utcnow()
+    w = Window(now - timedelta(days=1), now + timedelta(days=1))
+    pq, drags = REGISTRY["split_pq"].compute(src, w), REGISTRY["split_drag_rate"].compute(src, w)
+    assert drags.overall.numerator == 4 and drags.overall.denominator == 24  # both runs' files
+    assert pq.status == "measured" and 0 < pq.overall.value < 1
+    live = {m["id"]: m["status"] for m in coverage.compute(src, w)["measures"]}
+    assert live["split_pq"] == live["split_drag_rate"] == "live"
+    (project / "assay.toml").write_text("[documents]\nseconds_per_drag = 0\n")
+    from assay.local import load_config, SetupError
+    with pytest.raises(SetupError, match="a positive number"):
+        load_config(project)
 
 
 def test_confidence_says_what_threshold_is_safe_and_what_yours_lets_through():

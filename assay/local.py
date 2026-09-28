@@ -259,14 +259,22 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
 
 def _documents_config(c: dict) -> dict:
     """[documents]: auto_approve, the confidence at or above which your pipeline skips review;
-    target, the accuracy a threshold must reach to be suggested (default 0.99); and [documents.gates],
+    target, the accuracy a threshold must reach to be suggested (default 0.99); seconds_per_drag and
+    rework_per_hour, what a page moved by hand costs when a split is wrong; and [documents.gates],
     per-field gates (assay/documents.py check_gates)."""
     from assay.documents import GATE_KEYS
-    unknown = set(c) - {"auto_approve", "target", "gates"}
+    unknown = set(c) - {"auto_approve", "target", "gates", "seconds_per_drag", "rework_per_hour"}
     if unknown:
         raise SetupError(f"{CONFIG}, [documents]: unknown {', '.join(sorted(unknown))}. "
-                         "Use auto_approve, target, gates.")
-    out = {"auto_approve": None, "target": 0.99, "gates": {}}
+                         "Use auto_approve, target, gates, seconds_per_drag, rework_per_hour.")
+    out = {"auto_approve": None, "target": 0.99, "gates": {}, "seconds_per_drag": None, "rework_per_hour": None}
+    for k in ("seconds_per_drag", "rework_per_hour"):  # what a page moved by hand costs, for splits
+        if k in c:
+            v = c[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+                raise SetupError(f"{CONFIG}, [documents] {k}: a positive number, e.g. "
+                                 + ("15 (seconds)." if k == "seconds_per_drag" else "40 (USD an hour)."))
+            out[k] = float(v)
     gates = c.get("gates") or {}
     if not isinstance(gates, dict):
         raise SetupError(f"{CONFIG}, [documents.gates]: a field per line, e.g. tax_number = {{ max_errors = 0 }}.")

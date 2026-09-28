@@ -873,10 +873,31 @@ class SplitScore:
     right: List[Tuple[int, int]]  # documents split exactly: the same first and last page
     notes: List[str]
     boundaries: Dict[str, int]  # tp, fp, fn over the pages a new document starts on (after the first)
+    panoptic: Dict[str, float] = dc_field(default_factory=dict)  # iou (summed over matches), tp, fp, fn
+    drags: int = 0  # pages a reviewer must move to put the split right (minimum drags and drops)
+    pages: int = 0
 
     @property
     def correct(self) -> bool:
         return self.expected == self.predicted
+
+    @property
+    def pq(self) -> float:
+        """Panoptic quality: documents matched when they share over half their pages (IoU > 0.5),
+        their mean IoU (sq) times the F1 of matching (rq)."""
+        p = self.panoptic
+        den = p["tp"] + 0.5 * p["fp"] + 0.5 * p["fn"]
+        return p["iou"] / den if den else 1.0
+
+    @property
+    def sq(self) -> float:
+        return self.panoptic["iou"] / self.panoptic["tp"] if self.panoptic["tp"] else 0.0
+
+    @property
+    def rq(self) -> float:
+        p = self.panoptic
+        den = p["tp"] + 0.5 * p["fp"] + 0.5 * p["fn"]
+        return p["tp"] / den if den else 1.0
 
 
 def _segments(v: Any, page_count: Optional[int]) -> List[Tuple[int, int]]:
@@ -900,11 +921,39 @@ def _pages(s: Tuple[int, int]) -> str:
     return f"page {s[0]}" if s[0] == s[1] else f"pages {s[0]}-{s[1]}"
 
 
+def _panoptic(exp: List[Tuple[int, int]], pred: List[Tuple[int, int]]) -> Dict[str, float]:
+    sets = lambda segs: [set(range(a, b + 1)) for a, b in segs]
+    es, ps = sets(exp), sets(pred)
+    iou, tp = 0.0, 0
+    for e in es:  # over half their pages in common: at most one match each, no assignment needed
+        for p in ps:
+            x = len(e & p) / len(e | p)
+            if x > 0.5:
+                iou, tp = iou + x, tp + 1
+    return {"iou": iou, "tp": tp, "fp": len(ps) - tp, "fn": len(es) - tp}
+
+
+def _drags(exp: List[Tuple[int, int]], pred: List[Tuple[int, int]]) -> Tuple[int, int]:
+    """(pages to move, pages): each correct document kept as the predicted one it shares most with,
+    one to one, for the most pages kept in all; every other page is dragged once, to its document
+    (or to a new one). Pages the prediction left out are dragged in."""
+    es = [set(range(a, b + 1)) for a, b in exp]
+    ps = [set(range(a, b + 1)) for a, b in pred]
+    kept = _assign([[len(e & p) for p in ps] for e in es])
+    pages = len(set().union(*es)) if es else 0
+    return pages - sum(len(es[i] & ps[j]) for i, j in kept), pages
+
+
 def score_split(run, expected: Any, predicted: Any, page_count: Optional[int] = None) -> SplitScore:
     """Score how a file was split into documents, recorded as the check `split`: passes when every
     document starts and ends on the right page. Documents are given as page ranges ((1, 2), (3, 3)),
     page lists, or their first pages (with page_count). Says what went wrong: documents merged,
-    one cut in two, a boundary a page off."""
+    one cut in two, a boundary a page off.
+
+    Scored three ways: pages where a new document starts (precision and recall), documents split
+    exactly, and panoptic quality (pq: documents matched on over half their pages, weighted by how
+    much they overlap), the metric found most fitting for page stream segmentation. And `drags`,
+    the fewest pages a reviewer must drag to put it right: what a split error costs in human time."""
     exp, pred = _segments(expected, page_count), _segments(predicted, page_count)
     right = sorted(set(exp) & set(pred))
     starts = lambda segs: {s[0] for s in segs} - {min((x[0] for x in segs), default=1)}
@@ -933,14 +982,18 @@ def score_split(run, expected: Any, predicted: Any, page_count: Optional[int] = 
         else:
             notes.append(f"{_pages(e)}: " + (", ".join(_pages(p) for p in over) if over else "no document") + " instead")
     bounds = {"tp": len(es & ps), "fp": len(ps - es), "fn": len(es - ps)}
-    score = SplitScore(exp, pred, right, notes, bounds)
+    drags, pages = _drags(exp, pred)
+    score = SplitScore(exp, pred, right, notes, bounds, _panoptic(exp, pred), drags, pages)
+    if drags:
+        notes.append(f"{drags} page{'s' * (drags != 1)} to move by hand")
     if run is not None:
         run.check("split", "pass" if score.correct else "fail", expected=json.dumps(exp), actual=json.dumps(pred),
                   evaluator=EVALUATOR, reason=None if score.correct else "; ".join(notes[:4]),
                   category=None if score.correct else "split_wrong",
                   raw_output=json.dumps({"kind": "split", "documents": len(exp), "tp": len(right),
                                          "fp": len(pred) - len(right), "fn": len(exp) - len(right),
-                                         "boundaries": bounds}))
+                                         "boundaries": bounds, "panoptic": score.panoptic,
+                                         "pq": round(score.pq, 6), "drags": drags, "pages": pages}))
     return score
 
 

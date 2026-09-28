@@ -145,3 +145,38 @@ class TableTeds(_FromChecks):
 
     def ratio(self, rows):
         return sum(r["raw"]["teds"] for r in rows), len(rows)
+
+
+class _SplitChecks(_FromChecks):
+    kind = "split"
+    sent_by = "files scored against their correct boundaries (assay_sdk.documents.score_split)"
+    dimensions = ("segment", "document_type")
+
+    def rows(self, source, window):
+        rows = super().rows(source, window)
+        return None if rows is None else [r for r in rows if r["raw"].get("panoptic")]  # sent before these were
+
+
+class SplitPanopticQuality(_SplitChecks):
+    """Panoptic quality, borrowed from image segmentation and found the most fitting metric for
+    page stream segmentation: documents matched when they share over half their pages, each match
+    weighted by how much, over matches plus half the documents unmatched on either side."""
+    id = "split_pq"
+    name = "Splitting panoptic quality"
+    question = "How well do the documents a file was split into match the real ones (panoptic quality)?"
+
+    def ratio(self, rows):
+        p = {k: sum(r["raw"]["panoptic"].get(k) or 0 for r in rows) for k in ("iou", "tp", "fp", "fn")}
+        return p["iou"], p["tp"] + 0.5 * p["fp"] + 0.5 * p["fn"]
+
+
+class SplitDragRate(_SplitChecks):
+    """The fewest pages a reviewer must drag to put each split right (minimum drags and drops), as a
+    share of pages: what split errors cost in human time."""
+    id = "split_drag_rate"
+    name = "Pages moved by hand"
+    question = "Of the pages in split files, how many would a reviewer have to drag to put the split right?"
+    higher_is_better = False
+
+    def ratio(self, rows):
+        return sum(r["raw"].get("drags") or 0 for r in rows), sum(r["raw"].get("pages") or 0 for r in rows)
