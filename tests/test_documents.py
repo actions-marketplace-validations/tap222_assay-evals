@@ -849,3 +849,83 @@ def test_groups_completeness_and_teds_in_the_report_and_on_the_dashboard(project
     inferred = REGISTRY["inferred_value_rate"].compute(src, w)
     assert (inferred.overall.numerator, inferred.overall.denominator) == (1, 3)  # the grantor's three parts
     assert REGISTRY["table_teds"].compute(src, w).overall.value == pytest.approx(0.7, abs=1e-6)
+
+
+# ---------- gates: line items, and fields where one error is one too many ----------
+
+COLLAPSE = '''
+import os
+from assay_sdk.documents import score_document, Text, Money, LineItems
+SCHEMA = {"invoice_number": Text(), "tax_number": Text(), "total": Money(),
+          "line_items": LineItems({"description": Text(), "amount": Money()}, key="description")}
+ROWS = [{"description": d, "amount": str(10 * (i + 1))} for i, d in enumerate("abcdefghij")]
+TRUTH = {f"inv-{n}": {"invoice_number": str(n), "tax_number": f"DE{n}99", "total": "550", "line_items": ROWS}
+         for n in range(1, 5)}
+
+def extract(doc):
+    out = {**TRUTH[doc], "line_items": [dict(r) for r in ROWS]}
+    out["line_items"][0]["amount"] = "1"  # always one row wrong: the check was failing already
+    if os.environ.get("MODE") == "after":  # the alternative model: headers fine, line items collapse
+        for r in out["line_items"][1:8]:
+            r["amount"] = "0"
+    if os.environ.get("TAX") == "wrong" and doc == "inv-4":
+        out["tax_number"] = "DE499X"
+    return out
+
+def test_inv_1(assay_case): score_document(assay_case, TRUTH["inv-1"], extract("inv-1"), SCHEMA)
+def test_inv_2(assay_case): score_document(assay_case, TRUTH["inv-2"], extract("inv-2"), SCHEMA)
+def test_inv_3(assay_case): score_document(assay_case, TRUTH["inv-3"], extract("inv-3"), SCHEMA)
+def test_inv_4(assay_case): score_document(assay_case, TRUTH["inv-4"], extract("inv-4"), SCHEMA)
+'''
+
+
+def test_line_items_collapsing_fails_the_run_though_the_check_was_already_failing(project):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_inv.py").write_text(COLLAPSE)
+    from assay.__main__ import main
+    assert run(project).returncode == 1  # one row wrong in every document, and no baseline yet
+    assert main(["accept"]) == 0  # the team accepts it: a known, small line-item error
+    assert run(project).returncode == 0
+    out = run(project, env={"MODE": "after"})
+    assert out.returncode == 1, out.stdout
+    # 9 of 10 rows right in every document before, 2 of 10 now: the headers stay right
+    assert "failed: line_items: F1 20.0%, was 90.0%: down 70.0 points, at most 5 allowed" in out.stdout
+    assert "1 document gate failed: line_items: F1 20.0%" in out.stdout
+    md = (project / ".assay" / "summary.md").read_text()
+    assert "weighted field accuracy 80.0%" in md  # the average still looks fine
+    assert "gates failed: line\\_items: F1 20.0%, was 90.0%" in md
+    # a small drop stays within the default
+    (project / "tests" / "test_inv.py").write_text(COLLAPSE.replace("[1:8]", "[1:1]"))
+    assert run(project).returncode == 0
+
+
+def test_one_wrong_tax_number_fails_the_run(project):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_inv.py").write_text(COLLAPSE)
+    (project / "assay.toml").write_text("[documents.gates]\ntax_number = { max_errors = 0 }\nline_items = {}\n")
+    from assay.__main__ import main
+    run(project)
+    assert main(["accept"]) == 0
+    assert run(project).returncode == 0
+    out = run(project, env={"TAX": "wrong", "MODE": "after"})  # line items collapse too, but that gate is off
+    assert out.returncode == 1
+    assert "Gates        0 of 1 held:" in out.stdout
+    assert "failed: tax_number: 1 wrong, missing or invented, at most 0 allowed" in out.stdout
+
+
+def test_gates_are_checked_when_read(project):
+    from assay.local import load_config, SetupError
+    for bad, says in [("tax_number = 0", "a table of rules"), ("total = { max_wrong = 0 }", "unknown max_wrong"),
+                      ("total = { min_recall = 95 }", "a share from 0 to 1"),
+                      ("total = { max_errors = 0.5 }", "a whole number")]:
+        (project / "assay.toml").write_text(f"[documents.gates]\n{bad}\n")
+        with pytest.raises(SetupError, match=says):
+            load_config(project)
+
+
+def test_gates_need_something_to_gate():
+    from assay.documents import check_gates
+    now = {"fields": {"total": {"precision": 1.0, "recall": 0.9, "f1": 0.95, "errors": 1, "table": False}}}
+    got = check_gates(now, None, {"total": {"min_recall": 0.95, "max_drop": 0.01}, "tax_number": {"max_errors": 0}})
+    assert [(g["field"], g["rule"], g["passed"]) for g in got] == [
+        ("tax_number", "scored", False), ("total", "min_recall", False)]  # max_drop: no baseline to compare with

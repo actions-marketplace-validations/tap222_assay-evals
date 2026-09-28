@@ -258,12 +258,31 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
 
 
 def _documents_config(c: dict) -> dict:
-    """[documents]: auto_approve, the confidence at or above which your pipeline skips review, and
-    target, the accuracy a threshold must reach to be suggested (default 0.99)."""
-    unknown = set(c) - {"auto_approve", "target"}
+    """[documents]: auto_approve, the confidence at or above which your pipeline skips review;
+    target, the accuracy a threshold must reach to be suggested (default 0.99); and [documents.gates],
+    per-field gates (assay/documents.py check_gates)."""
+    from assay.documents import GATE_KEYS
+    unknown = set(c) - {"auto_approve", "target", "gates"}
     if unknown:
-        raise SetupError(f"{CONFIG}, [documents]: unknown {', '.join(sorted(unknown))}. Use auto_approve, target.")
-    out = {"auto_approve": None, "target": 0.99}
+        raise SetupError(f"{CONFIG}, [documents]: unknown {', '.join(sorted(unknown))}. "
+                         "Use auto_approve, target, gates.")
+    out = {"auto_approve": None, "target": 0.99, "gates": {}}
+    gates = c.get("gates") or {}
+    if not isinstance(gates, dict):
+        raise SetupError(f"{CONFIG}, [documents.gates]: a field per line, e.g. tax_number = {{ max_errors = 0 }}.")
+    for field, rule in gates.items():
+        if not isinstance(rule, dict):
+            raise SetupError(f"{CONFIG}, [documents.gates] {field}: a table of rules, e.g. {{ max_errors = 0 }}.")
+        bad = set(rule) - set(GATE_KEYS)
+        if bad:
+            raise SetupError(f"{CONFIG}, [documents.gates] {field}: unknown {', '.join(sorted(bad))}. "
+                             f"Use {', '.join(GATE_KEYS)}.")
+        for k, v in rule.items():
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or \
+                    (k == "max_errors" and v != int(v)) or (k != "max_errors" and v > 1):
+                raise SetupError(f"{CONFIG}, [documents.gates] {field}.{k}: "
+                                 + ("a whole number, e.g. 0." if k == "max_errors" else "a share from 0 to 1, e.g. 0.02."))
+        out["gates"][field] = {k: float(v) if k != "max_errors" else int(v) for k, v in rule.items()}
     for k in ("auto_approve", "target"):
         if k in c:
             v = c[k]
@@ -1487,7 +1506,17 @@ def verdict(result: dict, has_baseline: bool) -> Tuple[bool, dict]:
     result["_judge_changed"] = c["judge_changed"]
     dropped = has_baseline and result["stability"]["outcome"] == "rollback" and not result.get("judge_changed")
     worse = (result.get("behavior") or result.get("behavior_suite")) if result.get("behavior_fails", True) else []
-    return not c["problems"] and not dropped and not worse and not result.get("score_regressions"), c
+    return not c["problems"] and not dropped and not worse and not result.get("score_regressions") \
+        and not gates_failed(result), c
+
+
+def gates_failed(result: dict) -> List[dict]:
+    """The documents' per-field gates that failed ([documents.gates]; line items by default)."""
+    from assay import documents
+    if "_gates" not in result:
+        result["_gates"] = documents.check_gates(result.get("documents"), result.get("documents_before"),
+                                                 (result.get("documents_cfg") or {}).get("gates"))
+    return [g for g in result["_gates"] if g["passed"] is False]
 
 
 # ---------- the report ----------
@@ -1953,7 +1982,7 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         out += [f"> {_md(x['text'])}", ""]
     if result.get("documents"):
         from assay import documents
-        out += [f"**Documents:** {_md(documents.markdown(result['documents'], result.get('documents_before')))}", ""]
+        out += [f"**Documents:** {_md(documents.markdown(result['documents'], result.get('documents_before'), result.get('documents_cfg')))}", ""]
     if result.get("kinds"):
         out += [f"**Failures by kind:** {_md(kinds_text(result['kinds']))}", ""]
     if result.get("fixed_context"):
@@ -2130,6 +2159,10 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     if problems and baseline and repeat == 1:
         out.append(_paint("One attempt per case. If a case can vary between runs, `assay test --repeat 3` "
                           "tells flaky from broken.", "dim"))
+    gf = gates_failed(result)
+    if gf:
+        out.append(_paint(f"{_n(len(gf), 'document gate')} failed: {gf[0]['why']}"
+                          + (f", and {len(gf) - 1} more above" if len(gf) > 1 else "") + ".", "red"))
     if not baseline and not passed:
         out.append(_paint("If these failures are known, make this run the baseline with `assay accept`: "
                           "later runs then fail only on what gets worse.", "dim"))

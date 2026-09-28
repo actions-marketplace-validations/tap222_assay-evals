@@ -26,6 +26,8 @@ from typing import Dict, List, Optional
 
 EVALUATOR = "assay.documents@1"
 _MADE_UP = ("format", "inferred", "fabricated")
+TABLE_DROP = 0.05  # the default gate on line items: row F1 may fall this much below the baseline's
+GATE_KEYS = ("max_errors", "min_precision", "min_recall", "min_f1", "max_drop")
 
 
 def _raw(r) -> dict:
@@ -115,6 +117,7 @@ def summarize(rows: List) -> Optional[dict]:
                 f[k] += float(raw.get(k) or 0)
             f[kind or "unknown"] += 1
             f["n"] += 1
+            f["table"] = f["table"] or "rows" in raw
             if raw.get("made_up"):
                 f[raw["made_up"]] += 1
             if "rows" in raw:  # a table of line items: complete when no row is missing, made up or repeated
@@ -133,6 +136,8 @@ def summarize(rows: List) -> Optional[dict]:
     for name, f in fields.items():
         tp, fp, fn = f["tp"], f["fp"], f["fn"]
         out[name] = {"precision": tp / (tp + fp) if tp + fp else None, "recall": tp / (tp + fn) if tp + fn else None,
+                     "f1": 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else None,
+                     "errors": int(f["wrong"] + f["missing"] + f["invented"]), "table": bool(f["table"]),
                      "n": int(f["n"]), **{k: int(f[k]) for k in ("correct", "wrong", "missing", "invented", *_MADE_UP)
                                           if f[k]}}
     return {"documents": len({r.case_id for r in mine}), "checked": len(docs), "all_correct": sum(docs),
@@ -156,6 +161,64 @@ def summarize(rows: List) -> Optional[dict]:
                                                           "wrong_page": int(where["wrong_page"]),
                                                           "mean_iou": sum(ious) / len(ious) if ious else None}
             if where["n"] else None}
+
+
+def check_gates(now: Optional[dict], before: Optional[dict], gates: Optional[dict]) -> List[dict]:
+    """Per-field gates, beside the per-case regressions: an average can stay plausible while one
+    field collapses, and some fields can't afford a single error. [documents.gates] in assay.toml:
+
+        tax_number = { max_errors = 0 }     # one wrong value fails the run, baseline or not
+        line_items = { max_drop = 0.02 }    # row F1 may fall at most 2 points below the baseline
+
+    max_errors (values wrong, missing or invented; for line items, documents with a row wrong),
+    min_precision, min_recall, min_f1, and max_drop (F1 below the baseline's). Every line-items
+    table is gated at max_drop = TABLE_DROP unless configured (`line_items = {}` turns it off).
+    A configured field this run didn't score fails: a gate can't pass on nothing.
+    [{"field", "rule", "value", "limit", "was", "passed", "why", "default"}]."""
+    if not now or not now.get("fields"):
+        return []
+    fields, prev = now["fields"], (before or {}).get("fields") or {}
+    rules = {k: dict(v) for k, v in (gates or {}).items()}
+    defaults = {k for k, v in fields.items() if v.get("table") and k not in rules}
+    rules.update({k: {"max_drop": TABLE_DROP} for k in defaults})
+    out = []
+    for name, rule in sorted(rules.items()):
+        f = fields.get(name)
+        if f is None:
+            out.append({"field": name, "rule": "scored", "value": None, "limit": None, "was": None, "passed": False,
+                        "why": f"{name}: not scored in this run; a gate can't pass on nothing", "default": False})
+            continue
+        for key, limit in rule.items():
+            g = {"field": name, "rule": key, "limit": limit, "was": None, "default": name in defaults}
+            if key == "max_errors":
+                g.update(value=f["errors"], passed=f["errors"] <= limit,
+                         why=f"{name}: {f['errors']} wrong, missing or invented, at most {int(limit)} allowed")
+            elif key == "max_drop":
+                was = (prev.get(name) or {}).get("f1")
+                if was is None or f.get("f1") is None:
+                    continue  # nothing to compare with yet
+                drop = was - f["f1"]
+                g.update(value=f["f1"], was=was, passed=drop <= limit + 1e-9,
+                         why=f"{name}: F1 {_pct(f['f1'])}, was {_pct(was)}: down {drop * 100:.1f} points, "
+                             f"at most {limit * 100:g} allowed")
+            else:
+                metric = key[len("min_"):]
+                v = f.get(metric)
+                if v is None:
+                    continue  # nothing extracted, or nothing to extract: not checkable
+                g.update(value=v, passed=v >= limit - 1e-9,
+                         why=f"{name}: {metric} {_pct(v)}, at least {_pct(limit)} required")
+            out.append(g)
+    return out
+
+
+def _gate_lines(now: dict, before: Optional[dict], cfg: Optional[dict]) -> List[str]:
+    gates = check_gates(now, before, (cfg or {}).get("gates"))
+    if not gates:
+        return []
+    bad = [g for g in gates if g["passed"] is False]
+    head = f"Gates        {len(gates) - len(bad)} of {len(gates)} held"
+    return [head + (":" if bad else "")] + [f"  failed: {g['why']}" for g in bad]
 
 
 def _ocr(o: Dict[str, int], worst: list) -> Optional[dict]:
@@ -242,6 +305,7 @@ def _pct(v: Optional[float]) -> str:
 def lines(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = None) -> List[str]:
     """The report's Documents block."""
     out = _field_lines(now, before) if now["checked"] or now["fields"] else []
+    out += _gate_lines(now, before, cfg)
     broken = {k: v for k, v in now["rules"].items() if v["held"] < v["checked"]}
     for k, v in broken.items():
         out.append(f"Rule         {k}: held on {v['held']} of {v['checked']}")
@@ -392,7 +456,7 @@ def _confidence_lines(now: dict, before: Optional[dict], cfg: Optional[dict]) ->
     return out
 
 
-def markdown(now: dict, before: Optional[dict] = None) -> str:
+def markdown(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = None) -> str:
     """One line for the PR comment, as text (the caller escapes it)."""
     parts = []
     t, bt = now.get("types"), (before or {}).get("types")
@@ -425,4 +489,7 @@ def markdown(now: dict, before: Optional[dict] = None) -> str:
                    key=lambda kv: kv[1]["recall"])[:3]
     if worst:
         s += " · lowest recall: " + ", ".join(f"{k} {_pct(v['recall'])}" for k, v in worst)
+    bad = [g for g in check_gates(now, before, (cfg or {}).get("gates")) if g["passed"] is False]
+    if bad:
+        s += " · gates failed: " + "; ".join(g["why"] for g in bad[:3])
     return s

@@ -372,6 +372,47 @@ invented, or read from another document. It needs no correct values, so it runs 
 production document, where invented values are otherwise invisible: "not in the document's text:
 total '1284.56'".
 
+## Gates: fields that can't average out
+
+A pull request fails when a document check that passed now fails. That misses a field that was
+already imperfect and then collapses: `line_items` fails on a document with one row wrong, so
+when a new model gets 2 of 10 rows right instead of 9, the check is "still failing", not a
+regression, and the headers keep the average plausible (80% weighted field accuracy with line
+items at 20%). And some fields can't afford one error at all: a wrong tax number is an
+accounting error, not a lost point.
+
+Gates are per field, beside the per-case regressions:
+
+```toml
+[documents.gates]
+tax_number = { max_errors = 0 }                   # one wrong value fails the run, baseline or not
+total      = { max_errors = 0, min_recall = 0.99 }
+line_items = { max_drop = 0.02 }                  # row F1 at most 2 points below the baseline's
+vendor     = { min_precision = 0.95 }
+```
+
+| Rule | Fails when |
+|---|---|
+| `max_errors` | more values than this are wrong, missing or invented in the run (for line items: documents with a row wrong) |
+| `min_precision`, `min_recall`, `min_f1` | the field's precision, recall or F1 over the run is below this |
+| `max_drop` | the field's F1 is more than this below the baseline's (skipped until there is one) |
+
+**Line items are gated by default:** every line-items table at `max_drop = 0.05`, so a collapse
+fails the run with nothing configured. Give it a rule of your own to change that, or
+`line_items = {}` to turn it off. A configured field the run didn't score fails: a gate can't pass
+on nothing. Weights (`Text(weight=3)`) say what an error costs in the average; gates say which
+errors the average mustn't hide.
+
+```
+Gates        0 of 1 held:
+  failed: line_items: F1 20.0%, was 90.0%: down 70.0 points, at most 5 allowed
+...
+1 document gate failed: line_items: F1 20.0%, was 90.0%: down 70.0 points, at most 5 allowed.
+Failed.
+```
+
+The PR comment says which gates failed.
+
 ## In the report
 
 `assay test` and `pytest --assay` add a Documents block, against the baseline:

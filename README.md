@@ -49,7 +49,8 @@ REGRESSIONS
   (characters, words, digits) and reading order; tables' structure and cells, and TEDS; where on
   the page a value was read; values that aren't in the document's text; the escape rate from spot
   checks of published output; and replaced values that output still holds, all also as dashboard
-  measures: [document extraction](docs/documents.md).
+  measures; and per-field gates, so line items collapsing or a single wrong tax number fails the
+  PR even when the average looks fine: [document extraction](docs/documents.md).
 - **Agents and workflows.** Trajectories, path and claim contracts, plan adherence, multi-turn
   conversations, and simulated users. [Rewordings](docs/testing.md#rewordings-the-same-request-in-other-words):
   the same request in other words must get the same behavior.
