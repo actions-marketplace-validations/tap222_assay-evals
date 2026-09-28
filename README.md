@@ -39,19 +39,20 @@ REGRESSIONS
 - **Document extraction.** Each field against its correct value, by type (dates, amounts,
   "1.234,56 €"), wrong, missing or invented, with no schema needed: every field either side has is
   scored by the type its value looks like, so a value only the extractor gave counts as invented
-  and "1,250.00" matches 1250; all fields correct per document, and precision, recall and F1 over
-  cells, headers and line items alike; made-up values counted apart: fabricated (nowhere in the
-  document), inferred (in it, but not as this field) and format errors (the right value in the
-  wrong shape); line items paired for the most cells right, and complete only with none missing,
-  made up or duplicated; groups (a party's name, address and role) scored as one unit; rules such
-  as line items adding up to the total; document types as a confusion matrix; files split into
-  documents, with panoptic quality and the pages a reviewer would drag to fix them; whether the
-  extractor's confidence is safe to auto-approve on; OCR error rates (characters, words, digits)
-  and reading order; tables' structure and cells, and TEDS; where on the page a value was read;
-  values that aren't in the document's text; the escape rate from spot checks of published output;
-  and replaced values that output still holds, all also as dashboard measures; and per-field
-  gates, so line items collapsing or a single wrong tax number fails the PR even when the average
-  looks fine: [document extraction](docs/documents.md).
+  and "1,250.00" matches 1250; documents with zero errors, and critical fields held to a
+  straight-through bar such as 99.9% (with how many values it takes to show it); and precision,
+  recall and F1 over cells, headers and line items alike; made-up values counted apart: fabricated
+  (nowhere in the document), inferred (in it, but not as this field) and format errors (the right
+  value in the wrong shape); line items paired for the most cells right, and complete only with
+  none missing, made up or duplicated; groups (a party's name, address and role) scored as one
+  unit; rules such as line items adding up to the total; document types as a confusion matrix;
+  files split into documents, with panoptic quality and the pages a reviewer would drag to fix
+  them; whether the extractor's confidence is safe to auto-approve on; OCR error rates
+  (characters, words, digits) and reading order; tables' structure and cells, and TEDS; where on
+  the page a value was read; values that aren't in the document's text; the escape rate from spot
+  checks of published output; and replaced values that output still holds, all also as dashboard
+  measures; and per-field gates, so line items collapsing or a single wrong tax number fails the
+  PR even when the average looks fine: [document extraction](docs/documents.md).
 - **Agents and workflows.** Trajectories, path and claim contracts, plan adherence, multi-turn
   conversations, and simulated users. [Rewordings](docs/testing.md#rewordings-the-same-request-in-other-words):
   the same request in other words must get the same behavior.

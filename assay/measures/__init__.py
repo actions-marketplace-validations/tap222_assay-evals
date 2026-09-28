@@ -4,7 +4,8 @@ from assay.measures.documents import (FieldCellF1, LocationAccuracy, OcrCharacte
                                       OcrReadingOrder, SplitDragRate, SplitPanopticQuality, TableCellAccuracy,
                                       TableTeds)
 from assay.measures.errors import ErrorsByOrigin, PromptErrorRate, ReportedErrorRate
-from assay.measures.ground_truth import (EscapeRate, FabricatedValues, FieldAccuracy, FormatErrors, InferredValues,
+from assay.measures.ground_truth import (CriticalDocumentAccuracy, CriticalFieldAccuracy, DocumentAccuracy,
+                                         EscapeRate, FabricatedValues, FieldAccuracy, FormatErrors, InferredValues,
                                          SplitStraightThrough, SupersededValues)
 from assay.measures.operations import (CallErrorRate, CallLatencyP95, DocumentVolume, InputMixDrift,
                                        StageFailureRate)
@@ -23,7 +24,8 @@ REGISTRY = {m.id: m for m in [
     # error analysis
     ReportedErrorRate(), ErrorsByOrigin(), PromptErrorRate(),
     # needs ground truth
-    SplitStraightThrough(), SplitPanopticQuality(), SplitDragRate(), FieldAccuracy(), FieldCellF1(), FabricatedValues(), InferredValues(), FormatErrors(),
+    SplitStraightThrough(), SplitPanopticQuality(), SplitDragRate(), DocumentAccuracy(), CriticalDocumentAccuracy(),
+    CriticalFieldAccuracy(), FieldAccuracy(), FieldCellF1(), FabricatedValues(), InferredValues(), FormatErrors(),
     SupersededValues(), EscapeRate(),
     # document quality, from scored checks
     OcrCharacterErrors(), OcrDigitErrors(), OcrReadingOrder(), LocationAccuracy(), TableCellAccuracy(), TableTeds(),
@@ -36,9 +38,10 @@ GROUPS = {
     "Pipeline integrity": ["fallback_attribution", "model_mismatch", "revision_coverage",
                            "noop_stage_rate", "source_positions", "handoff_loss"],
     "Errors": ["reported_error_rate", "errors_by_origin", "prompt_error_rate"],
-    "Accuracy (needs ground truth)": ["split_stp", "split_pq", "split_drag_rate", "field_accuracy", "field_cell_f1", "fabricated_value_rate",
-                                      "inferred_value_rate", "format_error_rate", "superseded_value_rate",
-                                      "escape_rate"],
+    "Accuracy (needs ground truth)": ["split_stp", "split_pq", "split_drag_rate", "document_accuracy",
+                                      "critical_document_accuracy", "critical_field_accuracy", "field_accuracy",
+                                      "field_cell_f1", "fabricated_value_rate", "inferred_value_rate",
+                                      "format_error_rate", "superseded_value_rate", "escape_rate"],
     "Document quality": ["ocr_cer", "ocr_digit_error_rate", "ocr_reading_order", "location_accuracy",
                          "table_cell_f1", "table_teds"],
 }

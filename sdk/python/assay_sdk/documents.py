@@ -328,6 +328,7 @@ class FieldScore:
     made_up: Optional[str] = None  # a wrong or invented value: format | inferred | fabricated (None: not told)
     grounded: bool = False  # scored with the document's text, so inferred and fabricated could be told apart
     grouped: bool = False  # a part of a Group, counted in it for accuracy, and as a value of its own
+    critical: bool = False  # a field whose error stops straight-through processing (score_document critical=)
 
     @property
     def passed(self) -> Optional[bool]:
@@ -339,6 +340,12 @@ class DocumentScore:
     fields: Dict[str, FieldScore]
     rules: Dict[str, Tuple[Optional[bool], str]]
     unscored: List[str] = dc_field(default_factory=list)  # extracted, with a value, but not in the schema
+
+    @property
+    def critical_correct(self) -> Optional[bool]:
+        """Every critical field right: the document could go straight through. None: none declared."""
+        crit = [f for f in self.fields.values() if f.critical]
+        return all(f.passed is not False for f in crit) if crit else None
 
     @property
     def all_correct(self) -> bool:
@@ -700,7 +707,7 @@ def _record(run, name: str, f: FieldScore, confidence: Optional[float] = None) -
     raw = json.dumps({"kind": f.kind, "weight": f.weight, "share": round(f.share, 6), **f.counts,
                       **({"part_of": f.part_of} if f.part_of else {}),
                       **({"made_up": f.made_up} if f.made_up else {}), **({"grounded": True} if f.grounded else {}),
-                      **({"grouped": True} if f.grouped else {}),
+                      **({"grouped": True} if f.grouped else {}), **({"critical": True} if f.critical else {}),
                       **({"confidence": float(confidence)} if confidence is not None else {})})
     if f.kind == "unreadable":
         run.check(name, "error", expected=f.expected, actual=f.actual, evaluator=EVALUATOR, reason=f.note,
@@ -723,7 +730,7 @@ def _record_rules(run, results: Dict[str, Tuple[Optional[bool], str]]) -> None:
 
 def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str, _Field]] = None,
                    rules: Sequence[Rule] = (), confidence: Optional[Dict[str, float]] = None,
-                   text: Optional[str] = None) -> DocumentScore:
+                   text: Optional[str] = None, critical: Sequence[str] = ()) -> DocumentScore:
     """Score one document's extraction against its correct values, and record each field, the line
     items, `document` (all fields correct) and each rule as checks on `run` (None: only score).
 
@@ -736,7 +743,11 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
 
     text: the document's text (its OCR). With it, each wrong or invented value says whether it was
     inferred (in the document, not as this field) or fabricated (nowhere in it); format errors
-    (the right value in the wrong shape) are told without it. Line-item cells aren't sorted."""
+    (the right value in the wrong shape) are told without it. Line-item cells aren't sorted.
+
+    critical: the fields whose error stops straight-through processing (a tax number, the total).
+    The document check then also says whether every one of them was right, and the report and the
+    dashboard give their accuracy apart from the rest."""
     unscored = [] if schema is None else _unscored(extracted, schema)
     if schema is None:
         schema = infer_schema(expected, extracted)
@@ -757,6 +768,11 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
             if f.made_up:
                 f.note = f"{f.note}; {f.made_up}: {_MADE_UP[f.made_up]}"
             fields[name] = f
+    unknown = [c for c in critical if c not in fields]
+    if unknown:
+        raise ValueError(f"score_document: critical {', '.join(unknown)} isn't in the schema")
+    for c in critical:
+        fields[c].critical = True
     doc = DocumentScore(fields, _rules(rules, extracted), unscored)
     if run is not None:
         for name, f in fields.items():
@@ -767,7 +783,8 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
                   reason=None if doc.all_correct else "wrong: " + ", ".join(f"{f.field} ({f.kind})" for f in bad[:6]),
                   raw_output=json.dumps({"kind": "document", "accuracy": acc, "fields": len(fields),
                                          "wrong": len(bad), "cells": doc.cells, "f1": round(doc.f1, 6),
-                                         **({"unscored": unscored} if unscored else {})}))
+                                         **({"unscored": unscored} if unscored else {}),
+                                         **({"critical_correct": doc.critical_correct} if critical else {})}))
         _record_rules(run, doc.rules)
     return doc
 

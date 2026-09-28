@@ -79,6 +79,60 @@ class FieldAccuracy(_AwaitingTruth):
         return MeasureOutput(self.id, "measured", results)
 
 
+class DocumentAccuracy(_AwaitingTruth):
+    """Documents with zero extraction errors: the number that governs automation, since one wrong
+    field means a person touches the document. Stricter than field accuracy by design."""
+    id = "document_accuracy"
+    name = "Documents with zero errors"
+    question = "What share of documents came out with every field right?"
+    dimensions = ("segment", "document_type")
+    waiting_on = "a labelled evaluation set with correct values per field (assay_sdk.documents.score_document)."
+
+    def compute(self, source, window: Window) -> MeasureOutput:
+        rows = source.document_checks(window, "document") if hasattr(source, "document_checks") else None
+        if rows is None:
+            return super().compute(source, window)
+        from assay.measures.documents import _slices
+        return _slices(self.id, rows, self.dimensions, lambda g: (sum(r["passed"] for r in g), len(g)))
+
+
+class CriticalDocumentAccuracy(_AwaitingTruth):
+    """Documents with every critical field right (score_document critical=): the ones that could
+    go straight through, whatever the low-stakes fields say."""
+    id = "critical_document_accuracy"
+    name = "Documents right on critical fields"
+    question = "What share of documents had every critical field right, so could go straight through?"
+    dimensions = ("segment", "document_type")
+    waiting_on = "documents scored with their critical fields named (assay_sdk.documents.score_document, critical=)."
+
+    def compute(self, source, window: Window) -> MeasureOutput:
+        rows = source.document_checks(window, "document") if hasattr(source, "document_checks") else None
+        rows = None if rows is None else [r for r in rows if r["raw"].get("critical_correct") is not None]
+        if not rows:
+            return super().compute(source, window)
+        from assay.measures.documents import _slices
+        return _slices(self.id, rows, self.dimensions,
+                       lambda g: (sum(bool(r["raw"]["critical_correct"]) for r in g), len(g)))
+
+
+class CriticalFieldAccuracy(_AwaitingTruth):
+    """Of the critical values (a tax number, the total), the share right: the one to hold at 99.9%
+    for straight-through processing. Its n says how far to trust it: 99.9% takes thousands."""
+    id = "critical_field_accuracy"
+    name = "Critical field accuracy"
+    question = "Of the values in critical fields, what share were extracted right?"
+    dimensions = ("segment", "document_type", "field")
+    waiting_on = "documents scored with their critical fields named (assay_sdk.documents.score_document, critical=)."
+
+    def compute(self, source, window: Window) -> MeasureOutput:
+        rows = source.field_scores(window) if hasattr(source, "field_scores") else None
+        rows = None if rows is None else [r for r in rows if r.get("critical")]
+        if not rows:
+            return super().compute(source, window)
+        from assay.measures.documents import _slices
+        return _slices(self.id, rows, self.dimensions, lambda g: (sum(r["right"] for r in g), len(g)))
+
+
 class _MadeUp(_AwaitingTruth):
     """Of the values extracted, the share made up this way (assay_sdk.documents.score_document).
     Line items aren't sorted, so their tables aren't counted; a group counts by its parts."""

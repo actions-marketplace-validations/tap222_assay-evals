@@ -142,8 +142,14 @@ class EventsSource:
                         "share": float(raw.get("share", 1.0 if raw.get("kind") == "correct" else 0.0)),
                         "extracted": bool(raw.get("tp") or raw.get("fp")), "made_up": raw.get("made_up"),
                         "grounded": bool(raw.get("grounded")), "table": "rows" in raw,
-                        "group": "members" in raw, "part_of": raw.get("part_of")})
+                        "group": "members" in raw, "part_of": raw.get("part_of"),
+                        "critical": bool(raw.get("critical")), "right": raw.get("kind") == "correct"})
         return out
+
+    def critical_scores(self, window: Window) -> Optional[List[dict]]:
+        """Critical fields scored (score_document critical=), for coverage: None if none ever were."""
+        rows = self.field_scores(window)
+        return None if rows is None else [r for r in rows if r["critical"]]
 
     def document_checks(self, window: Window, kind: str, evaluator: str = "assay.documents@1") -> Optional[List[dict]]:
         """Checks of one kind recorded by assay_sdk.documents ("ocr", "location", "table",

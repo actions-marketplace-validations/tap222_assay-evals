@@ -58,6 +58,7 @@ IMPROVES: Dict[str, List[tuple]] = {
 
 WAITING_ON_GROUND_TRUTH: set = set()  # every accuracy measure now has a way in: see SCORED
 _GROUNDED = "fields scored with the document's text (score_document, text=)"
+_CRITICAL = "documents scored with their critical fields named (score_document, critical=)"
 # Measured from scored checks (assay_sdk.documents): live once the first one arrives.
 SCORED = {"field_accuracy": ("field_scores", (), "fields scored against their correct values (score_document)"),
           "field_cell_f1": ("document_checks", ("document",),
@@ -65,6 +66,10 @@ SCORED = {"field_accuracy": ("field_scores", (), "fields scored against their co
           "fabricated_value_rate": ("field_scores", (True,), _GROUNDED),
           "inferred_value_rate": ("field_scores", (True,), _GROUNDED),
           "format_error_rate": ("field_scores", (), "fields scored against their correct values (score_document)"),
+          "document_accuracy": ("document_checks", ("document",),
+                                "fields scored against their correct values (score_document)"),
+          "critical_document_accuracy": ("critical_scores", (), _CRITICAL),
+          "critical_field_accuracy": ("critical_scores", (), _CRITICAL),
           "split_stp": ("split_scores", (), "files scored against their correct boundaries (score_split)"),
           "split_pq": ("document_checks", ("split",), "files scored against their correct boundaries (score_split)"),
           "split_drag_rate": ("document_checks", ("split",),

@@ -836,7 +836,7 @@ def seed_document_scores(engine: Engine, docs: List[dict], now: datetime, seed_v
             pages = doc["page_count"] or 1
             text = _text(truth, itype, pages)
             dx.score_document(run, truth, got, schema, rules=[dx.total_of("line_items.amount", equals="total")],
-                              confidence=conf, text=text)
+                              confidence=conf, text=text, critical=("reference", "total"))
             mixups = {"contract": "insurance_claim", "insurance_claim": "contract"}
             wrong_type = itype in mixups and rng.random() < (0.12 if age >= TYPE_FIX_DAYS else 0.03)
             dx.classify_document(run, itype, mixups[itype] if wrong_type else itype,

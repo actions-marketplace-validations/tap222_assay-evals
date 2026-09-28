@@ -28,7 +28,27 @@ from typing import Dict, List, Optional
 EVALUATOR = "assay.documents@1"
 _MADE_UP = ("format", "inferred", "fabricated")
 TABLE_DROP = 0.05  # the default gate on line items: row F1 may fall this much below the baseline's
-GATE_KEYS = ("max_errors", "min_precision", "min_recall", "min_f1", "max_drop")
+GATE_KEYS = ("max_errors", "min_accuracy", "min_precision", "min_recall", "min_f1", "max_drop")
+Z = 1.96
+
+
+def values_to_show(target: float) -> int:
+    """The fewest values, all right, whose 95% interval (Wilson) clears `target`: n / (n + z^2)."""
+    import math
+    return math.ceil(Z * Z * target / (1 - target)) if target < 1 else 0
+
+
+def _whole(now: dict) -> Dict[str, dict]:
+    """The gates' names for the run as a whole: `document` (every field right) and `critical`
+    (the critical values), beside the fields."""
+    out = {}
+    if now.get("checked"):
+        out["document"] = {"accuracy": now["all_correct"] / now["checked"], "n": now["checked"],
+                           "errors": now["checked"] - now["all_correct"]}
+    c = now.get("critical")
+    if c:
+        out["critical"] = {"accuracy": c["right"] / c["values"], "errors": c["values"] - c["right"], "n": c["values"]}
+    return out
 
 
 def _raw(r) -> dict:
@@ -51,7 +71,7 @@ def summarize(rows: List) -> Optional[dict]:
     split, ocr, where = defaultdict(int), defaultdict(int), defaultdict(float)
     worst_pages, ious = [], []
     tables, cells, made_up, unscored = defaultdict(int), defaultdict(int), defaultdict(int), defaultdict(int)
-    items, teds = defaultdict(int), []
+    items, teds, crit = defaultdict(int), [], defaultdict(int)
     table_notes = []
     for r in mine:
         raw = _raw(r)
@@ -108,6 +128,9 @@ def summarize(rows: List) -> Optional[dict]:
                 split["pages"] += int(raw.get("pages") or 0)
         elif kind == "document":
             docs.append(r.status == "pass")
+            if raw.get("critical_correct") is not None:
+                crit["documents"] += 1
+                crit["documents_right"] += bool(raw["critical_correct"])
             if raw.get("accuracy") is not None:
                 acc.append(float(raw["accuracy"]))
             for k in ("tp", "fp", "fn"):
@@ -125,6 +148,10 @@ def summarize(rows: List) -> Optional[dict]:
             f[kind or "unknown"] += 1
             f["n"] += 1
             f["table"] = f["table"] or "rows" in raw
+            if raw.get("critical"):
+                f["critical"] = 1
+                crit["values"] += 1
+                crit["right"] += r.status == "pass"
             if raw.get("made_up"):
                 f[raw["made_up"]] += 1
             if "rows" in raw:  # a table of line items: complete when no row is missing, made up or repeated
@@ -145,6 +172,7 @@ def summarize(rows: List) -> Optional[dict]:
         out[name] = {"precision": tp / (tp + fp) if tp + fp else None, "recall": tp / (tp + fn) if tp + fn else None,
                      "f1": 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else None,
                      "errors": int(f["wrong"] + f["missing"] + f["invented"]), "table": bool(f["table"]),
+                     "accuracy": f["correct"] / f["n"] if f["n"] else None, "critical": bool(f["critical"]),
                      "n": int(f["n"]), **{k: int(f[k]) for k in ("correct", "wrong", "missing", "invented", *_MADE_UP)
                                           if f[k]}}
     return {"documents": len({r.case_id for r in mine}), "checked": len(docs), "all_correct": sum(docs),
@@ -164,6 +192,7 @@ def summarize(rows: List) -> Optional[dict]:
                        "teds": sum(teds) / len(teds) if teds else None,
                        "notes": table_notes[:3]} if tables["n"] else None,
             "line_items": dict(items) if items["n"] else None,
+            "critical": dict(crit) if crit["values"] else None,
             "ocr": _ocr(ocr, worst_pages), "locations": {"n": int(where["n"]), "right": int(where["right"]),
                                                           "wrong_page": int(where["wrong_page"]),
                                                           "mean_iou": sum(ious) / len(ious) if ious else None}
@@ -178,13 +207,15 @@ def check_gates(now: Optional[dict], before: Optional[dict], gates: Optional[dic
         line_items = { max_drop = 0.02 }    # row F1 may fall at most 2 points below the baseline
 
     max_errors (values wrong, missing or invented; for line items, documents with a row wrong),
-    min_precision, min_recall, min_f1, and max_drop (F1 below the baseline's). Every line-items
+    min_accuracy (the share right), min_precision, min_recall, min_f1, and max_drop (F1 below the
+    baseline's). `document` gates the documents with every field right, `critical` the critical
+    values (score_document critical=): critical = { min_accuracy = 0.999 }. Every line-items
     table is gated at max_drop = TABLE_DROP unless configured (`line_items = {}` turns it off).
     A configured field this run didn't score fails: a gate can't pass on nothing.
     [{"field", "rule", "value", "limit", "was", "passed", "why", "default"}]."""
-    if not now or not now.get("fields"):
+    if not now or not (now.get("fields") or now.get("checked")):
         return []
-    fields, prev = now["fields"], (before or {}).get("fields") or {}
+    fields, prev = {**now["fields"], **_whole(now)}, {**((before or {}).get("fields") or {}), **_whole(before or {})}
     rules = {k: dict(v) for k, v in (gates or {}).items()}
     defaults = {k for k, v in fields.items() if v.get("table") and k not in rules}
     rules.update({k: {"max_drop": TABLE_DROP} for k in defaults})
@@ -214,7 +245,8 @@ def check_gates(now: Optional[dict], before: Optional[dict], gates: Optional[dic
                 if v is None:
                     continue  # nothing extracted, or nothing to extract: not checkable
                 g.update(value=v, passed=v >= limit - 1e-9,
-                         why=f"{name}: {metric} {_pct(v)}, at least {_pct(limit)} required")
+                         why=f"{name}: {metric} {_pct(v, 1 if limit < 0.999 else 2)}, at least "
+                             f"{_pct(limit, 1 if limit < 0.999 else 2)} required")
             out.append(g)
     return out
 
@@ -308,13 +340,13 @@ def confidence(pairs: List[list], target: float = 0.99, threshold: Optional[floa
             "target": target, "at": at}
 
 
-def _pct(v: Optional[float]) -> str:
-    return "—" if v is None else f"{v:.0%}" if v in (0, 1) else f"{v:.1%}"
+def _pct(v: Optional[float], digits: int = 1) -> str:
+    return "—" if v is None else f"{v:.0%}" if v in (0, 1) else f"{v:.{digits}%}"
 
 
 def lines(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = None) -> List[str]:
     """The report's Documents block."""
-    out = _field_lines(now, before) if now["checked"] or now["fields"] else []
+    out = _field_lines(now, before, cfg) if now["checked"] or now["fields"] else []
     out += _gate_lines(now, before, cfg)
     broken = {k: v for k, v in now["rules"].items() if v["held"] < v["checked"]}
     for k, v in broken.items():
@@ -360,7 +392,34 @@ def _ocr_lines(o: Optional[dict], b: Optional[dict]) -> List[str]:
     return out
 
 
-def _field_lines(now: dict, before: Optional[dict]) -> List[str]:
+def _critical_lines(now: dict, before: Optional[dict], cfg: Optional[dict]) -> List[str]:
+    """The critical fields: their accuracy with its 95% interval, the documents with all of them
+    right, and whether the run has enough values to show the target a gate sets."""
+    from assay.calibrate import wilson
+    c, b = now.get("critical"), (before or {}).get("critical")
+    if not c:
+        return []
+    names = [k for k, v in now["fields"].items() if v.get("critical")]
+    acc, lo_hi = c["right"] / c["values"], wilson(c["right"], c["values"])
+    was = b["right"] / b["values"] if b and b.get("values") else None
+    line = (f"  critical fields ({', '.join(names[:5])}{', ...' if len(names) > 5 else ''}): {c['right']:,} of "
+            f"{c['values']:,} right ({_pct(acc, 2)}, 95% interval {_pct(lo_hi[0], 2)} to {_pct(lo_hi[1], 2)}"
+            + (f", was {_pct(was, 2)}" if was is not None and abs(was - acc) >= 0.00005 else "") + ")")
+    if c.get("documents"):
+        line += f" · documents with all of them right {c['documents_right']}/{c['documents']}"
+    out = [line]
+    target = (((cfg or {}).get("gates") or {}).get("critical") or {}).get("min_accuracy")
+    if target and lo_hi[0] < target:
+        need, low = values_to_show(target), c["values"] / (c["values"] + Z * Z)
+        out.append(f"    {_pct(target, 2)} can't be shown with {c['values']:,} values: "
+                   + (f"even all right, the interval's low end would be {_pct(low, 2)}; "
+                      f"it takes {need:,} in a row" if c["values"] < need else
+                      f"the interval's low end is {_pct(lo_hi[0], 2)}")
+                   + ". The gate checks the share right; this is how far to trust it.")
+    return out
+
+
+def _field_lines(now: dict, before: Optional[dict], cfg: Optional[dict] = None) -> List[str]:
     share = now["all_correct"] / now["checked"] if now["checked"] else None
     was = before["all_correct"] / before["checked"] if before and before["checked"] else None
     head = (f"Documents    {now['documents']} · all fields correct {now['all_correct']}/{now['checked']} "
@@ -375,6 +434,7 @@ def _field_lines(now: dict, before: Optional[dict]) -> List[str]:
             f" (was {_pct(bc['f1'])})" if bc and abs(bc["f1"] - c["f1"]) >= 0.0005 else "") + \
             f", precision {_pct(c['precision'])}, recall {_pct(c['recall'])}"
     out = [head]
+    out += _critical_lines(now, before, cfg)
     m, bm = now.get("made_up"), (before or {}).get("made_up")
     if m and (any(m[k] for k in _MADE_UP) or bm and any(bm[k] for k in _MADE_UP)):
         parts = [f"{m[k]} {k}" + (f" (was {bm[k]})" if bm and bm[k] != m[k] else "") for k in _MADE_UP

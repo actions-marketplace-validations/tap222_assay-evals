@@ -988,3 +988,102 @@ def test_gates_need_something_to_gate():
     got = check_gates(now, None, {"total": {"min_recall": 0.95, "max_drop": 0.01}, "tax_number": {"max_errors": 0}})
     assert [(g["field"], g["rule"], g["passed"]) for g in got] == [
         ("tax_number", "scored", False), ("total", "min_recall", False)]  # max_drop: no baseline to compare with
+
+
+
+# ---------- documents with zero errors, and critical fields ----------
+
+def test_critical_fields_say_whether_a_document_could_go_straight_through():
+    got = {**TRUTH, "po_number": "PO-9"}  # a low-stakes field wrong
+    s = score_document(None, TRUTH, got, SCHEMA, critical=["invoice_number", "total"])
+    assert not s.all_correct and s.critical_correct is True
+    assert s.fields["total"].critical and not s.fields["po_number"].critical
+    assert score_document(None, TRUTH, {**TRUTH, "total": "1"}, SCHEMA, critical=["total"]).critical_correct is False
+    assert score_document(None, TRUTH, TRUTH, SCHEMA).critical_correct is None
+    with pytest.raises(ValueError, match="critical vat isn't in the schema"):
+        score_document(None, TRUTH, TRUTH, SCHEMA, critical=["vat"])
+
+
+def test_showing_a_target_takes_enough_values():
+    from assay.documents import values_to_show
+    from assay.calibrate import wilson
+    n = values_to_show(0.999)
+    assert n == 3838 and wilson(n, n)[0] >= 0.999 > wilson(n - 1, n - 1)[0]
+    assert values_to_show(0.99) == 381
+
+
+STP = '''
+import os
+from assay_sdk.documents import score_document, Text, Money
+SCHEMA = {"tax_number": Text(), "total": Money(), "note": Text()}
+TRUTH = {"tax_number": "DE123", "total": "10", "note": "rush"}
+
+def case(n, run):
+    got = dict(TRUTH)
+    got["note"] = "" if n % 2 else "rush"  # half the documents: a low-stakes field missing
+    if os.environ.get("MODE") == "after" and n == 2:  # a document that was right: now one of 4
+        got["tax_number"] = "DE128"
+    score_document(run, TRUTH, got, SCHEMA, critical=["tax_number", "total"])
+
+def test_1(assay_case): case(1, assay_case)
+def test_2(assay_case): case(2, assay_case)
+def test_3(assay_case): case(3, assay_case)
+def test_4(assay_case): case(4, assay_case)
+'''
+
+
+def test_document_accuracy_and_critical_fields_in_the_report_gates_and_dashboard(project):
+    from assay import coverage, store
+    from assay.__main__ import main
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    (project / "tests").mkdir()
+    (project / "tests" / "test_stp.py").write_text(STP)
+    (project / "assay.toml").write_text("[documents.gates]\ncritical = { min_accuracy = 0.999 }\n"
+                                        "document = { min_accuracy = 0.4 }\n")
+    first = run(project)
+    assert "critical fields (tax_number, total): 8 of 8 right (100%, 95% interval 67.56% to 100%) · " \
+           "documents with all of them right 4/4" in first.stdout
+    assert "99.90% can't be shown with 8 values: even all right, the interval's low end would be 67.56%; " \
+           "it takes 3,838 in a row" in first.stdout
+    assert "Gates        2 of 2 held" in first.stdout  # zero-error documents 2/4, over 40%
+    assert main(["accept"]) == 0
+    out = run(project, env={"MODE": "after"})
+    assert out.returncode == 1
+    assert "failed: critical: accuracy 87.50%, at least 99.90% required" in out.stdout
+    assert "failed: document: accuracy 25.0%, at least 40.0% required" in out.stdout
+    engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
+    src, now = EventsSource(engine, "local"), datetime.utcnow()
+    w = Window(now - timedelta(days=1), now + timedelta(days=1))
+    got = {mid: REGISTRY[mid].compute(src, w).overall for mid in
+           ("document_accuracy", "critical_document_accuracy", "critical_field_accuracy")}
+    assert (got["document_accuracy"].numerator, got["document_accuracy"].denominator) == (3, 8)  # both runs
+    assert (got["critical_document_accuracy"].numerator, got["critical_document_accuracy"].denominator) == (7, 8)
+    assert (got["critical_field_accuracy"].numerator, got["critical_field_accuracy"].denominator) == (15, 16)
+    live = {m["id"]: m["status"] for m in coverage.compute(src, w)["measures"]}
+    assert live["document_accuracy"] == live["critical_field_accuracy"] == "live"
+
+
+def test_critical_measures_wait_for_critical_fields(project):
+    from assay import coverage, store
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    (project / "tests").mkdir()
+    (project / "tests" / "test_stp.py").write_text(STP.replace(', critical=["tax_number", "total"]', ""))
+    run(project)
+    engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
+    src, now = EventsSource(engine, "local"), datetime.utcnow()
+    w = Window(now - timedelta(days=1), now + timedelta(days=1))
+    m = REGISTRY["critical_field_accuracy"].compute(src, w)
+    assert m.status == "unmeasured" and "critical=" in m.reason
+    assert REGISTRY["document_accuracy"].compute(src, w).status == "measured"
+    live = {x["id"]: x for x in coverage.compute(src, w)["measures"]}
+    assert live["critical_field_accuracy"]["status"] == "blocked"
+
+
+def test_every_measure_is_in_a_dashboard_group():
+    from assay.measures import GROUPS, REGISTRY
+    grouped = [m for ids in GROUPS.values() for m in ids]
+    assert sorted(grouped) == sorted(REGISTRY) and len(grouped) == len(set(grouped))

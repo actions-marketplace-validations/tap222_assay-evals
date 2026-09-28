@@ -132,7 +132,9 @@ wrong party shows up as inferred. In the weighted accuracy the group counts once
 ## The whole document
 
 `document` is one more check: **All fields correct**, the share of documents that need no
-correction. The weighted share of fields right (each field by its `weight`, line items by their
+correction. This is the number that governs automation: one wrong field and a person touches the
+document. It's much stricter than field accuracy. In the demo, fields are 97.5% right but only
+85.2% of documents have zero errors. The weighted share of fields right (each field by its `weight`, line items by their
 row F1) is the document's accuracy.
 
 Beside it, one unweighted number with a single definition for headers and line items, as
@@ -150,6 +152,36 @@ s.f1          # 0.471
 
 Use the weighted accuracy when some fields cost more to get wrong; use cell F1 to compare
 extractors or runs on one scale, however many line items a document has.
+
+## Critical fields and straight-through processing
+
+Not every field stops a document. Name the ones that do:
+
+```python
+score_document(assay_case, expected, extracted, SCHEMA, critical=["tax_number", "total"])
+```
+
+The document check then also says whether every critical field was right
+(`DocumentScore.critical_correct`): the document could go straight through, whatever the
+low-stakes fields say. The report adds:
+
+```
+  critical fields (tax_number, total): 1,000 of 1,000 right (100%, 95% interval 99.62% to 100%) · documents with all of them right 500/500
+    99.90% can't be shown with 1,000 values: even all right, the interval's low end would be 99.62%; it takes 3,838 in a row. The gate checks the share right; this is how far to trust it.
+```
+
+The bar often quoted for straight-through processing is 99.9% on critical financial fields. Set
+it as a gate, with one for documents with zero errors:
+
+```toml
+[documents.gates]
+critical = { min_accuracy = 0.999 }   # the critical values, over the run
+document = { min_accuracy = 0.95 }    # documents with every field right
+```
+
+A share is only as good as its sample: 99.9% can't be shown by fewer than 3,838 values in a row,
+all right (`values_to_show`). The gate checks the share; the report says when the run is too
+small to back it, so a green gate on 200 documents isn't read as proof.
 
 ## Rules: the extracted values against each other
 
@@ -421,6 +453,7 @@ vendor     = { min_precision = 0.95 }
 | Rule | Fails when |
 |---|---|
 | `max_errors` | more values than this are wrong, missing or invented in the run (for line items: documents with a row wrong) |
+| `min_accuracy` | the share right is below this; `document` gates documents with every field right, `critical` the critical values |
 | `min_precision`, `min_recall`, `min_f1` | the field's precision, recall or F1 over the run is below this |
 | `max_drop` | the field's F1 is more than this below the baseline's (skipped until there is one) |
 
@@ -466,6 +499,8 @@ segment, with the usual expected range and alerts ([Measures](measures.md)):
 
 | Measure | From |
 |---|---|
+| Documents with zero errors (`document_accuracy`) | `score_document` |
+| Documents right on critical fields (`critical_document_accuracy`), critical field accuracy (`critical_field_accuracy`, also by field) | `score_document`, with `critical=` |
 | Severity-weighted field accuracy (`field_accuracy`), also by field | `score_document` |
 | Field cells right (`field_cell_f1`): F1 over header and line-item cells | `score_document` |
 | Fabricated values (`fabricated_value_rate`), inferred values (`inferred_value_rate`), format errors (`format_error_rate`): each a share of the values extracted, also by field | `score_document`, with `text=` for the first two |
