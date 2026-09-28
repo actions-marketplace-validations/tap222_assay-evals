@@ -128,3 +128,20 @@ class FieldCellF1(_FromChecks):
     def ratio(self, rows):
         c = {k: sum((r["raw"].get("cells") or {}).get(k) or 0 for r in rows) for k in ("tp", "fp", "fn")}
         return 2 * c["tp"], 2 * c["tp"] + c["fp"] + c["fn"]
+
+
+class TableTeds(_FromChecks):
+    """TEDS, the standard table score: the tables as trees of rows and cells, 1 - their edit
+    distance over the larger's size. Structure and text together; the mean over tables."""
+    id = "table_teds"
+    name = "Table similarity (TEDS)"
+    question = "How close is each table read to the correct one, in structure and text (TEDS)?"
+    kind = "table"
+    sent_by = "tables scored against the correct ones (assay_sdk.documents.score_table)"
+
+    def rows(self, source, window):
+        rows = super().rows(source, window)
+        return None if rows is None else [r for r in rows if r["raw"].get("teds") is not None]
+
+    def ratio(self, rows):
+        return sum(r["raw"]["teds"] for r in rows), len(rows)

@@ -1,7 +1,7 @@
 from assay.measures.base import Measure, MeasureOutput, SliceResult
 from assay.measures.cost import CostPerDocument, CostPerPage, HumanTouchRate, TotalSpend
 from assay.measures.documents import (FieldCellF1, LocationAccuracy, OcrCharacterErrors, OcrDigitErrors,
-                                      OcrReadingOrder, TableCellAccuracy)
+                                      OcrReadingOrder, TableCellAccuracy, TableTeds)
 from assay.measures.errors import ErrorsByOrigin, PromptErrorRate, ReportedErrorRate
 from assay.measures.ground_truth import (EscapeRate, FabricatedValues, FieldAccuracy, FormatErrors, InferredValues,
                                          SplitStraightThrough, SupersededValues)
@@ -25,7 +25,7 @@ REGISTRY = {m.id: m for m in [
     SplitStraightThrough(), FieldAccuracy(), FieldCellF1(), FabricatedValues(), InferredValues(), FormatErrors(),
     SupersededValues(), EscapeRate(),
     # document quality, from scored checks
-    OcrCharacterErrors(), OcrDigitErrors(), OcrReadingOrder(), LocationAccuracy(), TableCellAccuracy(),
+    OcrCharacterErrors(), OcrDigitErrors(), OcrReadingOrder(), LocationAccuracy(), TableCellAccuracy(), TableTeds(),
 ]}
 
 GROUPS = {
@@ -39,7 +39,7 @@ GROUPS = {
                                       "inferred_value_rate", "format_error_rate", "superseded_value_rate",
                                       "escape_rate"],
     "Document quality": ["ocr_cer", "ocr_digit_error_rate", "ocr_reading_order", "location_accuracy",
-                         "table_cell_f1"],
+                         "table_cell_f1", "table_teds"],
 }
 
 __all__ = ["REGISTRY", "GROUPS", "Measure", "MeasureOutput", "SliceResult"]

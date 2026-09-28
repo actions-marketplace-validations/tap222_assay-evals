@@ -110,7 +110,8 @@ class EventsSource:
         """Extracted fields scored against their correct values (assay_sdk.documents), with their
         document's type and segment: {"document_id", "document_type", "segment", "field", "weight",
         "share", "extracted", "made_up", "grounded", "table"}. None if this tenant has never sent one.
-        Line-item columns are left out: their table is counted whole. grounded: only fields scored
+        Line-item columns are left out: their table is counted whole. A group's parts are in, with
+        its name as `part_of`. grounded: only fields scored
         with the document's text (so inferred and fabricated values could be told apart)."""
         import json
         t, d = store.eval_results, store.event_documents
@@ -131,7 +132,8 @@ class EventsSource:
                 raw = json.loads(r.raw_output or "{}")
             except ValueError:
                 raw = {}
-            if raw.get("part_of") or raw.get("kind") not in ("correct", "wrong", "missing", "invented"):
+            if raw.get("part_of") and not raw.get("grouped") or \
+                    raw.get("kind") not in ("correct", "wrong", "missing", "invented"):
                 continue  # a line-item column (its table counts it), or not a field: a type, a page, a table
             if grounded and not raw.get("grounded"):
                 continue
@@ -139,7 +141,8 @@ class EventsSource:
                         "segment": r.segment, "field": r.field, "weight": float(raw.get("weight") or 1.0),
                         "share": float(raw.get("share", 1.0 if raw.get("kind") == "correct" else 0.0)),
                         "extracted": bool(raw.get("tp") or raw.get("fp")), "made_up": raw.get("made_up"),
-                        "grounded": bool(raw.get("grounded")), "table": "rows" in raw})
+                        "grounded": bool(raw.get("grounded")), "table": "rows" in raw,
+                        "group": "members" in raw, "part_of": raw.get("part_of")})
         return out
 
     def document_checks(self, window: Window, kind: str, evaluator: str = "assay.documents@1") -> Optional[List[dict]]:

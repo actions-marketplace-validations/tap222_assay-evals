@@ -42,7 +42,8 @@ def test_each_field_says_which_way_it_went_wrong():
     assert f["total"].kind == "wrong" and "factor of 100" in f["total"].note
     assert f["po_number"].kind == "invented" and f["po_number"].counts == {"fp": 1}
     rows = f["line_items"]  # matched by description, whatever the order: Bolt right, Widget wrong, Nut invented
-    assert rows.counts == {"tp": 1, "fp": 2, "fn": 1, "rows": 2, "rows_extracted": 3} and round(rows.share, 2) == 0.4
+    assert rows.counts == {"tp": 1, "fp": 2, "fn": 1, "rows": 2, "rows_extracted": 3, "rows_invented": 1} and \
+        round(rows.share, 2) == 0.4
     assert "1 row(s) invented" in rows.note and "Widget: '100', not '1000.00'" in rows.note
     assert f["line_items.amount"].share == 0.5 and f["line_items.amount"].part_of == "line_items"
     missing = score_document(None, TRUTH, {**TRUTH, "total": ""}, SCHEMA).fields["total"]
@@ -746,3 +747,105 @@ def test_b(assay_case):
 ''')
     out = run(project)
     assert "extracted but not in the schema, so not scored: po_number (2 documents), notes (1 document)" in out.stdout
+
+
+# ---------- line items: the best matching, completeness; groups; TEDS ----------
+
+from assay_sdk.documents import Group, score_table, teds  # noqa: E402
+
+
+def test_rows_are_paired_to_get_the_most_cells_right():
+    # most-in-common-first pairs the first rows (3 cells) and strands the second (0): 3 right.
+    # The best matching pairs across, 2 + 2: 4 right, as DocILE scores it.
+    spec = {"li": LineItems({c: Text() for c in "pqrs"})}
+    exp = [dict(zip("pqrs", "abcd")), dict(zip("pqrs", "stcx"))]
+    got = [dict(zip("pqrs", "abcx")), dict(zip("pqrs", "abyz"))]
+    s = score_document(None, {"li": exp}, {"li": got}, spec)
+    assert s.cells["tp"] == 4 and "missing" not in (s.fields["li"].note or "")
+    t = score_table(None, [list("pqrs")] + [list(r.values()) for r in exp],
+                    [list("pqrs")] + [list(r.values()) for r in got])
+    assert t.cells_right == 4 and "row(s) missing" not in t.notes
+
+
+def test_a_repeated_row_is_duplicated_not_invented():
+    spec = {"li": LineItems({"d": Text(), "amt": Money()}, key="d")}
+    row = {"d": "Widget", "amt": "10"}
+    s = score_document(None, {"li": [row]}, {"li": [row, dict(row), {"d": "Nut", "amt": "1"}]}, spec)
+    assert s.fields["li"].counts["rows_duplicated"] == 1 and s.fields["li"].counts["rows_invented"] == 1
+    assert "1 row(s) duplicated" in s.fields["li"].note
+    t = score_table(None, [["A"], ["x"]], [["A"], ["x"], ["x"]])
+    assert "1 row(s) duplicated" in t.notes and "row(s) that aren't there" not in " ".join(t.notes)
+
+
+PARTY = Group({"name": Text(), "address": Text(), "role": Text()})
+
+
+def test_a_group_is_right_only_when_all_its_parts_are():
+    spec = {"grantor": PARTY, "county": Text()}
+    exp = {"grantor": {"name": "Jane Roe", "address": "1 Main St", "role": "seller"}, "county": "Kings"}
+    got = {"grantor": {"name": "Jane Roe", "address": "1 Main St", "role": "buyer"}, "county": "Kings"}
+    s = score_document(None, exp, got, spec, text="Jane Roe of 1 Main St, seller, to John Doe, buyer. Kings County.")
+    g = s.fields["grantor"]
+    assert g.kind == "wrong" and g.note == "role wrong (2 of 3 right)" and g.counts["members"] == 3
+    assert s.fields["grantor.role"].made_up == "inferred" and s.fields["grantor.role"].grouped
+    assert s.accuracy == 0.5  # the group once, wrong; the county right
+    assert s.cells == {"tp": 3, "fp": 1, "fn": 1}  # its parts are cells
+    assert score_document(None, exp, {"county": "Kings"}, spec).fields["grantor"].kind == "missing"
+    assert score_document(None, {"county": "Kings"}, got, spec).fields["grantor"].kind == "invented"
+    assert score_document(None, exp, exp, spec).all_correct
+
+
+def test_several_parties_are_line_items_of_groups():
+    spec = {"grantees": LineItems({"name": Text(), "role": Text()}, key="name")}
+    exp = [{"name": "John Doe", "role": "buyer"}, {"name": "Ann Doe", "role": "buyer"}]
+    got = [{"name": "Ann Doe", "role": "buyer"}, {"name": "John Doe", "role": "seller"}]
+    f = score_document(None, {"grantees": exp}, {"grantees": got}, spec).fields
+    assert f["grantees"].counts["tp"] == 1 and f["grantees.role"].counts == {"tp": 1, "fp": 1, "fn": 1}
+
+
+def test_teds_scores_structure_and_text():
+    t = [["a", "b"], ["c", "abc"]]
+    assert teds(t, t) == 1.0
+    assert teds(t, [["a", "b"], ["c", "xyz"]]) == pytest.approx(1 - 1 / 7)  # one cell renamed, 7 nodes
+    assert teds(t, [["a", "b"]]) == pytest.approx(1 - 3 / 7)  # a row and its two cells gone
+    assert teds(t, [["a", "b"], ["c", "xyz"]], structure_only=True) == 1.0
+    assert teds(t, [["A ", "b"], ["c", "ABC"]]) == 1.0  # case and spacing don't count
+    s = score_table(None, t, [["a", "b"], ["c", "abd"]])
+    assert s.teds == pytest.approx(1 - (1 / 3) / 7) and s.teds_structure == 1.0
+
+
+GROUPED = '''
+from assay_sdk.documents import score_document, score_table, Group, LineItems, Text, Money
+SPEC = {"grantor": Group({"name": Text(), "address": Text(), "role": Text()}),
+        "items": LineItems({"d": Text(), "amt": Money()}, key="d")}
+TRUTH = {"grantor": {"name": "Jane Roe", "address": "1 Main St", "role": "seller"},
+         "items": [{"d": "fee", "amt": "10"}, {"d": "tax", "amt": "2"}]}
+TEXT = "Jane Roe, 1 Main St, seller, to John Doe, buyer. fee 10 tax 2"
+
+def test_deed(assay_case):
+    got = {"grantor": {**TRUTH["grantor"], "role": "buyer"},
+           "items": [{"d": "fee", "amt": "10"}, {"d": "fee", "amt": "10"}]}
+    score_document(assay_case, TRUTH, got, SPEC, text=TEXT)
+    score_table(assay_case, [["d", "amt"], ["fee", "10"], ["tax", "2"]], [["d", "amt"], ["fee", "10"]])
+'''
+
+
+def test_groups_completeness_and_teds_in_the_report_and_on_the_dashboard(project):
+    from assay import store
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    (project / "tests").mkdir()
+    (project / "tests" / "test_deed.py").write_text(GROUPED)
+    out = run(project)
+    assert "line items complete 0/1: 1 row missing, 1 row duplicated" in out.stdout
+    assert "TEDS 70.0%" in out.stdout  # 10 nodes with the header, a row and its 2 cells gone
+    assert "made up, of 3 values extracted: 1 inferred, 0 fabricated" in out.stdout
+    engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
+    src, now = EventsSource(engine, "local"), datetime.utcnow()
+    w = Window(now - timedelta(days=1), now + timedelta(days=1))
+    acc = REGISTRY["field_accuracy"].compute(src, w)
+    assert {r.slice_value for r in acc.results if r.dimension == "field"} == {"grantor", "items"}
+    inferred = REGISTRY["inferred_value_rate"].compute(src, w)
+    assert (inferred.overall.numerator, inferred.overall.denominator) == (1, 3)  # the grantor's three parts
+    assert REGISTRY["table_teds"].compute(src, w).overall.value == pytest.approx(0.7, abs=1e-6)

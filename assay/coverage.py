@@ -74,7 +74,8 @@ SCORED = {"field_accuracy": ("field_scores", (), "fields scored against their co
           "ocr_digit_error_rate": ("document_checks", ("ocr",), "OCR text scored against the page (score_ocr)"),
           "ocr_reading_order": ("document_checks", ("ocr",), "OCR text scored against the page (score_ocr)"),
           "location_accuracy": ("document_checks", ("location",), "field locations scored (score_locations)"),
-          "table_cell_f1": ("document_checks", ("table",), "tables scored against the correct ones (score_table)")}
+          "table_cell_f1": ("document_checks", ("table",), "tables scored against the correct ones (score_table)"),
+          "table_teds": ("document_checks", ("table",), "tables scored against the correct ones (score_table)")}
 
 
 def _profile(records: Optional[list], cls) -> dict:

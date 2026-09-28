@@ -7,7 +7,9 @@ positive. Per run, the share of documents with every field correct, the weighted
 fields right, and precision, recall and F1 over cells (each field one, each line-item cell one),
 pooled over the documents. How wrong and invented values were made up: format (the right value
 in the wrong shape), inferred (in the document, not as this field), fabricated (nowhere in it),
-out of the values extracted. Fields extracted that the schema doesn't score, by name. Per rule, how many documents it held on.
+out of the values extracted. Fields extracted that the schema doesn't score, by name. Line items
+complete (no row missing, made up or duplicated). Tables: TEDS beside the cells' F1. Per rule,
+how many documents it held on.
 
 Document types: a confusion matrix, and precision and recall per type. Splitting: files split
 right (every document on the right pages), documents right, and precision and recall over the
@@ -46,6 +48,7 @@ def summarize(rows: List) -> Optional[dict]:
     split, ocr, where = defaultdict(int), defaultdict(int), defaultdict(float)
     worst_pages, ious = [], []
     tables, cells, made_up, unscored = defaultdict(int), defaultdict(int), defaultdict(int), defaultdict(int)
+    items, teds = defaultdict(int), []
     table_notes = []
     for r in mine:
         raw = _raw(r)
@@ -71,6 +74,8 @@ def summarize(rows: List) -> Optional[dict]:
             tables["shape_right"] += bool(raw.get("shape_right"))
             for k in ("cells", "cells_read", "cells_right"):
                 tables[k] += int(raw.get(k) or 0)
+            if raw.get("teds") is not None:
+                teds.append(float(raw["teds"]))
             if r.status == "fail" and getattr(r, "reason", None):
                 table_notes.append(f"{r.field.split(': ', 1)[-1]} ({r.case_id}): {r.reason}")
             continue
@@ -112,7 +117,14 @@ def summarize(rows: List) -> Optional[dict]:
             f["n"] += 1
             if raw.get("made_up"):
                 f[raw["made_up"]] += 1
-            if not raw.get("part_of") and "rows" not in raw and (raw.get("tp") or raw.get("fp")):
+            if "rows" in raw:  # a table of line items: complete when no row is missing, made up or repeated
+                items["n"] += 1
+                gaps = [int(raw.get(k) or 0) for k in ("rows_missing", "rows_invented", "rows_duplicated")]
+                items["complete"] += not any(gaps)
+                for k, g in zip(("missing", "invented", "duplicated"), gaps):
+                    items[k] += g
+            if (not raw.get("part_of") or raw.get("grouped")) and "rows" not in raw and "members" not in raw \
+                    and (raw.get("tp") or raw.get("fp")):
                 made_up["values"] += 1
                 made_up["grounded"] += bool(raw.get("grounded"))
                 if raw.get("made_up"):
@@ -137,7 +149,9 @@ def summarize(rows: List) -> Optional[dict]:
                        "precision": _ratio(tables["cells_right"], tables["cells_read"]),
                        "recall": _ratio(tables["cells_right"], tables["cells"]),
                        "f1": _ratio(2 * tables["cells_right"], tables["cells"] + tables["cells_read"]),
+                       "teds": sum(teds) / len(teds) if teds else None,
                        "notes": table_notes[:3]} if tables["n"] else None,
+            "line_items": dict(items) if items["n"] else None,
             "ocr": _ocr(ocr, worst_pages), "locations": {"n": int(where["n"]), "right": int(where["right"]),
                                                           "wrong_page": int(where["wrong_page"]),
                                                           "mean_iou": sum(ious) / len(ious) if ious else None}
@@ -241,7 +255,9 @@ def lines(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = None) 
         out.append(f"Tables       {tb['n']} · right {tb['right']}/{tb['n']} ({_pct(share)}{_was(share, was)}) · "
                    f"structure right {tb['shape_right']}/{tb['n']} · cells right: F1 {_pct(tb['f1'])}"
                    f"{_paren_was(tb['f1'], (btb or {}).get('f1'))} · precision {_pct(tb['precision'])}, recall "
-                   f"{_pct(tb['recall'])}")
+                   f"{_pct(tb['recall'])}"
+                   + (f" · TEDS {_pct(tb['teds'])}{_paren_was(tb['teds'], (btb or {}).get('teds'))}"
+                      if tb.get("teds") is not None else ""))
         out += [f"             {n}" for n in tb["notes"][:2]]
     loc, bl = now.get("locations"), (before or {}).get("locations")
     if loc:
@@ -291,6 +307,12 @@ def _field_lines(now: dict, before: Optional[dict]) -> List[str]:
                  if m[k] or (bm and bm[k]) or k != "format" and m["grounded"]]
         out.append(f"  made up, of {m['values']} values extracted: " + ", ".join(parts)
                    + ("" if m["grounded"] else " (inferred and fabricated need the text: score_document(..., text=))"))
+    li, bli = now.get("line_items"), (before or {}).get("line_items")
+    if li and (li["complete"] < li["n"] or bli and bli["complete"] < bli["n"]):
+        gaps = [f"{li[k]} row{'s' * (li[k] != 1)} {k}" for k in ("missing", "invented", "duplicated") if li.get(k)]
+        changed = bli and (bli["complete"], bli["n"]) != (li["complete"], li["n"])
+        out.append(f"  line items complete {li['complete']}/{li['n']}"
+                   + (f" (was {bli['complete']}/{bli['n']})" if changed else "") + (": " + ", ".join(gaps) if gaps else ""))
     if now.get("unscored"):
         names = list(now["unscored"].items())
         out.append("  extracted but not in the schema, so not scored: "

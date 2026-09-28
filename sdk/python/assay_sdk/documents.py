@@ -47,8 +47,11 @@ tolerance ("1.234,56 €" is 1234.56); Date reads the usual formats, with day_fi
 A correct value that can't be read (a date that isn't one) is the label's problem: the check
 couldn't be judged, and never counts against the extractor.
 
-Line items are matched row to row whatever their order (by `key`, else by the most cells in
-common), and scored by row: a row is right when all its cells are. `document` is one more check,
+Line items are matched row to row whatever their order: the pairing of correct and extracted rows
+with the most cells right overall (a maximum matching, as DocILE scores; by `key` when given), and
+scored by row: a row is right when all its cells are. Rows missing, made up and duplicated are
+counted apart; a table with none is complete. A Group (a party: name, address and role) is scored
+as one unit, right only when all its parts are. `document` is one more check,
 all fields correct, with the weighted share right as its score, and precision, recall and F1 over
 its cells: each field is a cell, and so is each cell of the line items, one definition for both
 (a cell in a missing row is missing, one in an invented row invented). Rules check the extracted values
@@ -68,7 +71,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 __all__ = ["Text", "Number", "Money", "Date", "LineItems", "score_document", "infer_schema", "check_rules", "total_of",
            "before", "required", "rule", "DocumentScore", "FieldScore", "EVALUATOR", "classify_document",
            "score_split", "SplitScore", "score_ocr", "OcrScore", "score_locations", "appears_in", "score_table",
-           "TableScore", "FORMAT", "INFERRED", "FABRICATED", "spot_check", "SPOT_CHECKS", "superseded_values", "SUPERSEDED"]
+           "TableScore", "teds", "Group", "FORMAT", "INFERRED", "FABRICATED", "spot_check", "SPOT_CHECKS",
+           "superseded_values", "SUPERSEDED"]
 
 EVALUATOR = "assay.documents@1"
 CORRECT, WRONG, MISSING, INVENTED = "correct", "wrong", "missing", "invented"
@@ -299,6 +303,15 @@ class LineItems(_Field):
         self.fields, self.key, self.weight = fields, key, weight
 
 
+class Group(_Field):
+    """Fields that belong together, scored as one unit: a party's name, address and role. Each part
+    is a check of its own (`grantor.role`); the group is right only when every part is. For several
+    of them (the grantors), use LineItems: each row is a group."""
+
+    def __init__(self, fields: Dict[str, _Field], weight: float = 1.0):
+        self.fields, self.weight = fields, weight
+
+
 # ---------- results ----------
 
 @dataclass
@@ -314,6 +327,7 @@ class FieldScore:
     part_of: Optional[str] = None  # a line-item column: the table it's part of, already counted there
     made_up: Optional[str] = None  # a wrong or invented value: format | inferred | fabricated (None: not told)
     grounded: bool = False  # scored with the document's text, so inferred and fabricated could be told apart
+    grouped: bool = False  # a part of a Group, counted in it for accuracy, and as a value of its own
 
     @property
     def passed(self) -> Optional[bool]:
@@ -437,6 +451,55 @@ def _made_up(spec: _Field, f: FieldScore, text: Optional[str]) -> Optional[str]:
     return INFERRED if found else FABRICATED
 
 
+def _assign(w: List[List[float]]) -> List[Tuple[int, int]]:
+    """The pairing of rows to columns with the most weight in all (the Hungarian method); pairs of
+    weight 0 are left out. Ties go to rows kept in their place."""
+    n, m = len(w), len(w[0]) if w else 0
+    if not n or not m:
+        return []
+    flip = n > m
+    if flip:
+        w = [list(r) for r in zip(*w)]
+        n, m = m, n
+    big = max(max(r) for r in w) + 1
+    cost = [[big - w[i][j] + 1e-9 * abs(i - j) for j in range(m)] for i in range(n)]
+    u, v, p, way = [0.0] * (n + 1), [0.0] * (m + 1), [0] * (m + 1), [0] * (m + 1)
+    for i in range(1, n + 1):
+        p[0], j0 = i, 0
+        minv, used = [float("inf")] * (m + 1), [False] * (m + 1)
+        while True:
+            used[j0] = True
+            i0, delta, j1 = p[j0], float("inf"), 0
+            for j in range(1, m + 1):
+                if not used[j]:
+                    c = cost[i0 - 1][j - 1] - u[i0] - v[j]
+                    if c < minv[j]:
+                        minv[j], way[j] = c, j0
+                    if minv[j] < delta:
+                        delta, j1 = minv[j], j
+            for j in range(m + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while j0:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+    pairs = [(p[j] - 1, j - 1) for j in range(1, m + 1) if p[j]]
+    pairs = [(b, a) for a, b in pairs] if flip else pairs
+    return sorted((a, b) for a, b in pairs if (w[b][a] if flip else w[a][b]) > 0)
+
+
+def _duplicates(rows: List[Any], matched_rows: List[Any], same: Callable[[Any, Any], bool]) -> int:
+    """Of the rows left unmatched, how many repeat a matched one."""
+    return sum(1 for r in rows if any(same(r, m) for m in matched_rows))
+
+
 def _cell_counts(spec: _Field, e: Any, a: Any) -> Dict[str, int]:
     """One cell, counted as a field is: wrong is a false positive and a false negative."""
     if empty(e) and empty(a):
@@ -471,25 +534,27 @@ def _score_rows(name: str, spec: LineItems, exp: Any, act: Any) -> Tuple[FieldSc
     cols = list(spec.fields)
     same = {(i, j): sum(_cell_ok(spec.fields[c], _get(e, c), _get(a, c)) for c in cols)
             for i, e in enumerate(exp) for j, a in enumerate(act)}
-    if spec.key:
+    if spec.key:  # a row pairs only with one of the same key; +1 so a key match with no other cell counts
         k = spec.fields[spec.key]
-        pairs = [p for p in same if _cell_ok(k, _get(exp[p[0]], spec.key), _get(act[p[1]], spec.key))]
+        allowed = lambda i, j: _cell_ok(k, _get(exp[i], spec.key), _get(act[j], spec.key))
     else:
-        pairs = [p for p, n in same.items() if n > 0]
-    matched, used_e, used_a = [], set(), set()
-    for i, j in sorted(pairs, key=lambda p: (-same[p], p)):  # most cells in common first
-        if i not in used_e and j not in used_a:
-            matched.append((i, j))
-            used_e.add(i)
-            used_a.add(j)
+        allowed = lambda i, j: same[(i, j)] > 0
+    matched = _assign([[same[(i, j)] + 1 if allowed(i, j) else 0 for j in range(len(act))]
+                       for i in range(len(exp))])
+    used_e, used_a = {i for i, _ in matched}, {j for _, j in matched}
     right = sum(1 for i, j in matched if same[(i, j)] == len(cols))
     tp, fp, fn = right, len(act) - right, len(exp) - right
     f1 = 2 * tp / (2 * tp + fp + fn) if (tp + fp + fn) else 1.0
+    lost, extra = len(exp) - len(used_e), len(act) - len(used_a)
+    dup = _duplicates([act[j] for j in range(len(act)) if j not in used_a], [act[j] for j in used_a],
+                      lambda r, m: all(_cell_ok(spec.fields[c], _get(m, c), _get(r, c)) for c in cols))
     notes = []
-    if len(exp) - len(used_e):
-        notes.append(f"{len(exp) - len(used_e)} row(s) missing")
-    if len(act) - len(used_a):
-        notes.append(f"{len(act) - len(used_a)} row(s) invented")
+    if lost:
+        notes.append(f"{lost} row(s) missing")
+    if extra - dup:
+        notes.append(f"{extra - dup} row(s) invented")
+    if dup:
+        notes.append(f"{dup} row(s) duplicated")
     per_col: Dict[str, FieldScore] = {}
     for c in cols:
         ok = sum(1 for i, j in matched if _cell_ok(spec.fields[c], _get(exp[i], c), _get(act[j], c)))
@@ -512,8 +577,39 @@ def _score_rows(name: str, spec: LineItems, exp: Any, act: Any) -> Tuple[FieldSc
             cells, ok / n if n else 1.0, part_of=name)
     whole = FieldScore(name, CORRECT if tp == len(exp) == len(act) else (MISSING if not act else WRONG),
                        len(exp), len(act), "; ".join(notes) or None, spec.weight,
-                       {"tp": tp, "fp": fp, "fn": fn, "rows": len(exp), "rows_extracted": len(act)}, f1)
+                       {"tp": tp, "fp": fp, "fn": fn, "rows": len(exp), "rows_extracted": len(act),
+                        **({"rows_missing": lost} if lost else {}),
+                        **({"rows_invented": extra - dup} if extra - dup else {}),
+                        **({"rows_duplicated": dup} if dup else {})}, f1)
     return whole, per_col
+
+
+def _score_group(name: str, spec: Group, exp: Any, act: Any, text: Optional[str]
+                 ) -> Tuple[FieldScore, Dict[str, FieldScore]]:
+    parts: Dict[str, FieldScore] = {}
+    for c, sub in spec.fields.items():
+        f = _score_value(f"{name}.{c}", sub, _get(exp, c) if exp is not None else None,
+                         _get(act, c) if act is not None else None)
+        f.part_of, f.grouped, f.weight = name, True, spec.weight
+        f.made_up, f.grounded = _made_up(sub, f, text), text is not None
+        if f.made_up:
+            f.note = f"{f.note}; {f.made_up}: {_MADE_UP[f.made_up]}"
+        parts[f.field] = f
+    has_e = any(not empty(p.expected) for p in parts.values())
+    has_a = any(not empty(p.actual) for p in parts.values())
+    bad = [p.field.split(".")[-1] for p in parts.values() if p.passed is False]
+    n = {"members": len(parts)}
+    if not bad:
+        whole = FieldScore(name, CORRECT, exp, act, weight=spec.weight, counts={"tp": 1, **n} if has_e else n)
+    elif not has_e:
+        whole = FieldScore(name, INVENTED, exp, act, "a group the document doesn't have", spec.weight,
+                           {"fp": 1, **n}, 0.0)
+    elif not has_a:
+        whole = FieldScore(name, MISSING, exp, act, "nothing extracted", spec.weight, {"fn": 1, **n}, 0.0)
+    else:
+        whole = FieldScore(name, WRONG, exp, act, f"{', '.join(bad)} wrong ({len(parts) - len(bad)} of "
+                           f"{len(parts)} right)", spec.weight, {"fp": 1, "fn": 1, **n}, 0.0)
+    return whole, parts
 
 
 # ---------- rules: the extracted values against each other ----------
@@ -604,6 +700,7 @@ def _record(run, name: str, f: FieldScore, confidence: Optional[float] = None) -
     raw = json.dumps({"kind": f.kind, "weight": f.weight, "share": round(f.share, 6), **f.counts,
                       **({"part_of": f.part_of} if f.part_of else {}),
                       **({"made_up": f.made_up} if f.made_up else {}), **({"grounded": True} if f.grounded else {}),
+                      **({"grouped": True} if f.grouped else {}),
                       **({"confidence": float(confidence)} if confidence is not None else {})})
     if f.kind == "unreadable":
         run.check(name, "error", expected=f.expected, actual=f.actual, evaluator=EVALUATOR, reason=f.note,
@@ -650,6 +747,10 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
             whole, cols = _score_rows(name, spec, e, a)
             fields[name] = whole
             fields.update(cols)
+        elif isinstance(spec, Group):
+            whole, parts = _score_group(name, spec, e, a, text)
+            fields[name] = whole
+            fields.update(parts)
         else:
             f = _score_value(name, spec, e, a)
             f.made_up, f.grounded = _made_up(spec, f, text), text is not None
@@ -1118,6 +1219,8 @@ class TableScore:
     cells_right: int
     rows: Dict[str, int]  # tp, fp, fn over rows (right when every cell is)
     notes: List[str]
+    teds: float = 1.0  # tree edit distance similarity: structure and text
+    teds_structure: float = 1.0  # the same, structure only (TEDS-S)
 
     @property
     def precision(self) -> float:
@@ -1137,6 +1240,66 @@ class TableScore:
         return self.shape_right and self.cells_right == self.cells and not self.notes
 
 
+def _ted(a: tuple, b: tuple, rename: Callable[[Any, Any], float]) -> float:
+    """Tree edit distance (Zhang and Shasha): trees are (label, [children]); inserting or deleting
+    a node costs 1, renaming one `rename(label, label)`."""
+    def post(t):
+        labels, lmd = [], []
+
+        def walk(node):
+            first = None
+            for ch in node[1]:
+                f = walk(ch)
+                first = f if first is None else first
+            labels.append(node[0])
+            lmd.append(len(labels) - 1 if first is None else first)
+            return lmd[-1]
+        walk(t)
+        keys = sorted({max(i for i in range(len(lmd)) if lmd[i] == l) for l in set(lmd)})
+        return labels, lmd, keys
+    la, ma, ka = post(a)
+    lb, mb, kb = post(b)
+    td = [[0.0] * len(lb) for _ in la]
+    for i in ka:
+        for j in kb:
+            li, lj = ma[i], mb[j]
+            fd = [[0.0] * (j - lj + 2) for _ in range(i - li + 2)]
+            for x in range(1, i - li + 2):
+                fd[x][0] = fd[x - 1][0] + 1
+            for y in range(1, j - lj + 2):
+                fd[0][y] = fd[0][y - 1] + 1
+            for x in range(1, i - li + 2):
+                for y in range(1, j - lj + 2):
+                    ix, jy = li + x - 1, lj + y - 1
+                    if ma[ix] == li and mb[jy] == lj:
+                        fd[x][y] = min(fd[x - 1][y] + 1, fd[x][y - 1] + 1,
+                                       fd[x - 1][y - 1] + rename(la[ix], lb[jy]))
+                        td[ix][jy] = fd[x][y]
+                    else:
+                        fd[x][y] = min(fd[x - 1][y] + 1, fd[x][y - 1] + 1,
+                                       fd[ma[ix] - li][mb[jy] - lj] + td[ix][jy])
+    return td[-1][-1]
+
+
+def teds(expected: Sequence[Sequence[Any]], extracted: Sequence[Sequence[Any]], structure_only: bool = False) -> float:
+    """Tree edit distance similarity, the standard table score: both tables as trees (table, rows,
+    cells), 1 - their edit distance over the larger's size. A cell renamed costs its text's
+    normalized edit distance (case and spacing ignored); structure_only: nothing (TEDS-S)."""
+    def tree(t):
+        return ("table", [("tr", [(("td", Text().read(c) if not empty(c) else ""), []) for c in r]) for r in t or []])
+
+    def rename(x, y):
+        if isinstance(x, tuple) and isinstance(y, tuple):
+            if structure_only or x[1] == y[1]:
+                return 0.0
+            return _edits(x[1], y[1]) / max(len(x[1]), len(y[1]))
+        return 0.0 if x == y else 1.0
+    a, b = tree(expected), tree(extracted)
+    size = lambda t: 1 + sum(size(c) for c in t[1])
+    n = max(size(a), size(b))
+    return 1.0 - _ted(a, b, rename) / n if n else 1.0
+
+
 def score_table(run, expected: Sequence[Sequence[Any]], extracted: Sequence[Sequence[Any]], name: str = "table",
                 header: bool = True, cells: Union[_Field, Dict[str, _Field]] = None) -> TableScore:
     """Score a table's structure and its cells, recorded as the check `table: <name>`. Tables are
@@ -1144,8 +1307,9 @@ def score_table(run, expected: Sequence[Sequence[Any]], extracted: Sequence[Sequ
     by name (so a column moved is still the same column), else by position. Rows are matched by
     cells in common, whatever their order. Says what happened to the structure: a column missing,
     added, or two merged into one; rows missing or added. The cells score is the F1 of the cells
-    right over those of the correct table and those read: one number, like TEDS, that a lost
-    column and a garbled cell both lower. `cells`: the type of every cell, or per column name."""
+    right over those of the correct table and those read: one number that a lost column and a
+    garbled cell both lower. Beside it, TEDS (tree edit distance similarity), the standard score,
+    and TEDS-S, structure only. `cells`: the type of every cell, or per column name."""
     exp = [list(r) for r in (expected or [])]
     got = [list(r) for r in (extracted or [])]
     spec_of = (lambda c: (cells.get(c) if isinstance(cells, dict) else cells) or Text())
@@ -1182,22 +1346,25 @@ def score_table(run, expected: Sequence[Sequence[Any]], extracted: Sequence[Sequ
     if not cols:  # no column in common (merged, renamed): nothing to match rows by but their place
         matched = list(zip(range(len(body_e)), range(len(body_g))))
         ue, ug = {a for a, _ in matched}, {b for _, b in matched}
-    for a, b in sorted((p for p, n in same.items() if n), key=lambda p: (-same[p], p)):
-        if a not in ue and b not in ug:
-            matched.append((a, b))
-            ue.add(a)
-            ug.add(b)
+    else:
+        matched = _assign([[same[(a, b)] for b in range(len(body_g))] for a in range(len(body_e))])
+        ue, ug = {a for a, _ in matched}, {b for _, b in matched}
+    dup = _duplicates([body_g[b] for b in range(len(body_g)) if b not in ug], [body_g[b] for b in ug],
+                      lambda r, m: [Text().read(x) for x in r] == [Text().read(x) for x in m])
     if len(body_e) - len(ue):
         notes.append(f"{len(body_e) - len(ue)} row(s) missing")
-    if len(body_g) - len(ug):
-        notes.append(f"{len(body_g) - len(ug)} row(s) that aren't there")
+    if len(body_g) - len(ug) - dup:
+        notes.append(f"{len(body_g) - len(ug) - dup} row(s) that aren't there")
+    if dup:
+        notes.append(f"{dup} row(s) duplicated")
     width = len(names)
     right = sum(ok(i, body_e[a], body_g[b]) for a, b in matched for i in cols)
     read_cells = sum(len(r) for r in body_g)
     rows_right = sum(1 for a, b in matched if same[(a, b)] == width)
     score = TableScore(name, header_right and len(body_e) == len(body_g) and len(cols) == width and
                        all(len(r) == width for r in body_g), len(body_e) * width, read_cells, right,
-                       {"tp": rows_right, "fp": len(body_g) - rows_right, "fn": len(body_e) - rows_right}, notes)
+                       {"tp": rows_right, "fp": len(body_g) - rows_right, "fn": len(body_e) - rows_right}, notes,
+                       teds(exp, got), teds(exp, got, structure_only=True))
     wrong = [(a, b, i) for a, b in matched for i in cols if not ok(i, body_e[a], body_g[b])]
     if wrong and not score.correct:
         a, b, i = wrong[0]
@@ -1208,7 +1375,9 @@ def score_table(run, expected: Sequence[Sequence[Any]], extracted: Sequence[Sequ
                   reason=None if score.correct else "; ".join(notes[:4]),
                   category=None if score.correct else "table",
                   raw_output=json.dumps({"kind": "table", "shape_right": score.shape_right, "cells": score.cells,
-                                         "cells_read": read_cells, "cells_right": right, **score.rows}))
+                                         "cells_read": read_cells, "cells_right": right, **score.rows,
+                                         "teds": round(score.teds, 6),
+                                         "teds_structure": round(score.teds_structure, 6)}))
     return score
 
 

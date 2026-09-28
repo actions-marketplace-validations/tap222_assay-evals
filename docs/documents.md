@@ -98,14 +98,36 @@ po_number (2 documents)".
 
 ## Line items
 
-Rows are matched row to row whatever their order: by `key` when given (a cell that names the row,
-like its description), else by the most cells in common. A row is right when all its cells are.
+Rows are matched row to row whatever their order, as DocILE scores them: every correct row
+against every extracted one, field by field, then the pairing with the most cells right in all (a
+maximum matching, not first come first served, which can pair two rows that share a lot and
+strand the rest). With `key` (a cell that names the row, like its description), a row pairs only
+with one of the same key. A row is right when all its cells are.
 `line_items` is scored by its rows: precision and recall over rows, and its share right is the
 row F1. Missing rows, invented rows and the wrong cells are named ("1 row(s) invented; amount
 wrong in 1 row(s), e.g. Widget: '100.00', not '1000.00'"). Each column is a check of its own
 too (`line_items.amount`), which says which column breaks; it isn't counted again in the
 document's accuracy. Its precision and recall are over cells: a cell of a matched row counts as a
 field does, a cell in a missing row is missing, and one in an invented row is invented.
+
+**Complete** means every line item captured, none left out, made up or repeated. A row that
+repeats one already matched is counted as **duplicated**, apart from rows made up; the report
+says "line items complete 2/3: 1 row missing, 1 row duplicated".
+
+## Groups: fields that belong together
+
+```python
+from assay_sdk.documents import Group, LineItems, Text
+
+SCHEMA = {"grantor": Group({"name": Text(), "address": Text(), "role": Text()}),
+          "grantees": LineItems({"name": Text(), "address": Text(), "role": Text()}, key="name")}
+```
+
+A group is scored as one unit, as KIEval scores grouped information: the grantor is right only
+when name, address and role all are ("role wrong (2 of 3 right)"). Each part is a check of its
+own too (`grantor.role`), and it counts in cell F1 and in made-up values, so a role given to the
+wrong party shows up as inferred. In the weighted accuracy the group counts once, by its
+`weight`. For several parties, use line items: each row is a group, right when all its cells are.
 
 ## The whole document
 
@@ -265,7 +287,14 @@ says what happened to the structure: a column missing, one that isn't there, two
 ("columns 'Item' and 'Qty' merged into one"), rows missing or made up, and the cells that are
 wrong. The cells score is one number, the F1 of the cells right over the correct table's and
 those read: a lost column and a garbled cell both lower it. `cells` is the type of every cell, or
-per column.
+per column. Rows are paired to get the most cells right, and a repeated row is named duplicated.
+
+Beside it is **TEDS** (tree edit distance similarity), the standard table score: both tables as
+trees (the table, its rows, their cells, the header included), and 1 minus the edits turning one
+into the other over the larger's size. A cell renamed costs its text's normalized edit distance,
+so "10.00" read as "10.0O" costs less than a cell lost. `TableScore.teds_structure` is TEDS-S,
+structure only. `teds(expected, extracted)` scores two tables directly. Cells don't span rows or
+columns here: tables are lists of rows.
 
 ## Spot checks: what reached published output
 
@@ -375,7 +404,7 @@ segment, with the usual expected range and alerts ([Measures](measures.md)):
 | Document splitting straight-through (`split_stp`) | `score_split` |
 | OCR characters wrong (`ocr_cer`), OCR digits wrong (`ocr_digit_error_rate`), OCR reading order (`ocr_reading_order`) | `score_ocr` |
 | Fields read from the right place (`location_accuracy`), also by field | `score_locations` |
-| Table cells right (`table_cell_f1`) | `score_table` |
+| Table cells right (`table_cell_f1`), table similarity (`table_teds`) | `score_table` |
 | Escape rate (`escape_rate`), also by the way a value went out | `spot_check` |
 | Superseded values reaching output (`superseded_value_rate`), also by field and link | `superseded_values` |
 

@@ -61,6 +61,7 @@ class FieldAccuracy(_AwaitingTruth):
         scores = source.field_scores(window) if hasattr(source, "field_scores") else None
         if scores is None:
             return super().compute(source, window)
+        scores = [s for s in scores if not s.get("part_of")]  # a group counts whole, like a table
         if not scores:
             return MeasureOutput(self.id, "measured", [SliceResult(None, None, None, 0)])
 
@@ -80,7 +81,7 @@ class FieldAccuracy(_AwaitingTruth):
 
 class _MadeUp(_AwaitingTruth):
     """Of the values extracted, the share made up this way (assay_sdk.documents.score_document).
-    Line items aren't sorted, so their tables aren't counted."""
+    Line items aren't sorted, so their tables aren't counted; a group counts by its parts."""
     higher_is_better = False
     dimensions = ("segment", "document_type", "field")
     made_up: str = ""
@@ -94,7 +95,8 @@ class _MadeUp(_AwaitingTruth):
             return unmeasured(self.id, "No fields scored with the document's text yet: "
                                        "score_document(..., text=ocr_text).")
         from assay.measures.documents import _slices
-        return _slices(self.id, [r for r in rows if r["extracted"] and not r["table"]], self.dimensions,
+        values = [r for r in rows if r["extracted"] and not r["table"] and not r.get("group")]
+        return _slices(self.id, values, self.dimensions,
                        lambda g: (sum(r["made_up"] == self.made_up for r in g), len(g)))
 
 
