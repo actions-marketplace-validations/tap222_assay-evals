@@ -7,7 +7,7 @@ positive. Per run, the share of documents with every field correct, the weighted
 fields right, and precision, recall and F1 over cells (each field one, each line-item cell one),
 pooled over the documents. How wrong and invented values were made up: format (the right value
 in the wrong shape), inferred (in the document, not as this field), fabricated (nowhere in it),
-out of the values extracted. Per rule, how many documents it held on.
+out of the values extracted. Fields extracted that the schema doesn't score, by name. Per rule, how many documents it held on.
 
 Document types: a confusion matrix, and precision and recall per type. Splitting: files split
 right (every document on the right pages), documents right, and precision and recall over the
@@ -45,7 +45,7 @@ def summarize(rows: List) -> Optional[dict]:
     confusion: Dict[tuple, int] = defaultdict(int)
     split, ocr, where = defaultdict(int), defaultdict(int), defaultdict(float)
     worst_pages, ious = [], []
-    tables, cells, made_up = defaultdict(int), defaultdict(int), defaultdict(int)
+    tables, cells, made_up, unscored = defaultdict(int), defaultdict(int), defaultdict(int), defaultdict(int)
     table_notes = []
     for r in mine:
         raw = _raw(r)
@@ -98,6 +98,8 @@ def summarize(rows: List) -> Optional[dict]:
                 acc.append(float(raw["accuracy"]))
             for k in ("tp", "fp", "fn"):
                 cells[k] += int((raw.get("cells") or {}).get(k) or 0)
+            for k in raw.get("unscored") or ():
+                unscored[k] += 1
         elif kind == "rule":
             if r.status in ("pass", "fail"):
                 rules[r.field[len("rule: "):] if r.field.startswith("rule: ") else r.field][0] += r.status == "pass"
@@ -127,6 +129,7 @@ def summarize(rows: List) -> Optional[dict]:
                       "recall": _ratio(cells["tp"], cells["tp"] + cells["fn"]),
                       "f1": _ratio(2 * cells["tp"], 2 * cells["tp"] + cells["fp"] + cells["fn"])}
             if cells["tp"] + cells["fp"] + cells["fn"] else None,
+            "unscored": dict(sorted(unscored.items(), key=lambda kv: (-kv[1], kv[0]))),
             "made_up": {k: made_up[k] for k in ("values", "grounded", *_MADE_UP)} if made_up["values"] else None,
             "rules": {k: {"held": v[0], "checked": v[1]} for k, v in sorted(rules.items())},
             "types": _types(confusion), "split": _split(split), "confidence": [list(x) for x in confident],
@@ -288,6 +291,11 @@ def _field_lines(now: dict, before: Optional[dict]) -> List[str]:
                  if m[k] or (bm and bm[k]) or k != "format" and m["grounded"]]
         out.append(f"  made up, of {m['values']} values extracted: " + ", ".join(parts)
                    + ("" if m["grounded"] else " (inferred and fabricated need the text: score_document(..., text=))"))
+    if now.get("unscored"):
+        names = list(now["unscored"].items())
+        out.append("  extracted but not in the schema, so not scored: "
+                   + ", ".join(f"{k} ({n} document{'s' if n > 1 else ''})" for k, n in names[:6])
+                   + (f" and {len(names) - 6} more" if len(names) > 6 else ""))
     rows = [(k, v) for k, v in now["fields"].items() if v.get("wrong") or v.get("missing") or v.get("invented")
             or (before and (before["fields"].get(k) or {}).get("recall") not in (None, v.get("recall")))]
     if rows:

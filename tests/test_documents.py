@@ -691,3 +691,58 @@ def test_inferred_and_fabricated_wait_for_the_text(project):
     live = {m["id"]: m for m in coverage.compute(src, w)["measures"]}
     assert live["inferred_value_rate"]["status"] == "blocked"
     assert live["inferred_value_rate"]["missing"] == ["fields scored with the document's text (score_document, text=)"]
+
+
+# ---------- the first bugs every extraction scorer hits, right by default ----------
+
+def test_a_field_only_the_extractor_gave_is_invented_not_ignored():
+    s = score_document(None, {"total": "1250"}, {"total": "1250", "po_number": "PO-9", "notes": ""})
+    assert s.fields["po_number"].kind == "invented" and s.cells == {"tp": 1, "fp": 1, "fn": 0}
+    assert "notes" in s.fields and s.fields["notes"].kind == "correct"  # empty both sides: nothing to count
+    assert not s.all_correct
+
+
+def test_equal_values_match_without_a_schema():
+    s = score_document(None, {"total": "1250", "rate": 0.5, "date": "2026-03-04", "paid": "$1,250.00",
+                              "vendor": {"name": "Acme Co"}},
+                       {"total": "1,250.00", "rate": "0.50", "date": "4 March 2026", "paid": "1250 USD",
+                        "vendor": {"name": "  ACME co"}})
+    assert s.all_correct, {k: f.note for k, f in s.fields.items() if not f.passed}
+    assert set(s.fields) == {"total", "rate", "date", "paid", "vendor.name"}
+    assert score_document(None, {"total": "1250"}, {"total": "1205"}).fields["total"].kind == "wrong"
+
+
+def test_types_are_read_from_the_values():
+    from assay_sdk.documents import infer_schema
+    got = infer_schema({"n": "1,250.00", "amt": "€12", "d": "04.03.2026", "zip": "02139", "id": "INV-17",
+                        "parcel": "12-345", "flag": True, "items": [{"desc": "a", "amt": "5"}]},
+                       {"extra": 7})
+    assert {k: type(v).__name__ for k, v in got.items()} == {
+        "n": "Number", "amt": "Money", "d": "Date", "zip": "Text", "id": "Text", "parcel": "Text", "flag": "Text",
+        "items": "LineItems", "extra": "Number"}
+    assert type(got["items"].fields["amt"]).__name__ == "Number"
+    s = score_document(None, {"zip": "02139"}, {"zip": "2139"})
+    assert s.fields["zip"].kind == "wrong"  # a leading zero is part of an identifier
+
+
+def test_fields_outside_the_schema_are_named():
+    s = score_document(None, TRUTH, {**TRUTH, "notes": "rush", "vendor": {"name": "x"}, "blank": ""}, SCHEMA)
+    assert s.unscored == ["notes", "vendor"] and s.all_correct  # named, not scored against the schema
+    r = Recorder()
+    score_document(r, TRUTH, {**TRUTH, "notes": "rush"}, SCHEMA)
+    assert json.loads(next(c for c in r.checks if c["field"] == "document")["raw_output"])["unscored"] == ["notes"]
+    assert score_document(None, {"vendor": {"name": "a"}}, {"vendor": {"name": "a"}},
+                          {"vendor.name": Text()}).unscored == []
+
+
+def test_unscored_fields_in_the_report(project):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_x.py").write_text('''
+from assay_sdk.documents import score_document, Text
+def test_a(assay_case):
+    score_document(assay_case, {"n": "1"}, {"n": "1", "po_number": "PO-9"}, {"n": Text()})
+def test_b(assay_case):
+    score_document(assay_case, {"n": "2"}, {"n": "2", "po_number": "PO-3", "notes": "x"}, {"n": Text()})
+''')
+    out = run(project)
+    assert "extracted but not in the schema, so not scored: po_number (2 documents), notes (1 document)" in out.stdout

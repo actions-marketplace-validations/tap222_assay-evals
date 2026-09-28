@@ -73,6 +73,18 @@ nothing is invented, and nothing extracted where it says 0 is missing.
 
 ## Values match by type, not by spelling
 
+Without a schema, `score_document(run, expected, extracted)` scores every field either side has,
+each by the type its correct value looks like (`infer_schema`): "1250" and "1,250.00" are the same
+number, "2026-03-04" and "4 March 2026" the same date, "$5" an amount; nested objects become
+dotted fields (`vendor.name`), lists of objects line items. A field only the extractor gave is
+**invented**, not ignored. Digits with a leading zero ("02139") are an identifier, compared as
+text. Declare a schema for anything the guess can't know: weights, `day_first`, tolerances, the
+line items' `key`.
+
+With a schema, fields the extractor gave that it doesn't list aren't scored, but they're named:
+`DocumentScore.unscored`, and in the report "extracted but not in the schema, so not scored:
+po_number (2 documents)".
+
 - **Text:** case and spacing don't count (`exact=True` makes them count;
   `ignore_punctuation=True` drops punctuation too).
 - **Number:** within `tolerance` (absolute) or `relative` (a share of the correct value).

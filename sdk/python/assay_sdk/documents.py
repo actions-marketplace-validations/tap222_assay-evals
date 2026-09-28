@@ -34,6 +34,11 @@ Given the document's text (text=), a wrong or invented value also says how it wa
 
 Format errors are told apart without the text; the other two need it.
 
+Without a schema, every field either side has is scored, each by the type its correct value looks
+like (a number, an amount, a date, else text), so a value only the extractor gave is invented, not
+ignored, and "1,250.00" is 1250. With one, fields the extractor gave that it doesn't score are
+named (`unscored`), so nothing disappears unsaid.
+
 Zero is a value, not an empty one: 0 extracted where the document has nothing is invented, and
 nothing extracted where it says 0 is missing, so the two errors stay apart.
 
@@ -60,7 +65,7 @@ from dataclasses import dataclass, field as dc_field
 from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-__all__ = ["Text", "Number", "Money", "Date", "LineItems", "score_document", "check_rules", "total_of",
+__all__ = ["Text", "Number", "Money", "Date", "LineItems", "score_document", "infer_schema", "check_rules", "total_of",
            "before", "required", "rule", "DocumentScore", "FieldScore", "EVALUATOR", "classify_document",
            "score_split", "SplitScore", "score_ocr", "OcrScore", "score_locations", "appears_in", "score_table",
            "TableScore", "FORMAT", "INFERRED", "FABRICATED", "spot_check", "SPOT_CHECKS", "superseded_values", "SUPERSEDED"]
@@ -319,6 +324,7 @@ class FieldScore:
 class DocumentScore:
     fields: Dict[str, FieldScore]
     rules: Dict[str, Tuple[Optional[bool], str]]
+    unscored: List[str] = dc_field(default_factory=list)  # extracted, with a value, but not in the schema
 
     @property
     def all_correct(self) -> bool:
@@ -624,6 +630,9 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
     """Score one document's extraction against its correct values, and record each field, the line
     items, `document` (all fields correct) and each rule as checks on `run` (None: only score).
 
+    schema: how each field is compared. None: every field either side has, typed by its values
+    (infer_schema). Given, fields extracted outside it are listed in `unscored`.
+
     confidence: the extractor's confidence per field (0-1), where it gives one. Recorded with each
     field, so the report can say whether a confident value is a right one, which threshold would
     auto-approve safely, and how many wrong values a threshold lets through.
@@ -631,8 +640,9 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
     text: the document's text (its OCR). With it, each wrong or invented value says whether it was
     inferred (in the document, not as this field) or fabricated (nowhere in it); format errors
     (the right value in the wrong shape) are told without it. Line-item cells aren't sorted."""
+    unscored = [] if schema is None else _unscored(extracted, schema)
     if schema is None:
-        schema = {k: Text() for k in (expected or {})}
+        schema = infer_schema(expected, extracted)
     fields: Dict[str, FieldScore] = {}
     for name, spec in schema.items():
         e, a = _get(expected, name), _get(extracted, name)
@@ -646,7 +656,7 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
             if f.made_up:
                 f.note = f"{f.note}; {f.made_up}: {_MADE_UP[f.made_up]}"
             fields[name] = f
-    doc = DocumentScore(fields, _rules(rules, extracted))
+    doc = DocumentScore(fields, _rules(rules, extracted), unscored)
     if run is not None:
         for name, f in fields.items():
             _record(run, name, f, (confidence or {}).get(name) if not f.part_of else None)
@@ -655,9 +665,72 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
         run.check("document", "pass" if doc.all_correct else "fail", evaluator=EVALUATOR,
                   reason=None if doc.all_correct else "wrong: " + ", ".join(f"{f.field} ({f.kind})" for f in bad[:6]),
                   raw_output=json.dumps({"kind": "document", "accuracy": acc, "fields": len(fields),
-                                         "wrong": len(bad), "cells": doc.cells, "f1": round(doc.f1, 6)}))
+                                         "wrong": len(bad), "cells": doc.cells, "f1": round(doc.f1, 6),
+                                         **({"unscored": unscored} if unscored else {})}))
         _record_rules(run, doc.rules)
     return doc
+
+
+def _guess(v: Any) -> _Field:
+    """The type a value looks like: a date, an amount (with a currency), a number, else text. A
+    string of digits with a leading zero ("00123", a zip code) is an identifier: text."""
+    if isinstance(v, bool):
+        return Text()
+    if isinstance(v, (int, float)):
+        return Number()
+    if isinstance(v, (date, datetime)):
+        return Date()
+    s = str(v).strip()
+    try:
+        Date().read(s)
+        return Date()
+    except Unreadable:
+        pass
+    if re.fullmatch(r"0\d+", s):
+        return Text()
+    try:
+        _, cur = _number(s, None)
+    except (Unreadable, ValueError):
+        return Text()
+    return Money() if cur else Number()
+
+
+def _keys(d: Any) -> List[str]:
+    return list(d) if isinstance(d, dict) else []
+
+
+def infer_schema(expected: Any, extracted: Any = None, prefix: str = "") -> Dict[str, _Field]:
+    """A schema from the values themselves: every field either side has, typed by its correct value
+    (by the extracted one where there's none). Nested objects become dotted fields
+    ("vendor.name"), lists of objects line items."""
+    out: Dict[str, _Field] = {}
+    for k in dict.fromkeys(_keys(expected) + _keys(extracted)):
+        e = expected.get(k) if isinstance(expected, dict) else None
+        a = extracted.get(k) if isinstance(extracted, dict) else None
+        v = a if empty(e) else e
+        if any(isinstance(x, (list, tuple)) and x and all(isinstance(r, dict) for r in x) for x in (e, a)):
+            rows = [r for x in (e, a) if isinstance(x, (list, tuple)) for r in x if isinstance(r, dict)]
+            cols: Dict[str, _Field] = {}
+            for c in dict.fromkeys(c for r in rows for c in r):
+                sample = next((r[c] for r in rows if not empty(r.get(c))), None)
+                cols[c] = _guess(sample) if sample is not None else Text()
+            out[prefix + k] = LineItems(cols)
+        elif isinstance(e, dict) or isinstance(a, dict):
+            out.update(infer_schema(e if isinstance(e, dict) else {}, a if isinstance(a, dict) else {},
+                                    f"{prefix}{k}."))
+        else:
+            out[prefix + k] = _guess(v) if not empty(v) else Text()
+    return out
+
+
+def _unscored(extracted: Any, schema: Dict[str, _Field]) -> List[str]:
+    """Extracted fields with a value that no schema field covers ("vendor" is covered by "vendor.name")."""
+    out = []
+    for k in _keys(extracted):
+        if not empty(extracted[k]) and not any(n == k or n.startswith(k + ".") or k.startswith(n + ".")
+                                               for n in schema):
+            out.append(k)
+    return out
 
 
 def check_rules(run, extracted: Any, rules: Sequence[Rule]) -> Dict[str, Tuple[Optional[bool], str]]:
