@@ -1,6 +1,6 @@
 """Document quality over time, from the checks assay_sdk.documents records: OCR (characters and
-digits wrong, reading order), fields read from the right place, table cells, and the escape
-rate from spot checks of published output. Each is unmeasured until its first check arrives,
+digits wrong, reading order), fields read from the right place, table cells, field cells, and
+the escape rate from spot checks of published output. Each is unmeasured until its first check arrives,
 and says which call sends it."""
 from __future__ import annotations
 
@@ -109,3 +109,22 @@ class TableCellAccuracy(_FromChecks):
     def ratio(self, rows):
         right = sum(r["raw"].get("cells_right") or 0 for r in rows)
         return 2 * right, sum((r["raw"].get("cells") or 0) + (r["raw"].get("cells_read") or 0) for r in rows)
+
+
+class FieldCellF1(_FromChecks):
+    """ExtractBench's single number: each document flattened into cells, one per field and one per
+    line-item cell in an aligned row, and F1 over them. Unweighted, beside field_accuracy's
+    weighted share: headers and line items under one definition."""
+    id = "field_cell_f1"
+    name = "Field cells right"
+    question = "Of the values documents hold, headers and line items alike, how many were extracted right (F1)?"
+    kind = "document"
+    sent_by = "fields scored against their correct values (assay_sdk.documents.score_document)"
+
+    def rows(self, source, window):
+        rows = super().rows(source, window)
+        return None if rows is None else [r for r in rows if "cells" in r["raw"]]  # sent before cells were
+
+    def ratio(self, rows):
+        c = {k: sum((r["raw"].get("cells") or {}).get(k) or 0 for r in rows) for k in ("tp", "fp", "fn")}
+        return 2 * c["tp"], 2 * c["tp"] + c["fp"] + c["fn"]

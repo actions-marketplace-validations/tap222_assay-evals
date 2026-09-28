@@ -59,6 +59,8 @@ IMPROVES: Dict[str, List[tuple]] = {
 WAITING_ON_GROUND_TRUTH: set = set()  # every accuracy measure now has a way in: see SCORED
 # Measured from scored checks (assay_sdk.documents): live once the first one arrives.
 SCORED = {"field_accuracy": ("field_scores", (), "fields scored against their correct values (score_document)"),
+          "field_cell_f1": ("document_checks", ("document",),
+                            "fields scored against their correct values (score_document)"),
           "split_stp": ("split_scores", (), "files scored against their correct boundaries (score_split)"),
           "escape_rate": ("document_checks", ("spot_check", "assay.spotcheck@1"),
                           "spot checks of published output (spot_check)"),

@@ -43,6 +43,10 @@ separator read wrong?)", "the currency is USD, not EUR", "the sign is wrong", "t
 A correct value that can't be read (a date that isn't one) is the label's problem, not the
 extractor's: that check couldn't be judged, and isn't counted.
 
+Zero is a value, not an empty one. Some benchmarks treat 0 and "" as the same; that hides the
+difference between a field left out and one read wrong. Here 0 extracted where the document has
+nothing is invented, and nothing extracted where it says 0 is missing.
+
 ## Values match by type, not by spelling
 
 - **Text:** case and spacing don't count (`exact=True` makes them count;
@@ -64,13 +68,30 @@ like its description), else by the most cells in common. A row is right when all
 row F1. Missing rows, invented rows and the wrong cells are named ("1 row(s) invented; amount
 wrong in 1 row(s), e.g. Widget: '100.00', not '1000.00'"). Each column is a check of its own
 too (`line_items.amount`), which says which column breaks; it isn't counted again in the
-document's accuracy.
+document's accuracy. Its precision and recall are over cells: a cell of a matched row counts as a
+field does, a cell in a missing row is missing, and one in an invented row is invented.
 
 ## The whole document
 
 `document` is one more check: **All fields correct**, the share of documents that need no
 correction. The weighted share of fields right (each field by its `weight`, line items by their
 row F1) is the document's accuracy.
+
+Beside it, one unweighted number with a single definition for headers and line items, as
+ExtractBench scores: the document flattened into cells, each field one and each line-item cell
+one, with precision (of the cells extracted, the share right), recall (of the cells the document
+has, the share extracted right) and F1 over them. A cell empty in both isn't counted.
+
+```python
+s = score_document(None, expected, extracted, SCHEMA)
+s.cells       # e.g. {"tp": 4, "fp": 6, "fn": 3}
+s.precision   # 0.4
+s.recall      # 0.571
+s.f1          # 0.471
+```
+
+Use the weighted accuracy when some fields cost more to get wrong; use cell F1 to compare
+extractors or runs on one scale, however many line items a document has.
 
 ## Rules: the extracted values against each other
 
@@ -291,7 +312,7 @@ total '1284.56'".
 `assay test` and `pytest --assay` add a Documents block, against the baseline:
 
 ```
-Documents    3 · all fields correct 2/3 (66.7%, was 100%) · weighted field accuracy 95.8% (was 100%)
+Documents    3 · all fields correct 2/3 (66.7%, was 100%) · weighted field accuracy 95.8% (was 100%) · cell F1 94.1% (was 100%), precision 94.1%, recall 94.1%
                 precision  recall
   invoice_date      66.7%   66.7%   1 wrong
 ```
@@ -310,6 +331,7 @@ segment, with the usual expected range and alerts ([Measures](measures.md)):
 | Measure | From |
 |---|---|
 | Severity-weighted field accuracy (`field_accuracy`), also by field | `score_document` |
+| Field cells right (`field_cell_f1`): F1 over header and line-item cells | `score_document` |
 | Document splitting straight-through (`split_stp`) | `score_split` |
 | OCR characters wrong (`ocr_cer`), OCR digits wrong (`ocr_digit_error_rate`), OCR reading order (`ocr_reading_order`) | `score_ocr` |
 | Fields read from the right place (`location_accuracy`), also by field | `score_locations` |

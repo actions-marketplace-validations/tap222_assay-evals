@@ -24,6 +24,9 @@ Every field is a check of its own, and it says which way it went wrong:
   missing    the document has a value, and nothing was extracted
   invented   nothing is there, and a value was extracted: usually the costliest error
 
+Zero is a value, not an empty one: 0 extracted where the document has nothing is invented, and
+nothing extracted where it says 0 is missing, so the two errors stay apart.
+
 "Matches" is per type: Text ignores case and spacing; Number and Money compare numbers with a
 tolerance ("1.234,56 €" is 1234.56); Date reads the usual formats, with day_first for 03/04/2026.
 A correct value that can't be read (a date that isn't one) is the label's problem: the check
@@ -31,7 +34,9 @@ couldn't be judged, and never counts against the extractor.
 
 Line items are matched row to row whatever their order (by `key`, else by the most cells in
 common), and scored by row: a row is right when all its cells are. `document` is one more check,
-all fields correct, with the weighted share right as its score. Rules check the extracted values
+all fields correct, with the weighted share right as its score, and precision, recall and F1 over
+its cells: each field is a cell, and so is each cell of the line items, one definition for both
+(a cell in a missing row is missing, one in an invented row invented). Rules check the extracted values
 against each other and need no correct values, so they run on production documents too
 (check_rules). Each check carries its counts, from which `assay test` reports precision and
 recall per field.
@@ -289,6 +294,36 @@ class DocumentScore:
     def wrong(self) -> List[FieldScore]:
         return [f for f in self.fields.values() if f.passed is False]
 
+    @property
+    def cells(self) -> Dict[str, int]:
+        """tp, fp, fn over cells: each field one, each line-item cell one (its table isn't counted
+        again). Unweighted; a cell empty in both isn't counted."""
+        tables = {f.part_of for f in self.fields.values() if f.part_of}
+        out = {"tp": 0, "fp": 0, "fn": 0}
+        for name, f in self.fields.items():
+            if name not in tables:
+                for k in out:
+                    out[k] += int(f.counts.get(k) or 0)
+        return out
+
+    @property
+    def precision(self) -> Optional[float]:
+        """Of the cells extracted, the share right."""
+        c = self.cells
+        return c["tp"] / (c["tp"] + c["fp"]) if c["tp"] + c["fp"] else None
+
+    @property
+    def recall(self) -> Optional[float]:
+        """Of the cells the document has, the share extracted right."""
+        c = self.cells
+        return c["tp"] / (c["tp"] + c["fn"]) if c["tp"] + c["fn"] else None
+
+    @property
+    def f1(self) -> float:
+        """Cell F1: 1.0 when there's nothing to extract and nothing was."""
+        c = self.cells
+        return 2 * c["tp"] / (2 * c["tp"] + c["fp"] + c["fn"]) if c["tp"] + c["fp"] + c["fn"] else 1.0
+
 
 def _get(doc: Any, path: str) -> Any:
     """doc["vendor"]["name"] for "vendor.name"; a key with a dot in it is tried first."""
@@ -326,6 +361,24 @@ def _score_value(name: str, spec: _Field, exp: Any, act: Any) -> FieldScore:
     why = spec.why(e, a)
     return FieldScore(name, WRONG, exp, act, f"{spec.show(a)}, not {spec.show(e)}" + (f": {why}" if why else ""),
                       w, {"fp": 1, "fn": 1}, 0.0)
+
+
+def _cell_counts(spec: _Field, e: Any, a: Any) -> Dict[str, int]:
+    """One cell, counted as a field is: wrong is a false positive and a false negative."""
+    if empty(e) and empty(a):
+        return {}
+    if empty(e):
+        return {"fp": 1}
+    try:
+        x = spec.read(e)
+    except Unreadable:
+        return {}  # the label's problem: not judged
+    if empty(a):
+        return {"fn": 1}
+    try:
+        return {"tp": 1} if spec.same(x, spec.read(a)) else {"fp": 1, "fn": 1}
+    except Unreadable:
+        return {"fp": 1, "fn": 1}
 
 
 def _cell_ok(spec: _Field, e: Any, a: Any) -> bool:
@@ -372,11 +425,17 @@ def _score_rows(name: str, spec: LineItems, exp: Any, act: Any) -> Tuple[FieldSc
             label = _get(exp[i], spec.key) if spec.key else f"row {i + 1}"
             notes.append(f"{c} wrong in {len(bad)} row(s), e.g. {label}: {_get(act[j], c)!r}, not {_get(exp[i], c)!r}")
         n = len(exp)
+        cells = {"tp": 0, "fp": 0, "fn": 0}
+        for i, j in matched:
+            for k, v in _cell_counts(spec.fields[c], _get(exp[i], c), _get(act[j], c)).items():
+                cells[k] += v
+        cells["fn"] += sum(not empty(_get(exp[i], c)) for i in range(len(exp)) if i not in used_e)
+        cells["fp"] += sum(not empty(_get(act[j], c)) for j in range(len(act)) if j not in used_a)
         per_col[f"{name}.{c}"] = FieldScore(
             f"{name}.{c}", CORRECT if ok == n and not (len(act) - len(used_a)) else WRONG,
             n, ok, f"{ok} of {n} right" if ok < n else f"{len(act) - len(used_a)} row(s) invented"
             if len(act) - len(used_a) else None, spec.weight,
-            {"tp": ok, "fp": len(act) - ok, "fn": n - ok}, ok / n if n else 1.0, part_of=name)
+            cells, ok / n if n else 1.0, part_of=name)
     whole = FieldScore(name, CORRECT if tp == len(exp) == len(act) else (MISSING if not act else WRONG),
                        len(exp), len(act), "; ".join(notes) or None, spec.weight,
                        {"tp": tp, "fp": fp, "fn": fn, "rows": len(exp), "rows_extracted": len(act)}, f1)
@@ -518,7 +577,7 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
         run.check("document", "pass" if doc.all_correct else "fail", evaluator=EVALUATOR,
                   reason=None if doc.all_correct else "wrong: " + ", ".join(f"{f.field} ({f.kind})" for f in bad[:6]),
                   raw_output=json.dumps({"kind": "document", "accuracy": acc, "fields": len(fields),
-                                         "wrong": len(bad)}))
+                                         "wrong": len(bad), "cells": doc.cells, "f1": round(doc.f1, 6)}))
         _record_rules(run, doc.rules)
     return doc
 

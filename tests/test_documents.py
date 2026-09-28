@@ -52,6 +52,31 @@ def test_each_field_says_which_way_it_went_wrong():
     assert score_document(None, TRUTH, TRUTH, SCHEMA).all_correct
 
 
+def test_headers_and_line_items_are_cells_under_one_definition():
+    got = {"invoice_number": " inv-17", "invoice_date": "2026-04-03", "total": "123456", "po_number": "PO-9",
+           "line_items": [{"description": "bolt", "amount": "234.56"}, {"description": "Widget", "amount": "100"},
+                          {"description": "Nut", "amount": "1"}]}
+    s = score_document(None, TRUTH, got, SCHEMA)
+    # headers: number right, date and total wrong (fp and fn), po invented (fp)
+    # rows: Bolt's two cells right, Widget's description right and amount wrong, Nut's two cells invented
+    assert s.cells == {"tp": 4, "fp": 6, "fn": 3}
+    assert s.precision == 0.4 and s.recall == 4 / 7 and s.f1 == 8 / 17
+    assert s.fields["line_items.amount"].counts == {"tp": 1, "fp": 2, "fn": 1}
+    lost = score_document(None, TRUTH, {**TRUTH, "line_items": TRUTH["line_items"][:1]}, SCHEMA)
+    assert lost.cells == {"tp": 5, "fp": 0, "fn": 2}  # the missing row's two cells are missing
+    assert score_document(None, TRUTH, TRUTH, SCHEMA).f1 == 1.0
+    assert score_document(None, {}, {}, {"x": Text()}).f1 == 1.0 and \
+        score_document(None, {}, {}, {"x": Text()}).precision is None
+
+
+def test_zero_is_a_value_not_an_empty_one():
+    spec = {"discount": Money()}
+    assert score_document(None, {"discount": 0}, {"discount": None}, spec).fields["discount"].kind == "missing"
+    assert score_document(None, {"discount": None}, {"discount": "0.00"}, spec).fields["discount"].kind == "invented"
+    assert score_document(None, {"discount": "0"}, {"discount": 0.0}, spec).fields["discount"].kind == "correct"
+    assert score_document(None, {"discount": None}, {"discount": ""}, spec).fields["discount"].counts == {}
+
+
 def test_a_correct_value_that_cant_be_read_is_the_labels_problem():
     s = score_document(None, {**TRUTH, "invoice_date": "sometime in March"}, TRUTH, SCHEMA)
     assert s.fields["invoice_date"].kind == "unreadable" and s.fields["invoice_date"].passed is None
@@ -93,6 +118,8 @@ def test_each_field_rule_and_the_document_is_a_check():
     assert by["invoice_date"]["reason"].startswith("wrong: 2026-04-03, not 2026-03-04")
     assert json.loads(by["invoice_date"]["raw_output"]) == {"kind": "wrong", "weight": 1.0, "share": 0.0,
                                                              "fp": 1, "fn": 1}
+    doc = json.loads(by["document"]["raw_output"])
+    assert doc["cells"] == {"tp": 6, "fp": 1, "fn": 1} and doc["f1"] == round(12 / 14, 6)
     assert by["document"]["status"] == "fail" and by["document"]["reason"] == "wrong: invoice_date (wrong)"
     assert by["rule: total = line_items.amount"]["status"] == "pass"
     assert all(c["evaluator"] == "assay.documents@1" for c in r.checks)
@@ -140,6 +167,8 @@ def test_a_pr_that_breaks_a_field_fails_and_says_which(project):
     assert out.returncode == 1
     assert "Documents    3 · all fields correct 2/3 (66.7%, was 100%) · weighted field accuracy 95.8% (was 100%)" \
         in out.stdout
+    # 17 cells a run (3 headers and 2 rows of 2 in inv-1, 3 and 1 row in the others); one read wrong
+    assert "cell F1 94.1% (was 100%), precision 94.1%, recall 94.1%" in out.stdout
     line = next(x for x in out.stdout.splitlines() if x.strip().startswith("invoice_date"))
     assert "66.7%" in line and "1 wrong" in line  # precision and recall, 2 of 3
     assert "tests/test_invoices.py::test_inv_1  All fields correct, invoice_date" in out.stdout
@@ -160,6 +189,10 @@ def test_a_pr_that_breaks_a_field_fails_and_says_which(project):
     assert m.overall.denominator == 6 * 8  # weights 3 + 1 + 3 + 1 per document; baseline copies left out
     by_field = {r.slice_value: r.value for r in m.results if r.dimension == "field"}
     assert by_field["invoice_date"] < 1 and by_field["total"] == 1 and "line_items.amount" not in by_field
+    from assay.measures.documents import FieldCellF1
+    f1 = FieldCellF1().compute(EventsSource(engine, "local"), Window(now - timedelta(days=1), now + timedelta(days=1)))
+    assert f1.status == "measured" and f1.overall.n == 6
+    assert (f1.overall.numerator, f1.overall.denominator) == (2 * 33, 2 * 33 + 2)  # both runs, one cell wrong
 
 
 def test_field_accuracy_waits_for_scored_documents():
