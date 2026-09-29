@@ -306,6 +306,30 @@ def _split(s: Dict[str, int]) -> Optional[dict]:
 
 MIN_APPROVED = 10  # fewer auto-approved values than this can't say a threshold is safe
 BINS = 10
+THRESHOLDS = (0.5, 0.7, 0.8, 0.9, 0.95, 0.99)  # the risk-coverage table's rows
+BAND = 0.9  # the practical test: do values stated at 0.90 or more come out right that often?
+
+
+def risk_coverage(pairs: List[tuple]) -> Dict[str, float]:
+    """Selective prediction: approve values from the most confident down; at each point the share
+    approved (coverage) and the share of those wrong (risk). AURC is the mean risk over the curve
+    (lower is better); the best possible, for the same accuracy, puts every wrong value last.
+    Values tied on confidence are approved together."""
+    n = len(pairs)
+    if not n:
+        return {"aurc": 0.0, "best": 0.0}
+    by = defaultdict(lambda: [0, 0])
+    for c, ok in pairs:
+        by[c][0] += 1
+        by[c][1] += not ok
+    area, seen, wrong = 0.0, 0, 0
+    for c in sorted(by, reverse=True):
+        k, w = by[c]
+        seen, wrong = seen + k, wrong + w
+        area += k * wrong / seen
+    right = sum(ok for _, ok in pairs)
+    best = sum(max(0, k - right) / k for k in range(1, n + 1))
+    return {"aurc": area / n, "best": best / n}
 
 
 def confidence(pairs: List[list], target: float = 0.99, threshold: Optional[float] = None) -> Optional[dict]:
@@ -336,8 +360,19 @@ def confidence(pairs: List[list], target: float = 0.99, threshold: Optional[floa
         above = [ok for c, ok in pairs if c >= threshold]
         at = {"threshold": threshold, "approved": len(above) / n, "wrong": len(above) - sum(above),
               "accuracy": _ratio(sum(above), len(above)), "wrong_total": n - sum(ok for _, ok in pairs)}
+    curve = []
+    for t in sorted(set(THRESHOLDS) | ({threshold} if threshold is not None else set()), reverse=True):
+        above = [(c, ok) for c, ok in pairs if c >= t]
+        right = sum(ok for _, ok in above)
+        curve.append({"threshold": t, "approved": len(above) / n, "n": len(above), "wrong": len(above) - right,
+                      "accuracy": _ratio(right, len(above)), "interval": wilson(right, len(above))})
+    band_t = threshold if threshold is not None else BAND
+    band = [(c, ok) for c, ok in pairs if c >= band_t]
+    band_out = {"threshold": band_t, "n": len(band), "says": sum(c for c, _ in band) / len(band),
+                "right": sum(ok for _, ok in band) / len(band),
+                "interval": wilson(sum(ok for _, ok in band), len(band))} if band else None
     return {"n": n, "ece": ece, "mean_confidence": mean_conf, "accuracy": accuracy, "suggested": best,
-            "target": target, "at": at}
+            "target": target, "at": at, "curve": curve, "band": band_out, **risk_coverage(pairs)}
 
 
 def _pct(v: Optional[float], digits: int = 1) -> str:
@@ -533,6 +568,20 @@ def _confidence_lines(now: dict, before: Optional[dict], cfg: Optional[dict]) ->
                    f"{_pct(s['accuracy'])} right (95% interval from {_pct(s['low'])}), the target {_pct(c['target'])}")
     else:
         out.append(f"             no threshold reaches {_pct(c['target'])} right over {MIN_APPROVED} values or more")
+    bd = c["band"]
+    if bd:
+        lo, hi = bd["interval"]
+        lean = "overconfident" if hi < bd["says"] else "underconfident" if lo > bd["says"] else "about right"
+        out.append(f"             stated {bd['threshold']:g} or more: {bd['n']} values, says {_pct(bd['says'])} on "
+                   f"average, right {_pct(bd['right'])} (95% interval {_pct(lo)} to {_pct(hi)}): {lean}"
+                   + (f"; {100 - bd['n']} more to reach the 100 a check needs" if bd["n"] < 100 else ""))
+    was_aurc = f" (was {b['aurc']:.3f})" if b and abs(b["aurc"] - c["aurc"]) >= 0.0005 else ""
+    out.append(f"             risk-coverage: AURC {c['aurc']:.3f}{was_aurc}, the best possible {c['best']:.3f} "
+               "(every wrong value least confident); approving from the most confident down:")
+    out.append(f"             {'threshold':>9}  {'approved':>8}  {'right':>6}  {'wrong through':>13}")
+    for r in c["curve"]:
+        row = f"{r['threshold']:>9g}  {_pct(r['approved']):>8}  {_pct(r['accuracy']):>6}  {r['wrong']:>13}"
+        out.append("             " + row + ("   yours" if r["threshold"] == cfg.get("auto_approve") else ""))
     a = c["at"]
     if a:
         was = (b or {}).get("at") or {}

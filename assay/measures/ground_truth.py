@@ -7,6 +7,7 @@ compute() once the labels it needs can be ingested.
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import List, Optional, Tuple
 
 from assay.measures.base import Measure, MeasureOutput, SliceResult, unmeasured
 from assay.models import UNRECORDED, Window
@@ -131,6 +132,77 @@ class CriticalFieldAccuracy(_AwaitingTruth):
             return super().compute(source, window)
         from assay.measures.documents import _slices
         return _slices(self.id, rows, self.dimensions, lambda g: (sum(r["right"] for r in g), len(g)))
+
+
+class _Confidence(_AwaitingTruth):
+    """From fields scored with the extractor's confidence (score_document confidence=): whether it
+    can decide what skips review. Values in n; slices by segment, document type and field."""
+    tag = "Confidence"
+    dimensions = ("segment", "document_type", "field")
+    waiting_on = "fields scored with the extractor's confidence (assay_sdk.documents.score_document, confidence=)."
+
+    def value(self, pairs: List[tuple]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        raise NotImplementedError  # pragma: no cover
+
+    def compute(self, source, window: Window) -> MeasureOutput:
+        rows = source.field_scores(window) if hasattr(source, "field_scores") else None
+        rows = None if rows is None else [r for r in rows if r.get("confidence") is not None and not r.get("part_of")]
+        if not rows:
+            return super().compute(source, window)
+
+        def one(dim, val, group):
+            v, num, den = self.value([(max(0.0, min(1.0, float(r["confidence"]))), r["right"]) for r in group])
+            return SliceResult(dim, val, v, len(group), numerator=num, denominator=den)
+        results = [one(None, None, rows)]
+        for dim in self.dimensions:
+            by = defaultdict(list)
+            for r in rows:
+                by[r[dim] if r[dim] not in (None, "") else UNRECORDED].append(r)
+            results += [one(dim, v, g) for v, g in sorted(by.items())]
+        return MeasureOutput(self.id, "measured", results)
+
+
+class ConfidenceAurc(_Confidence):
+    """The area under the risk-coverage curve: approving values from the most confident down, the
+    mean share wrong among those approved. Lower is better; it measures the ranking itself, so a
+    confidence that sorts wrong values last scores well even if its numbers are off."""
+    id = "confidence_aurc"
+    name = "Risk-coverage (AURC)"
+    question = "Approving values from the most confident down, how many wrong ones get through along the way?"
+    higher_is_better = False
+
+    def value(self, pairs):
+        from assay.documents import risk_coverage
+        return risk_coverage(pairs)["aurc"], None, None
+
+
+class ConfidentErrors(_Confidence):
+    """Of the values the extractor stated at 0.90 or more, the share wrong: the practical check of
+    whether its high confidence can be approved on. Its n says how far to trust it (100 or more)."""
+    id = "confident_error_rate"
+    name = "Wrong at 0.90+ confidence"
+    question = "Of the values stated at 0.90 confidence or more, what share were wrong?"
+    higher_is_better = False
+
+    def value(self, pairs):
+        from assay.documents import BAND
+        band = [ok for c, ok in pairs if c >= BAND]
+        wrong = len(band) - sum(band)
+        return (wrong / len(band) if band else None), wrong, len(band)
+
+
+class ConfidenceCalibration(_Confidence):
+    """Expected calibration error: the gap between the confidence stated and how often it's right,
+    over ten bands. Beside AURC: calibration says whether the numbers mean what they say, AURC
+    whether they rank right from wrong."""
+    id = "confidence_ece"
+    name = "Confidence calibration error"
+    question = "How far is the confidence stated from how often values are right?"
+    higher_is_better = False
+
+    def value(self, pairs):
+        from assay.documents import confidence
+        return confidence([list(p) for p in pairs])["ece"], None, None
 
 
 class _MadeUp(_AwaitingTruth):

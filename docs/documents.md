@@ -296,6 +296,39 @@ Confidence   9 values · calibration error 0.199 (was 0.088) · says 97.7% on av
 - **At your threshold:** what it approves, and how many wrong values are among them: the ones
   that would reach output without anyone looking.
 
+### Selective prediction: what each threshold approves, and what gets through
+
+Confidence is for routing: values above a threshold skip review, the rest go to a person. The
+question is less "are the numbers calibrated" than "does it rank right values above wrong ones",
+and what each threshold trades: automation (coverage) against wrong values let through (risk).
+
+```
+             stated 0.9 or more: 20 values, says 97.0% on average, right 80.0% (95% interval 58.4% to 91.9%): overconfident; 80 more to reach the 100 a check needs
+             risk-coverage: AURC 0.150, the best possible 0.006 (every wrong value least confident); approving from the most confident down:
+             threshold  approved   right  wrong through
+                  0.99        0%       —              0
+                  0.95     50.0%   80.0%              4
+                   0.9     50.0%   80.0%              4   yours
+                   0.5      100%   90.0%              4
+```
+
+- **The 0.90+ check:** the values stated at 0.90 or more (or at your `auto_approve`): what they
+  say on average against how often they're right, with a 95% interval. Overconfident when the
+  interval sits below what's stated. A check needs about 100 values; the line says how many more.
+- **The risk-coverage table:** at each threshold, the share of values approved, the share of those
+  right, and the wrong values that would go through unreviewed. Your `auto_approve` is marked.
+- **AURC:** the area under the risk-coverage curve, one number for the ranking: approving from the
+  most confident down, the mean share wrong among those approved. Lower is better. It's shown
+  beside the best possible for the same accuracy (every wrong value least confident), since AURC
+  also rises with the error rate itself.
+
+Calibration and ranking can disagree. Above, the extractor is underconfident overall (says 78.5%,
+right 90%) and overconfident exactly where it matters: every wrong value was stated at 0.97.
+
+On the dashboard, under Confidence: **Risk-coverage (AURC)** (`confidence_aurc`), **Wrong at
+0.90+ confidence** (`confident_error_rate`) and **Confidence calibration error**
+(`confidence_ece`), by segment, document type and field.
+
 ## OCR: the text read from a page against what it says
 
 ```python
@@ -513,6 +546,7 @@ segment, with the usual expected range and alerts ([Measures](measures.md)):
 | Table cells right (`table_cell_f1`), table similarity (`table_teds`) | `score_table` |
 | Escape rate (`escape_rate`), also by the way a value went out | `spot_check` |
 | Superseded values reaching output (`superseded_value_rate`), also by field and link | `superseded_values` |
+| Risk-coverage (`confidence_aurc`), wrong at 0.90+ confidence (`confident_error_rate`), calibration error (`confidence_ece`), also by field | `score_document`, with `confidence=` |
 
 Each is unmeasured until its first check arrives, and `GET /v1/coverage` says which call it's waiting on. A document's type is its run's task: record the pipeline's runs as
 `assay.run("invoice", ...)` for the slices to be document types. Under the `assay_case` fixture

@@ -4,7 +4,8 @@ from assay.measures.documents import (FieldCellF1, LocationAccuracy, OcrCharacte
                                       OcrReadingOrder, SplitDragRate, SplitPanopticQuality, SplitReworkCost,
                                       TableCellAccuracy, TableTeds)
 from assay.measures.errors import ErrorsByOrigin, PromptErrorRate, ReportedErrorRate
-from assay.measures.ground_truth import (CriticalDocumentAccuracy, CriticalFieldAccuracy, DocumentAccuracy,
+from assay.measures.ground_truth import (ConfidenceAurc, ConfidenceCalibration, ConfidentErrors,
+                                         CriticalDocumentAccuracy, CriticalFieldAccuracy, DocumentAccuracy,
                                          EscapeRate, FabricatedValues, FieldAccuracy, FormatErrors, InferredValues,
                                          SplitStraightThrough, SupersededValues)
 from assay.measures.operations import (CallErrorRate, CallLatencyP95, DocumentVolume, InputMixDrift,
@@ -27,6 +28,8 @@ REGISTRY = {m.id: m for m in [
     SplitStraightThrough(), SplitPanopticQuality(), SplitDragRate(), DocumentAccuracy(), CriticalDocumentAccuracy(),
     CriticalFieldAccuracy(), FieldAccuracy(), FieldCellF1(), FabricatedValues(), InferredValues(), FormatErrors(),
     SupersededValues(), EscapeRate(),
+    # confidence: whether it can decide what skips review
+    ConfidenceAurc(), ConfidentErrors(), ConfidenceCalibration(),
     # document quality, from scored checks
     OcrCharacterErrors(), OcrDigitErrors(), OcrReadingOrder(), LocationAccuracy(), TableCellAccuracy(), TableTeds(),
 ]}
@@ -43,6 +46,7 @@ GROUPS = {
                                       "critical_document_accuracy", "critical_field_accuracy", "field_accuracy",
                                       "field_cell_f1", "fabricated_value_rate", "inferred_value_rate",
                                       "format_error_rate", "superseded_value_rate", "escape_rate"],
+    "Confidence": ["confidence_aurc", "confident_error_rate", "confidence_ece"],
     "Document quality": ["ocr_cer", "ocr_digit_error_rate", "ocr_reading_order", "location_accuracy",
                          "table_cell_f1", "table_teds"],
 }

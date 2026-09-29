@@ -1139,3 +1139,71 @@ def test_split_rework_cost_on_the_dashboard(project):
     src.cost_rates = {"seconds_per_drag": 30, "review_per_hour": 60, "rework_per_hour": 30}
     assert REGISTRY["split_rework_cost"].compute(src, w).overall.numerator == pytest.approx(1.0)
     assert {x["id"]: x["status"] for x in coverage.compute(src, w)["measures"]}["split_rework_cost"] == "live"
+
+
+# ---------- risk-coverage: what an auto-approve threshold lets through ----------
+
+def test_risk_coverage_scores_the_ranking():
+    from assay.documents import confidence, risk_coverage
+    assert risk_coverage([(0.9, True), (0.8, False)]) == {"aurc": 0.25, "best": 0.25}  # wrong one last: the best
+    assert risk_coverage([(0.9, False), (0.8, True)])["aurc"] == 0.75
+    assert risk_coverage([(0.9, True), (0.9, False)])["aurc"] == 0.5  # tied: approved together
+    # a wrong value at 0.99, above the right ones at 0.95; another at 0.6
+    pairs = [[0.99, False]] + [[0.95, True]] * 8 + [[0.6, False]]
+    c = confidence(pairs, threshold=0.9)
+    at = {r["threshold"]: r for r in c["curve"]}
+    assert at[0.99]["approved"] == 0.1 and at[0.99]["wrong"] == 1 and at[0.95]["wrong"] == 1
+    assert at[0.9]["approved"] == 0.9 and at[0.5]["wrong"] == 2
+    assert c["band"]["n"] == 9 and c["band"]["right"] == pytest.approx(8 / 9)
+    assert c["aurc"] > c["best"]  # the confident wrong value costs along the whole curve
+
+
+CONFIDENT = '''
+from assay_sdk.documents import score_document, Text
+S = {"v": Text()}
+
+def case(i, run):
+    wrong = i % 10 == 0            # 1 in 10 wrong, and stated 0.97: overconfident at the top
+    conf = 0.97 if i % 2 == 0 else 0.6
+    score_document(run, {"v": "a"}, {"v": "b" if wrong else "a"}, S, confidence={"v": conf})
+''' + "".join(f"\ndef test_{i}(assay_case): case({i}, assay_case)\n" for i in range(40))
+
+
+def test_the_report_gives_the_band_check_and_the_risk_coverage_table(project):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_conf.py").write_text(CONFIDENT)
+    (project / "assay.toml").write_text("[documents]\nauto_approve = 0.9\n")
+    out = run(project)
+    # 20 at 0.97, 4 of them wrong; 20 at 0.6, all right
+    assert "stated 0.9 or more: 20 values, says 97.0% on average, right 80.0% (95% interval 58.4% to 91.9%): " \
+           "overconfident; 80 more to reach the 100 a check needs" in out.stdout
+    assert "risk-coverage: AURC 0." in out.stdout and "the best possible 0." in out.stdout
+    row = next(x for x in out.stdout.splitlines() if x.strip().startswith("0.9 "))
+    assert row.split()[1:4] == ["50.0%", "80.0%", "4"] and row.rstrip().endswith("yours")
+    assert next(x for x in out.stdout.splitlines() if x.strip().startswith("0.5 ")).split()[1:4] == \
+        ["100%", "90.0%", "4"]
+
+
+def test_confidence_on_the_dashboard(project):
+    from assay import coverage, store
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    (project / "tests").mkdir()
+    (project / "tests" / "test_conf.py").write_text(CONFIDENT)
+    run(project)
+    engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
+    src, now = EventsSource(engine, "local"), datetime.utcnow()
+    w = Window(now - timedelta(days=1), now + timedelta(days=1))
+    got = {mid: REGISTRY[mid].compute(src, w) for mid in ("confidence_aurc", "confident_error_rate", "confidence_ece")}
+    assert all(m.status == "measured" and m.overall.n == 40 for m in got.values())
+    assert (got["confident_error_rate"].overall.numerator, got["confident_error_rate"].overall.denominator) == (4, 20)
+    from assay.documents import risk_coverage
+    pairs = [(0.97 if i % 2 == 0 else 0.6, i % 10 != 0) for i in range(40)]
+    assert got["confidence_aurc"].overall.value == pytest.approx(risk_coverage(pairs)["aurc"])
+    live = {m["id"]: m["status"] for m in coverage.compute(src, w)["measures"]}
+    assert live["confidence_aurc"] == "live"
+    (project / "tests" / "test_conf.py").write_text(CONFIDENT.replace(', confidence={"v": conf}', ""))
+    other = store.make_engine("sqlite://")
+    store.metadata.create_all(other)
+    assert REGISTRY["confidence_aurc"].compute(EventsSource(other, "t"), w).status == "unmeasured"
