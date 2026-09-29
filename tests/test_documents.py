@@ -1321,3 +1321,112 @@ def test_the_ranking_in_the_report_apart_from_ocr_scored_against_labels(project)
            "meh " in out.stdout
     assert "on the 1 labelled page: the same best engine · Kendall tau 1.00 · NDCG 1.00" in out.stdout
     assert "OCR          " not in out.stdout  # nothing scored against a model's reading counts as OCR accuracy
+
+
+# ---------- robustness slices: facets, and the unseen template ----------
+
+def test_facets_are_recorded_with_every_check():
+    r = Recorder()
+    score_document(r, TRUTH, TRUTH, SCHEMA, facets={"source": "scanned", "stamps": True, "template_seen": False,
+                                                    "language": "de", "currency": None})
+    want = {"source": "scanned", "stamps": "yes", "template_seen": "unseen", "language": "de"}
+    assert all(json.loads(c["raw_output"]).get("facets") == want for c in r.checks if c["field"] != "rule")
+    with pytest.raises(ValueError, match="lowercase letters"):
+        score_document(None, TRUTH, TRUTH, SCHEMA, facets={"Template Seen": False})
+
+
+SLICED = '''
+import os
+from assay_sdk.documents import score_document, Text, Money
+SCHEMA = {"number": Text(), "total": Money(), "vendor": Text()}
+
+def case(i, run):
+    unseen = i % 5 == 0                      # 1 in 5 from a layout the model was never tuned on
+    truth = {"number": str(i), "total": "10", "vendor": "Acme"}
+    got = dict(truth)
+    if os.environ.get("MODE") == "after" and unseen:
+        got["total"] = "100"                 # the new model breaks only on unseen layouts
+    score_document(run, truth, got, SCHEMA, facets={"template_seen": not unseen,
+                                                    "source": "scanned" if i % 2 else "digital"})
+''' + "".join(f"\ndef test_{i}(assay_case): case({i}, assay_case)\n" for i in range(20))
+
+
+def test_a_slice_that_got_worse_is_named_though_the_average_held(project):
+    from assay.__main__ import main
+    (project / "tests").mkdir()
+    (project / "tests" / "test_sliced.py").write_text(SLICED)
+    (project / "assay.toml").write_text('[documents.gates]\n'
+                                        '"document[template_seen=unseen]" = { min_accuracy = 0.9 }\n')
+    first = run(project)
+    assert first.returncode == 0, first.stdout
+    assert "Gates        1 of 1 held" in first.stdout
+    assert main(["accept"]) == 0
+    out = run(project, env={"MODE": "after"})
+    assert out.returncode == 1
+    assert "Slices       4 by facet · documents with zero errors · worse: template_seen=unseen" in out.stdout
+    line = next(x for x in out.stdout.splitlines() if x.strip().startswith("template_seen=unseen"))
+    assert "4 · zero errors 0% (was 100%, down 100.0 points)" in line
+    assert next(x for x in out.stdout.splitlines() if x.strip().startswith("template_seen=seen")).split()[1:5] == \
+        ["16", "·", "zero", "errors"]
+    assert "weighted field accuracy 93.3%" in out.stdout  # the average, hiding it
+    assert "failed: document[template_seen=unseen]: accuracy 0%, at least 90.0% required" in out.stdout
+    assert "slices worse: template\\_seen=unseen" in (project / ".assay" / "summary.md").read_text()
+
+
+def test_the_dashboard_slices_by_facet_and_marks_new_templates():
+    from assay import store
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    engine = store.make_engine("sqlite://")
+    now = datetime.utcnow()
+    t, d = store.eval_results, store.event_documents
+    with engine.begin() as conn:
+        conn.execute(d.insert(), [
+            {"tenant": "t", "document_id": "old-1", "received_at": now - timedelta(days=90),
+             "facets": {"template": "acme-v3", "source": "digital"}},
+            {"tenant": "t", "document_id": "a", "received_at": now - timedelta(days=1),
+             "facets": {"template": "acme-v3", "source": "digital"}},
+            {"tenant": "t", "document_id": "b", "received_at": now - timedelta(days=1),
+             "facets": {"template": "globex-v1", "source": "scanned"}}])  # globex-v1: first seen yesterday
+        rows = []
+        for doc, ok in (("a", True), ("b", False)):
+            raw = {"kind": "correct" if ok else "wrong", "weight": 1.0, "share": 1.0 if ok else 0.0,
+                   **({"tp": 1} if ok else {"fp": 1, "fn": 1})}
+            rows.append(dict(result_id=f"{doc}-total", tenant="t", run_id="r1", case_id=doc, document_id=doc,
+                             field="total", evaluator="assay.documents@1", status="pass" if ok else "fail",
+                             ts=now, raw_output=json.dumps(raw)))
+            rows.append(dict(result_id=f"{doc}-doc", tenant="t", run_id="r1", case_id=doc, document_id=doc,
+                             field="document", evaluator="assay.documents@1", status="pass" if ok else "fail",
+                             ts=now, raw_output=json.dumps({"kind": "document", "accuracy": 1.0 if ok else 0.0})))
+        conn.execute(t.insert(), rows)
+    src, w = EventsSource(engine, "t"), Window(now - timedelta(days=7), now + timedelta(days=1))
+    acc = REGISTRY["field_accuracy"].compute(src, w)
+    by = {(r.dimension, r.slice_value): r.value for r in acc.results}
+    assert by[("source", "scanned")] == 0 and by[("source", "digital")] == 1
+    assert by[("template_new", "yes")] == 0 and by[("template_new", "no")] == 1  # globex-v1 is new
+    assert not any(dim == "template" for dim, _ in by)  # the id itself isn't a slice
+    zero = {(r.dimension, r.slice_value): r.value for r in REGISTRY["document_accuracy"].compute(src, w).results}
+    assert zero[("template_new", "yes")] == 0 and ("language", "UNRECORDED") not in zero
+
+
+def test_documents_are_sent_with_their_facets(tmp_path):
+    from fastapi.testclient import TestClient
+    from assay import store
+    from assay.api import create_app
+    from assay.config import Settings
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    url = f"sqlite:///{tmp_path / 'f.db'}"
+    client = TestClient(create_app(Settings(store_url=url)))
+    now = datetime.utcnow()
+    ok = client.post("/v1/events/documents", headers={"X-Tenant": "t"}, json=[
+        {"document_id": "d1", "received_at": now.isoformat(),
+         "facets": {"source": "scanned", "stamps": True, "template_seen": False}}])
+    assert ok.json() == {"ingested": 1}
+    bad = client.post("/v1/events/documents", headers={"X-Tenant": "t"}, json=[
+        {"document_id": "d2", "received_at": now.isoformat(), "facets": {"Bad Key": "x"}}])
+    assert bad.status_code == 422
+    docs = list(EventsSource(store.make_engine(url), "t").documents(
+        Window(now - timedelta(days=1), now + timedelta(days=1))))
+    assert docs[0].facets == {"source": "scanned", "stamps": "yes", "template_seen": "unseen"}

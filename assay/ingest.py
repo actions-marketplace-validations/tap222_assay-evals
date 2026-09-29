@@ -8,11 +8,12 @@ stage and start time; an extraction from document and field).
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, select
@@ -52,6 +53,25 @@ class DocumentEvent(Event):
     document_type: Optional[str] = None
     page_count: Optional[int] = Field(None, ge=0)
     delivered_downstream: Optional[bool] = None
+    facets: Optional[Dict[str, Union[str, bool]]] = Field(
+        None, description="What the document is like, to slice robustness by: source (digital, scanned), quality, "
+                          "stamps, handwriting, language, currency, template (the supplier's layout), template_seen")
+
+    @field_validator("facets")
+    @classmethod
+    def _facets(cls, v):
+        if v is None:
+            return v
+        if len(v) > 20:
+            raise ValueError("at most 20 facets")
+        out = {}
+        for k, x in v.items():
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", k):
+                raise ValueError(f"facet {k!r}: lowercase letters, digits and _, e.g. template_seen")
+            if isinstance(x, bool):
+                x = ("seen" if x else "unseen") if k == "template_seen" else ("yes" if x else "no")
+            out[k] = str(x)[:64]
+        return out
 
 
 class StageRunEvent(Event):

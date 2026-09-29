@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import and_, select
@@ -123,10 +124,12 @@ class EventsSource:
                 return None
             if window is not None:
                 cond += [t.c.ts >= window.start, t.c.ts < window.end]
-            rows = conn.execute(select(t.c.document_id, t.c.case_id, t.c.field, t.c.raw_output, d.c.document_type,
-                                       d.c.segment).select_from(t.outerjoin(
-                d, and_(d.c.tenant == t.c.tenant, d.c.document_id == t.c.document_id))).where(and_(*cond))).all()
+            rows = conn.execute(select(t.c.document_id, t.c.case_id, t.c.field, t.c.raw_output, t.c.ts,
+                                       d.c.document_type, d.c.segment, d.c.facets, d.c.received_at).select_from(
+                t.outerjoin(d, and_(d.c.tenant == t.c.tenant, d.c.document_id == t.c.document_id))).where(
+                and_(*cond))).all()
         out = []
+        first = self._template_first_seen(rows)
         for r in rows:
             try:
                 raw = json.loads(r.raw_output or "{}")
@@ -144,8 +147,41 @@ class EventsSource:
                         "grounded": bool(raw.get("grounded")), "table": "rows" in raw,
                         "group": "members" in raw, "part_of": raw.get("part_of"),
                         "critical": bool(raw.get("critical")), "right": raw.get("kind") == "correct",
-                        "confidence": raw.get("confidence")})
+                        "confidence": raw.get("confidence"), "facets": self._row_facets(r, raw, first)})
         return out
+
+    TEMPLATE_NEW_DAYS = 30  # a template is new for this long after its first document
+
+    def _template_first_seen(self, rows) -> Dict[str, datetime]:
+        """When each supplier template (facet `template`) first appeared: in production documents
+        (all time), or in these scored checks."""
+        import json
+        d = store.event_documents
+        first: Dict[str, datetime] = {}
+
+        def seen(tpl, when):
+            if tpl and when and (tpl not in first or when < first[tpl]):
+                first[tpl] = when
+        with self.engine.connect() as conn:
+            for f, when in conn.execute(select(d.c.facets, d.c.received_at).where(
+                    and_(d.c.tenant == self.tenant, d.c.facets.isnot(None)))):
+                seen((f or {}).get("template"), when)
+        for r in rows:
+            try:
+                raw = json.loads(r.raw_output or "{}")
+            except ValueError:
+                continue
+            seen(((raw.get("facets") or {}) or (r.facets or {})).get("template"), r.received_at or r.ts)
+        return first
+
+    def _row_facets(self, r, raw: dict, first: Dict[str, datetime]) -> Dict[str, str]:
+        """The document's facets (sent with it), overridden by those scored with the check, and
+        template_new: yes within TEMPLATE_NEW_DAYS of its template's first document."""
+        f = {**(r.facets or {}), **(raw.get("facets") or {})}
+        tpl, when = f.get("template"), r.received_at or r.ts
+        if tpl and tpl in first and when and "template_new" not in f:
+            f["template_new"] = "yes" if (when - first[tpl]).days < self.TEMPLATE_NEW_DAYS else "no"
+        return f
 
     def critical_scores(self, window: Window) -> Optional[List[dict]]:
         """Critical fields scored (score_document critical=), for coverage: None if none ever were."""
@@ -172,9 +208,11 @@ class EventsSource:
             cond += [t.c.status.in_(("pass", "fail")), t.c.run_id != BASELINE]
             if window is not None:
                 cond += [t.c.ts >= window.start, t.c.ts < window.end]
-            rows = conn.execute(select(t.c.document_id, t.c.case_id, t.c.field, t.c.status, t.c.raw_output,
-                                       d.c.document_type, d.c.segment).select_from(t.outerjoin(
-                d, and_(d.c.tenant == t.c.tenant, d.c.document_id == t.c.document_id))).where(and_(*cond))).all()
+            rows = conn.execute(select(t.c.document_id, t.c.case_id, t.c.field, t.c.status, t.c.raw_output, t.c.ts,
+                                       d.c.document_type, d.c.segment, d.c.facets, d.c.received_at).select_from(
+                t.outerjoin(d, and_(d.c.tenant == t.c.tenant, d.c.document_id == t.c.document_id))).where(
+                and_(*cond))).all()
+        first = self._template_first_seen(rows)
         out = []
         for r in rows:
             try:
@@ -183,7 +221,8 @@ class EventsSource:
                 continue
             if raw.get("kind") == kind:
                 out.append({"document_id": r.document_id or r.case_id, "document_type": r.document_type,
-                            "segment": r.segment, "field": r.field, "passed": r.status == "pass", "raw": raw})
+                            "segment": r.segment, "field": r.field, "passed": r.status == "pass", "raw": raw,
+                            "facets": self._row_facets(r, raw, first)})
         return out
 
     def split_scores(self, window: Window) -> Optional[List[dict]]:

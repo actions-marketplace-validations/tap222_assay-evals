@@ -77,7 +77,8 @@ class FieldAccuracy(_AwaitingTruth):
             for s in scores:
                 by[s[dim] if s[dim] not in (None, "") else UNRECORDED].append(s)
             results += [one(dim, v, g) for v, g in sorted(by.items())]
-        return MeasureOutput(self.id, "measured", results)
+        from assay.measures.documents import facet_slices
+        return MeasureOutput(self.id, "measured", results + facet_slices(scores, one))
 
 
 class DocumentAccuracy(_AwaitingTruth):
@@ -159,7 +160,8 @@ class _Confidence(_AwaitingTruth):
             for r in rows:
                 by[r[dim] if r[dim] not in (None, "") else UNRECORDED].append(r)
             results += [one(dim, v, g) for v, g in sorted(by.items())]
-        return MeasureOutput(self.id, "measured", results)
+        from assay.measures.documents import facet_slices
+        return MeasureOutput(self.id, "measured", results + facet_slices(rows, one))
 
 
 class ConfidenceAurc(_Confidence):

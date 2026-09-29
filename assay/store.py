@@ -147,6 +147,7 @@ event_documents = Table(
     Column("document_type", String(128)),
     Column("delivered_downstream", Boolean),
     Column("page_count", Integer),
+    Column("facets", JSON),  # {"source": "scanned", "language": "de", "template": "acme-v3", ...}
 )
 
 event_stage_runs = Table(

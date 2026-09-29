@@ -153,6 +153,48 @@ s.f1          # 0.471
 Use the weighted accuracy when some fields cost more to get wrong; use cell F1 to compare
 extractors or runs on one scale, however many line items a document has.
 
+## Robustness slices: where regressions hide
+
+An average can hold while one kind of document falls apart: scanned pages, stamps over the text,
+a language, or a supplier layout the model was never tuned on. Say what each document is like:
+
+```python
+score_document(assay_case, expected, extracted, SCHEMA, facets={
+    "source": "scanned",          # or digital
+    "quality": "skewed",          # clean, noisy, low-resolution, ...
+    "stamps": True, "handwriting": False,
+    "language": "de", "currency": "EUR",
+    "template": "acme-v3",        # the supplier's layout
+    "template_seen": False,       # a layout the model wasn't built or tuned on
+})
+```
+
+The report compares every slice with the baseline, the ones that got worse first:
+
+```
+Documents    20 · all fields correct 16/20 (80.0%, was 100%) · weighted field accuracy 93.3% ...
+Slices       4 by facet · documents with zero errors · worse: template_seen=unseen, source=digital, source=scanned
+  template_seen=unseen     4 · zero errors 0% (was 100%, down 100.0 points) · field accuracy 66.7% · cell F1 66.7%
+  source=digital          10 · zero errors 80.0% (was 100%, down 20.0 points) · field accuracy 93.3% · cell F1 93.3%
+  ...
+```
+
+A slice is named as worse when its share of documents with zero errors falls 5 points or more;
+the PR comment names them too. `template_seen` is yours to set, since only you know what the
+model was built or tuned on. The template id itself isn't a slice (one per supplier is too many
+to read); `template_seen` and `template_new` are. Gate a slice like any field:
+
+```toml
+[documents.gates]
+"document[template_seen=unseen]" = { min_accuracy = 0.9 }
+```
+
+**In production**, send the same facets with each document (`POST /v1/events/documents`,
+`"facets": {"source": "scanned", "template": "acme-v3"}`). The dashboard's accuracy measures are
+sliced by every facet that was sent, and no others (a facet nobody sends isn't an "unrecorded"
+slice). From `template`, Assay adds **`template_new`**: yes for a template's first 30 days, from
+its first document, so a supplier's new layout arriving in production is a slice of its own.
+
 ## Critical fields and straight-through processing
 
 Not every field stops a document. Name the ones that do:

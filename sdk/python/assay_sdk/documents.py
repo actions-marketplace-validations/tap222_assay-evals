@@ -71,7 +71,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 __all__ = ["Text", "Number", "Money", "Date", "LineItems", "score_document", "infer_schema", "check_rules", "total_of",
            "before", "required", "rule", "DocumentScore", "FieldScore", "EVALUATOR", "classify_document",
            "score_split", "SplitScore", "score_ocr", "OcrScore", "score_locations", "appears_in", "score_table",
-           "TableScore", "teds", "Group", "anls", "correct_ocr", "rank_ocr", "OcrRanking",
+           "TableScore", "teds", "Group", "FACETS", "anls", "correct_ocr", "rank_ocr", "OcrRanking",
            "OcrCorrectionError", "FORMAT", "INFERRED", "FABRICATED", "spot_check", "SPOT_CHECKS",
            "superseded_values", "SUPERSEDED"]
 
@@ -704,12 +704,40 @@ def _rules(rules: Sequence[Rule], extracted: Any) -> Dict[str, Tuple[Optional[bo
 
 # ---------- recording ----------
 
-def _record(run, name: str, f: FieldScore, confidence: Optional[float] = None) -> None:
+FACETS = {  # what robustness is sliced by; any other key is kept too
+    "source": "digital or scanned",
+    "quality": "clean, skewed, noisy, low-resolution, ...",
+    "stamps": "a stamp or seal over the text (yes / no)",
+    "handwriting": "handwritten values or notes (yes / no)",
+    "language": "the document's language, e.g. de",
+    "currency": "the amounts' currency, e.g. EUR",
+    "template": "the supplier's layout, e.g. acme-v3",
+    "template_seen": "whether the model was built or tuned on that layout (seen / unseen)",
+}
+
+
+def _facets(facets: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Facet values as text: True/False as yes/no, and for template_seen, seen/unseen."""
+    out = {}
+    for k, v in (facets or {}).items():
+        if v is None or v == "":
+            continue
+        if not isinstance(k, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", k):
+            raise ValueError(f"score_document: facet {k!r}: lowercase letters, digits and _, e.g. template_seen")
+        if isinstance(v, bool):
+            v = ("seen" if v else "unseen") if k == "template_seen" else ("yes" if v else "no")
+        out[k] = str(v)[:64]
+    return out
+
+
+def _record(run, name: str, f: FieldScore, confidence: Optional[float] = None,
+            facets: Optional[Dict[str, str]] = None) -> None:
     raw = json.dumps({"kind": f.kind, "weight": f.weight, "share": round(f.share, 6), **f.counts,
                       **({"part_of": f.part_of} if f.part_of else {}),
                       **({"made_up": f.made_up} if f.made_up else {}), **({"grounded": True} if f.grounded else {}),
                       **({"grouped": True} if f.grouped else {}), **({"critical": True} if f.critical else {}),
-                      **({"confidence": float(confidence)} if confidence is not None else {})})
+                      **({"confidence": float(confidence)} if confidence is not None else {}),
+                      **({"facets": facets} if facets else {})})
     if f.kind == "unreadable":
         run.check(name, "error", expected=f.expected, actual=f.actual, evaluator=EVALUATOR, reason=f.note,
                   error_kind="invalid", raw_output=raw)
@@ -731,7 +759,8 @@ def _record_rules(run, results: Dict[str, Tuple[Optional[bool], str]]) -> None:
 
 def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str, _Field]] = None,
                    rules: Sequence[Rule] = (), confidence: Optional[Dict[str, float]] = None,
-                   text: Optional[str] = None, critical: Sequence[str] = ()) -> DocumentScore:
+                   text: Optional[str] = None, critical: Sequence[str] = (),
+                   facets: Optional[Dict[str, Any]] = None) -> DocumentScore:
     """Score one document's extraction against its correct values, and record each field, the line
     items, `document` (all fields correct) and each rule as checks on `run` (None: only score).
 
@@ -748,7 +777,12 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
 
     critical: the fields whose error stops straight-through processing (a tax number, the total).
     The document check then also says whether every one of them was right, and the report and the
-    dashboard give their accuracy apart from the rest."""
+    dashboard give their accuracy apart from the rest.
+
+    facets: what the document is like, to slice robustness by (FACETS): source (digital or
+    scanned), quality, stamps, handwriting, language, currency, template, and template_seen (False:
+    a layout the model was never built or tuned on, where regressions tend to hide). Recorded with
+    every check; the report compares each slice with the baseline's."""
     unscored = [] if schema is None else _unscored(extracted, schema)
     if schema is None:
         schema = infer_schema(expected, extracted)
@@ -769,6 +803,7 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
             if f.made_up:
                 f.note = f"{f.note}; {f.made_up}: {_MADE_UP[f.made_up]}"
             fields[name] = f
+    facets = _facets(facets)
     unknown = [c for c in critical if c not in fields]
     if unknown:
         raise ValueError(f"score_document: critical {', '.join(unknown)} isn't in the schema")
@@ -777,7 +812,7 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
     doc = DocumentScore(fields, _rules(rules, extracted), unscored)
     if run is not None:
         for name, f in fields.items():
-            _record(run, name, f, (confidence or {}).get(name) if not f.part_of else None)
+            _record(run, name, f, (confidence or {}).get(name) if not f.part_of else None, facets)
         bad = doc.wrong()
         acc = doc.accuracy
         run.check("document", "pass" if doc.all_correct else "fail", evaluator=EVALUATOR,
@@ -785,7 +820,8 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
                   raw_output=json.dumps({"kind": "document", "accuracy": acc, "fields": len(fields),
                                          "wrong": len(bad), "cells": doc.cells, "f1": round(doc.f1, 6),
                                          **({"unscored": unscored} if unscored else {}),
-                                         **({"critical_correct": doc.critical_correct} if critical else {})}))
+                                         **({"critical_correct": doc.critical_correct} if critical else {}),
+                                         **({"facets": facets} if facets else {})}))
         _record_rules(run, doc.rules)
     return doc
 

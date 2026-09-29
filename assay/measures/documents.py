@@ -11,9 +11,28 @@ from assay.measures.base import Measure, MeasureOutput, SliceResult, unmeasured
 from assay.models import UNRECORDED, Window
 
 
+def facet_slices(rows: List[dict], one: Callable) -> List[SliceResult]:
+    """One slice per facet value the rows carry (score_document facets=, or sent with the
+    document): source, quality, stamps, handwriting, language, currency, template_seen,
+    template_new. Only facets that were sent: a row without one isn't an "unrecorded" slice.
+    The template id itself is left out (a slice per supplier): template_seen and template_new
+    are its slices."""
+    names = sorted({k for r in rows for k in (r.get("facets") or {}) if k != "template"})
+    out = []
+    for k in names:
+        by = defaultdict(list)
+        for r in rows:
+            v = (r.get("facets") or {}).get(k)
+            if v not in (None, ""):
+                by[v].append(r)
+        out += [one(k, v, g) for v, g in sorted(by.items())]
+    return out
+
+
 def _slices(measure_id: str, rows: List[dict], dimensions, ratio: Callable[[List[dict]], Tuple[float, float]]
             ) -> MeasureOutput:
-    """A ratio (numerator, denominator) overall and per slice, n being the documents in it."""
+    """A ratio (numerator, denominator) overall and per slice, n being the documents in it, with a
+    slice per facet value the rows carry."""
     def one(dim, val, group):
         num, den = ratio(group)
         return SliceResult(dim, val, num / den if den else None, len({r["document_id"] for r in group}),
@@ -24,7 +43,7 @@ def _slices(measure_id: str, rows: List[dict], dimensions, ratio: Callable[[List
         for r in rows:
             by[r.get(dim) if r.get(dim) not in (None, "") else UNRECORDED].append(r)
         results += [one(dim, v, g) for v, g in sorted(by.items())]
-    return MeasureOutput(measure_id, "measured", results)
+    return MeasureOutput(measure_id, "measured", results + facet_slices(rows, one))
 
 
 class _FromChecks(Measure):

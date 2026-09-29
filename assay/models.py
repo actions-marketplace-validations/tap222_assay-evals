@@ -59,6 +59,7 @@ class DocumentRecord:
     segment: Optional[str] = None
     document_type: Optional[str] = None
     page_count: Optional[int] = None
+    facets: Optional[dict] = None  # what the document is like, to slice robustness by (source, language, ...)
 
 
 @dataclass

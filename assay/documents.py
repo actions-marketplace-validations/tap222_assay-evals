@@ -45,6 +45,9 @@ def _whole(now: dict) -> Dict[str, dict]:
     if now.get("checked"):
         out["document"] = {"accuracy": now["all_correct"] / now["checked"], "n": now["checked"],
                            "errors": now["checked"] - now["all_correct"]}
+    for name, sl in (now.get("slices") or {}).items():
+        out[f"document[{name}]"] = {"accuracy": sl["zero_errors"], "n": sl["n"],
+                                    "errors": sl["n"] - round(sl["zero_errors"] * sl["n"])}
     c = now.get("critical")
     if c:
         out["critical"] = {"accuracy": c["right"] / c["values"], "errors": c["values"] - c["right"], "n": c["values"]}
@@ -71,6 +74,7 @@ def summarize(rows: List) -> Optional[dict]:
     split, ocr, where = defaultdict(int), defaultdict(int), defaultdict(float)
     confused, words_confused = defaultdict(int), defaultdict(int)
     rankings: Dict[str, dict] = {}
+    facet_docs: Dict[tuple, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
     worst_pages, ious = [], []
     tables, cells, made_up, unscored = defaultdict(int), defaultdict(int), defaultdict(int), defaultdict(int)
     items, teds, crit = defaultdict(int), [], defaultdict(int)
@@ -138,6 +142,17 @@ def summarize(rows: List) -> Optional[dict]:
                 split["pages"] += int(raw.get("pages") or 0)
         elif kind == "document":
             docs.append(r.status == "pass")
+            for k, v in (raw.get("facets") or {}).items():
+                if k == "template":
+                    continue  # an id, one slice per supplier: too many to read; template_seen is the slice
+                d = facet_docs[(k, v)]
+                d["n"] += 1
+                d["zero"] += r.status == "pass"
+                if raw.get("accuracy") is not None:
+                    d["acc"] += float(raw["accuracy"])
+                    d["acc_n"] += 1
+                for c in ("tp", "fp", "fn"):
+                    d[c] += int((raw.get("cells") or {}).get(c) or 0)
             if raw.get("critical_correct") is not None:
                 crit["documents"] += 1
                 crit["documents_right"] += bool(raw["critical_correct"])
@@ -193,6 +208,10 @@ def summarize(rows: List) -> Optional[dict]:
             if cells["tp"] + cells["fp"] + cells["fn"] else None,
             "unscored": dict(sorted(unscored.items(), key=lambda kv: (-kv[1], kv[0]))),
             "ocr_rankings": rankings or None,
+            "slices": {f"{k}={v}": {"n": int(d["n"]), "zero_errors": d["zero"] / d["n"],
+                                    "accuracy": d["acc"] / d["acc_n"] if d["acc_n"] else None,
+                                    "cell_f1": _ratio(2 * d["tp"], 2 * d["tp"] + d["fp"] + d["fn"])}
+                       for (k, v), d in sorted(facet_docs.items())} or None,
             "made_up": {k: made_up[k] for k in ("values", "grounded", *_MADE_UP)} if made_up["values"] else None,
             "rules": {k: {"held": v[0], "checked": v[1]} for k, v in sorted(rules.items())},
             "types": _types(confusion), "split": _split(split), "confidence": [list(x) for x in confident],
@@ -219,7 +238,9 @@ def check_gates(now: Optional[dict], before: Optional[dict], gates: Optional[dic
     max_errors (values wrong, missing or invented; for line items, documents with a row wrong),
     min_accuracy (the share right), min_precision, min_recall, min_f1, and max_drop (F1 below the
     baseline's). `document` gates the documents with every field right, `critical` the critical
-    values (score_document critical=): critical = { min_accuracy = 0.999 }. Every line-items
+    values (score_document critical=): critical = { min_accuracy = 0.999 }, and
+    `document[facet=value]` one slice of documents (score_document facets=):
+    "document[template_seen=unseen]" = { min_accuracy = 0.9 }. Every line-items
     table is gated at max_drop = TABLE_DROP unless configured (`line_items = {}` turns it off).
     A configured field this run didn't score fails: a gate can't pass on nothing.
     [{"field", "rule", "value", "limit", "was", "passed", "why", "default"}]."""
@@ -396,6 +417,7 @@ def lines(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = None) 
     """The report's Documents block."""
     out = _field_lines(now, before, cfg) if now["checked"] or now["fields"] else []
     out += _gate_lines(now, before, cfg)
+    out += _slice_lines(now.get("slices"), (before or {}).get("slices"))
     broken = {k: v for k, v in now["rules"].items() if v["held"] < v["checked"]}
     for k, v in broken.items():
         out.append(f"Rule         {k}: held on {v['held']} of {v['checked']}")
@@ -441,6 +463,36 @@ def _ocr_lines(o: Optional[dict], b: Optional[dict]) -> List[str]:
         out.append(f"             {case} {field}: {_pct(c)}" + (f", e.g. {lines[0]}" if lines else ""))
     out += confusion_lines(o.get("confusions"), (b or {}).get("confusions") if b else None, "read as")
     out += confusion_lines(o.get("word_confusions"), (b or {}).get("word_confusions") if b else None, "words read as")
+    return out
+
+
+SLICE_DROP = 0.05  # a slice whose zero-error share falls this much is named as worse
+
+
+def _slice_lines(now: Optional[dict], before: Optional[dict]) -> List[str]:
+    """Each facet's slices (score_document facets=): documents with zero errors, field accuracy
+    and cell F1, against the baseline's; the ones that got worse first, since an average that
+    held can hide a slice that didn't."""
+    if not now:
+        return []
+    rows = []
+    for name, s in now.items():
+        was = ((before or {}).get(name) or {}).get("zero_errors")
+        drop = was - s["zero_errors"] if was is not None else 0.0
+        rows.append((-drop, name, s, was))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    worse = [r for r in rows if -r[0] >= SLICE_DROP]
+    out = [f"Slices       {len(rows)} by facet · documents with zero errors"
+           + (f" · worse: {', '.join(r[1] for r in worse[:3])}" if worse else "")]
+    width = max(len(r[1]) for r in rows[:12])
+    for d, name, s, was in rows[:12]:
+        change = "" if was is None or abs(was - s["zero_errors"]) < 0.0005 else \
+            f" (was {_pct(was)}{', down ' + format(-d * 100, '.1f') + ' points' if -d >= SLICE_DROP else ''})"
+        out.append(f"  {name:<{width}}  {s['n']:>4} · zero errors {_pct(s['zero_errors'])}{change}"
+                   + (f" · field accuracy {_pct(s['accuracy'])}" if s.get("accuracy") is not None else "")
+                   + (f" · cell F1 {_pct(s['cell_f1'])}" if s.get("cell_f1") is not None else ""))
+    if len(rows) > 12:
+        out.append(f"  ... and {len(rows) - 12} more")
     return out
 
 
@@ -706,6 +758,11 @@ def markdown(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = Non
                    key=lambda kv: kv[1]["recall"])[:3]
     if worst:
         s += " · lowest recall: " + ", ".join(f"{k} {_pct(v['recall'])}" for k, v in worst)
+    was = (before or {}).get("slices") or {}
+    drops = {k: was[k]["zero_errors"] - v["zero_errors"] for k, v in (now.get("slices") or {}).items() if k in was}
+    worse = sorted((k for k, d in drops.items() if d >= SLICE_DROP), key=lambda k: (-drops[k], k))  # worst first
+    if worse:
+        s += " · slices worse: " + ", ".join(worse[:3])
     bad = [g for g in check_gates(now, before, (cfg or {}).get("gates")) if g["passed"] is False]
     if bad:
         s += " · gates failed: " + "; ".join(g["why"] for g in bad[:3])

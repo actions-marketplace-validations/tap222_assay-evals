@@ -220,7 +220,7 @@ Assay needs four kinds of records, plus a fifth for people cost. Most pipelines 
 
 | Record | What it is | Key fields |
 |---|---|---|
-| **documents** | one row per document or file | `document_id`, `received_at`, `completed_at`, `segment`, `document_type`, `processing_mode`, `file_hash`, `page_count` |
+| **documents** | one row per document or file | `document_id`, `received_at`, `completed_at`, `segment`, `document_type`, `processing_mode`, `file_hash`, `page_count`, `facets` (what the document is like: source, language, template, ... see [Document extraction](documents.md#robustness-slices-where-regressions-hide)) |
 | **stage_runs** | one row per pipeline stage per document | `document_id`, `stage`, `status`, `started_at`, `finished_at`, `did_work` |
 | **calls** | one row per model call | `call_id`, `stage`, `ts`, `model_declared`, `model_served`, `latency_ms`, `cost_usd`, `status`, `resolving_layer`, `gate_reason`, `code_revision` |
 | **indexed** | one row per extracted value | `document_id`, `has_positions` |
