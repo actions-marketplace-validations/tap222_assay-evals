@@ -70,6 +70,7 @@ def summarize(rows: List) -> Optional[dict]:
     confusion: Dict[tuple, int] = defaultdict(int)
     split, ocr, where = defaultdict(int), defaultdict(int), defaultdict(float)
     confused, words_confused = defaultdict(int), defaultdict(int)
+    rankings: Dict[str, dict] = {}
     worst_pages, ious = [], []
     tables, cells, made_up, unscored = defaultdict(int), defaultdict(int), defaultdict(int), defaultdict(int)
     items, teds, crit = defaultdict(int), [], defaultdict(int)
@@ -96,6 +97,9 @@ def summarize(rows: List) -> Optional[dict]:
                 ocr["free_chars"] += int(raw.get("chars") or 0)
             if raw.get("chars"):
                 worst_pages.append((raw["char_errors"] / raw["chars"], r.case_id, r.field, raw.get("worst") or []))
+            continue
+        if kind == "ocr_rank":  # engines ranked against corrected text: not ground truth, kept apart
+            rankings[r.field] = {**raw, "agrees": r.status == "pass"}
             continue
         if kind == "table":
             tables["n"] += 1
@@ -188,6 +192,7 @@ def summarize(rows: List) -> Optional[dict]:
                       "f1": _ratio(2 * cells["tp"], 2 * cells["tp"] + cells["fp"] + cells["fn"])}
             if cells["tp"] + cells["fp"] + cells["fn"] else None,
             "unscored": dict(sorted(unscored.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "ocr_rankings": rankings or None,
             "made_up": {k: made_up[k] for k in ("values", "grounded", *_MADE_UP)} if made_up["values"] else None,
             "rules": {k: {"held": v[0], "checked": v[1]} for k, v in sorted(rules.items())},
             "types": _types(confusion), "split": _split(split), "confidence": [list(x) for x in confident],
@@ -398,6 +403,7 @@ def lines(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = None) 
     out += _split_lines(now.get("split"), (before or {}).get("split"), cfg)
     out += _confidence_lines(now, before, cfg)
     out += _ocr_lines(now.get("ocr"), (before or {}).get("ocr"))
+    out += _ranking_lines(now.get("ocr_rankings"), (before or {}).get("ocr_rankings"))
     tb, btb = now.get("tables"), (before or {}).get("tables")
     if tb:
         share, was = _ratio(tb["right"], tb["n"]), _ratio(btb["right"], btb["n"]) if btb else None
@@ -435,6 +441,27 @@ def _ocr_lines(o: Optional[dict], b: Optional[dict]) -> List[str]:
         out.append(f"             {case} {field}: {_pct(c)}" + (f", e.g. {lines[0]}" if lines else ""))
     out += confusion_lines(o.get("confusions"), (b or {}).get("confusions") if b else None, "read as")
     out += confusion_lines(o.get("word_confusions"), (b or {}).get("word_confusions") if b else None, "words read as")
+    return out
+
+
+def _ranking_lines(now: Optional[dict], before: Optional[dict]) -> List[str]:
+    """OCR engines ranked without labels (rank_ocr), and on the labelled pages, whether that ranking
+    holds: how far to trust it on the rest."""
+    out = []
+    for name, r in sorted((now or {}).items()):
+        order = ", ".join(f"{e} {_pct(r['scores'][e])}" for e in r["order"])
+        line = (f"OCR ranking  {len(r['order'])} engines · {r['pages']} page{'s' * (r['pages'] != 1)} · against text "
+                f"corrected by {', '.join(r['correctors'])} (no labels): {order}")
+        out.append(line if name == "ocr ranking" else f"{line} ({name})")
+        if r.get("labelled"):
+            best = max(r["truth"], key=r["truth"].get)
+            out.append(f"             on the {r['labelled']} labelled page{'s' * (r['labelled'] != 1)}: "
+                       + ("the same best engine" if best == r["order"][0] else f"{best} is best, not {r['order'][0]}")
+                       + (f" · Kendall tau {r['kendall']:.2f}" if r.get("kendall") is not None else "")
+                       + (f" · NDCG {r['ndcg']:.2f}" if r.get("ndcg") is not None else ""))
+        b = (before or {}).get(name)
+        if b and b.get("order") != r["order"]:
+            out.append(f"             the order was {', '.join(b['order'])}")
     return out
 
 

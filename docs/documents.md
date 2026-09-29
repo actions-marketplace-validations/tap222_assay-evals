@@ -380,6 +380,53 @@ OCR          1 page · characters wrong 52.9% (was 0%) · words wrong 50.0% (was
              reading order 75.0% of lines (was 100%) · with them put back in order, characters wrong 0%
 ```
 
+## OCR without labels: ranking engines against corrected text
+
+Choosing between OCR engines (or checking a new version) usually needs pages someone typed out.
+Without them, DocOCR-Eval's approach ranks engines against what a model says each page most
+likely reads: each engine's text is corrected by one or more models, and the engines are scored
+by how close they came (ANLS: 1 minus edits over the longer text, 0 below 0.5), averaged over
+the correctors so no one model's taste decides.
+
+```python
+from assay_sdk import Judge
+from assay_sdk.documents import correct_ocr, rank_ocr
+
+reads = {"tesseract": tesseract_pages, "azure": azure_pages}        # {engine: {page: text}}
+correctors = {"claude": Judge("anthropic", "claude-opus-5-5"),
+              "gpt": Judge("openai", "gpt-5")}
+corrected = {name: {p: correct_ocr(reads["azure"][p], judge, image=png[p]) for p in reads["azure"]}
+             for name, judge in correctors.items()}
+rank_ocr(assay_case, reads, corrected, truth=labelled_pages)           # truth: the few pages you have
+```
+
+```
+OCR ranking  3 engines · 40 pages · against text corrected by claude, gpt (no labels): azure 95.4%, tesseract-5 91.2%, tesseract-4 88.0%
+             on the 10 labelled pages: the same best engine · Kendall tau 1.00 · NDCG 1.00
+```
+
+- **`correct_ocr(read, corrector, image=None)`** asks a model to correct only OCR errors (misread
+  characters, broken words), keeping the line breaks, the page's own spelling and anything it
+  can't verify. With the page image (Claude), it re-reads doubtful text. The default corrector
+  is Claude (`claude-opus-5-5`), with server-side fallbacks on; any `Judge` works. Each page
+  corrected is a model call you pay for. A refusal, an empty answer or a correction cut off at
+  `max_tokens` raises `OcrCorrectionError` rather than scoring against a partial page.
+- **`rank_ocr(run, engines, corrected, truth=None)`** scores and orders the engines. With the
+  labelled pages you do have, it checks the ranking against theirs (Kendall tau, NDCG, the same
+  best engine): that says how far to trust it on the rest, and the check fails when the best
+  engine differs.
+- **An engine is never scored against its own corrections:** a model that's both a candidate and
+  a corrector would be flattered, so an engine named as a corrector, or given as
+  `same_model={"gpt-ocr": "gpt"}`, is refused.
+- It's kept apart from `score_ocr`: nothing scored against a model's reading counts as OCR
+  accuracy, in the report or on the dashboard.
+
+This is a simplified version of the paper's method: one correction prompt, where the paper first
+diagnoses each block (character noise, tokenization, semantic consistency) and corrects from the
+text or from a re-read of the image depending on what it found. The paper reports that the best
+correction strategy varies across document collections, so check the ranking on a few labelled
+pages before relying on it.
+
 ## Tables: structure as well as cells
 
 ```python

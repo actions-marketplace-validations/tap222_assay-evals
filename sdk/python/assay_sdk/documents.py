@@ -71,7 +71,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 __all__ = ["Text", "Number", "Money", "Date", "LineItems", "score_document", "infer_schema", "check_rules", "total_of",
            "before", "required", "rule", "DocumentScore", "FieldScore", "EVALUATOR", "classify_document",
            "score_split", "SplitScore", "score_ocr", "OcrScore", "score_locations", "appears_in", "score_table",
-           "TableScore", "teds", "Group", "FORMAT", "INFERRED", "FABRICATED", "spot_check", "SPOT_CHECKS",
+           "TableScore", "teds", "Group", "anls", "correct_ocr", "rank_ocr", "OcrRanking",
+           "OcrCorrectionError", "FORMAT", "INFERRED", "FABRICATED", "spot_check", "SPOT_CHECKS",
            "superseded_values", "SUPERSEDED"]
 
 EVALUATOR = "assay.documents@1"
@@ -1220,6 +1221,150 @@ def score_ocr(run, expected: str, read: str, page: Optional[int] = None, max_cer
                                          "letter_errors": letter_errors, "confusions": _top(conf, 30),
                                          "word_confusions": _top(word_conf, 15)}))
     return score
+
+
+# ---------- OCR without labels: engines ranked against corrected text (DocOCR-Eval) ----------
+
+def anls(reference: str, read: str, tau: float = 0.5) -> float:
+    """Normalized Levenshtein similarity of a page's text, 1 - edits over the longer: 1.0 identical,
+    0.0 below `tau` (a page read as something else entirely scores nothing, as ANLS does). Spacing
+    doesn't count; compared line by line, so a long page is quick."""
+    norm = lambda t: "\n".join(re.sub(r"[ \t]+", " ", ln).strip() for ln in str(t or "").splitlines() if ln.strip())
+    a, b = norm(reference), norm(read)
+    longest = max(len(a.replace("\n", "")), len(b.replace("\n", "")))
+    if not longest:
+        return 1.0
+    edits = sum(_bounded(x.replace("\n", ""), y.replace("\n", "")) for x, y in _changed_lines(a, b))
+    sim = 1 - min(edits, longest) / longest
+    return sim if sim >= tau else 0.0
+
+
+CORRECT_PROMPT = """This is the text an OCR engine read from one document page.
+
+Correct only OCR errors: characters misread (l and 1, 0 and O, rn and m, 5 and S), words broken \
+apart or run together, garbled tokens. If the page image is attached, read the page to settle any \
+doubtful text. Keep everything else as it is: the line breaks and their order, the page's own \
+spelling, and any value you can't verify. Don't add, remove, summarize, translate or reformat.
+
+Return only the corrected text, with nothing before or after it."""
+
+_FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5")
+
+
+class OcrCorrectionError(RuntimeError):
+    """The corrector gave no text: an API error, a refusal, or an empty answer."""
+
+
+def correct_ocr(read: str, corrector: Any = None, image: Any = None, media_type: str = "image/png") -> str:
+    """The OCR text with its errors corrected by a model, as DocOCR-Eval's pseudo-reference: what
+    the page most likely says, for ranking OCR engines without labels (rank_ocr). Never use it as
+    ground truth: it's a model's reading.
+
+    corrector: an assay_sdk.Judge (any provider), or None for Claude (claude-opus-5-5). image: the
+    page (bytes, or a path), so the model can re-read doubtful text; sent to Claude as an image
+    block, and text-only to other providers."""
+    from assay_sdk.llm import Judge
+    judge = corrector if corrector is not None else Judge("anthropic", "claude-opus-5-5")
+    content: Any = f"{CORRECT_PROMPT}\n\n<ocr>\n{read}\n</ocr>"
+    params: Dict[str, Any] = {}
+    if judge.provider == "anthropic":
+        if image is not None:
+            import base64
+            data = image if isinstance(image, (bytes, bytearray)) else open(image, "rb").read()
+            content = [{"type": "image", "source": {"type": "base64", "media_type": media_type,
+                                                    "data": base64.standard_b64encode(data).decode("ascii")}},
+                       {"type": "text", "text": content}]
+        if judge.model in _FALLBACK_MODELS:  # a declined request is re-run on the model Anthropic picks
+            params.update(extra_headers={"anthropic-beta": "server-side-fallback-2026-07-01"},
+                          extra_body={"fallbacks": "default"})
+    r = judge.ask([{"role": "user", "content": content}], **params)
+    if r.error or r.finish_reason == "refusal" or not (r.text or "").strip():
+        raise OcrCorrectionError(r.error or ("the corrector declined" if r.finish_reason == "refusal"
+                                             else "the corrector returned no text"))
+    if r.finish_reason == "length":
+        raise OcrCorrectionError("the correction was cut off at max_tokens: split the page, or raise max_tokens")
+    return re.sub(r"^\s*</?ocr>\s*|\s*</?ocr>\s*$", "", r.text.strip())
+
+
+@dataclass
+class OcrRanking:
+    scores: Dict[str, float]  # engine -> mean ANLS against the corrected text, over pages and correctors
+    by_corrector: Dict[str, Dict[str, float]]  # corrector -> engine -> mean ANLS
+    order: List[str]  # engines, best first
+    pages: int
+    truth: Optional[Dict[str, float]] = None  # engine -> mean ANLS against labels, on the labelled pages
+    labelled: int = 0
+    kendall: Optional[float] = None  # agreement of the two orders, -1 to 1
+    ndcg: Optional[float] = None  # the order's gain against labelled ANLS, 1 at best
+
+    @property
+    def same_best(self) -> Optional[bool]:
+        return None if self.truth is None else self.order[0] == max(self.truth, key=self.truth.get)
+
+
+def _kendall(a: Dict[str, float], b: Dict[str, float]) -> Optional[float]:
+    keys = sorted(set(a) & set(b))
+    pairs = [(x, y) for i, x in enumerate(keys) for y in keys[i + 1:]]
+    if not pairs:
+        return None
+    sign = lambda v: (v > 0) - (v < 0)
+    return sum(sign(a[x] - a[y]) * sign(b[x] - b[y]) for x, y in pairs) / len(pairs)
+
+
+def _ndcg(order: List[str], gain: Dict[str, float]) -> Optional[float]:
+    import math
+    dcg = lambda seq: sum(gain.get(e, 0.0) / math.log2(i + 2) for i, e in enumerate(seq))
+    best = dcg(sorted(gain, key=gain.get, reverse=True))
+    return dcg([e for e in order if e in gain]) / best if best else None
+
+
+def rank_ocr(run, engines: Dict[str, Dict[Any, str]], corrected: Dict[str, Dict[Any, str]],
+             truth: Optional[Dict[Any, str]] = None, same_model: Optional[Dict[str, str]] = None,
+             tau: float = 0.5, name: str = "ocr ranking") -> OcrRanking:
+    """Rank OCR engines without labels, as DocOCR-Eval does: each page's text as each engine read
+    it, against the same page corrected by one or more models (correct_ocr), scored by ANLS and
+    averaged over the correctors so no one model's taste decides. An engine missing a page scores
+    0 on it.
+
+    engines: {engine: {page: text}}. corrected: {corrector: {page: corrected text}}. truth: the
+    labelled pages you do have, {page: text}: the ranking is then checked against theirs (Kendall
+    tau, NDCG, the same best engine), which says how far to trust it on the rest.
+
+    An engine scored against its own corrections is flattered, so it's refused: an engine named as
+    a corrector, or same_model={engine: corrector} for one built on the corrector's model.
+    Recorded as the check `ocr ranking`, apart from score_ocr: its reference is a model's reading,
+    never counted as ground truth."""
+    same_model = dict(same_model or {})
+    clash = sorted({e for e in engines if e in corrected} | {e for e, c in same_model.items() if c in corrected})
+    if clash:
+        raise ValueError(f"rank_ocr: {', '.join(clash)} would be scored against its own corrections, which "
+                         "flatters it. Leave that corrector out, or that engine.")
+    if not corrected:
+        raise ValueError("rank_ocr: no corrected text; correct each page first (correct_ocr)")
+    by_corrector = {}
+    for c, pages in corrected.items():
+        by_corrector[c] = {e: sum(anls(ref, read.get(p, ""), tau) for p, ref in pages.items()) / len(pages)
+                           for e, read in engines.items()} if pages else {}
+    scores = {e: sum(bc[e] for bc in by_corrector.values() if e in bc) / len(by_corrector) for e in engines}
+    order = sorted(scores, key=lambda e: (-scores[e], e))
+    pages = len({p for pages in corrected.values() for p in pages})
+    out = OcrRanking(scores, by_corrector, order, pages)
+    if truth:
+        out.truth = {e: sum(anls(ref, read.get(p, ""), tau) for p, ref in truth.items()) / len(truth)
+                     for e, read in engines.items()}
+        out.labelled, out.kendall, out.ndcg = len(truth), _kendall(scores, out.truth), _ndcg(order, out.truth)
+    if run is not None:
+        agree = out.kendall is None or out.same_best
+        best = max(out.truth, key=out.truth.get) if out.truth else None
+        run.check(name, "pass" if agree else "fail", evaluator=EVALUATOR,
+                  reason=None if agree else f"on the {out.labelled} labelled pages, {best} is best, not "
+                  f"{order[0]}: the ranking without labels can't be trusted here",
+                  category=None if agree else "ocr_ranking",
+                  raw_output=json.dumps({"kind": "ocr_rank", "scores": {e: round(v, 6) for e, v in scores.items()},
+                                         "order": order, "pages": pages, "correctors": sorted(corrected),
+                                         "truth": {e: round(v, 6) for e, v in (out.truth or {}).items()} or None,
+                                         "labelled": out.labelled, "kendall": out.kendall, "ndcg": out.ndcg}))
+    return out
 
 
 # ---------- where on the page a value was found ----------

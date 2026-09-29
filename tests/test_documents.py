@@ -1238,3 +1238,86 @@ def test_confusions_diff_against_the_baseline():
     lines = confusion_lines(now, before, "read as")
     assert lines[0].strip() == "read as: 'l' as '1' 9, '0' as 'O' 5, 'rn' as 'm' 2"
     assert lines[1].strip() == "since the baseline: new 'l' as '1' 9; fixed 'S' as '5' (was 3)"
+
+
+# ---------- OCR without labels: engines ranked against corrected text ----------
+
+from assay_sdk.documents import OcrCorrectionError, anls, correct_ocr, rank_ocr  # noqa: E402
+
+PAGES = {1: "Invoice 17\nTotal 1,250.00", 2: "Pay to Acme\nDue 4 March"}
+ENGINES = {"good": dict(PAGES), "meh": {1: "Invoice 17\nTota1 1,25O.OO", 2: "Pay to Acme\nDue 4 March"},
+           "bad": {1: "lnvoice l7\nTota1 1,25O.OO", 2: "Pay t0 Acrne"}}
+
+
+def test_anls_is_one_minus_edits_over_the_longer_and_nothing_below_tau():
+    assert anls("Total 1250", "Total  1250") == 1.0
+    assert anls("Total 1250", "Tota1 125O") == pytest.approx(0.8)
+    assert anls("abc", "xyz") == 0.0 and anls("", "") == 1.0
+
+
+def test_engines_are_ranked_without_labels_and_checked_where_there_are_some():
+    corrected = {"claude": dict(PAGES), "other": {1: PAGES[1], 2: "Pay to Acme\nDue 4 Mar"}}
+    r = rank_ocr(None, ENGINES, corrected, truth={1: PAGES[1]})
+    assert r.order == ["good", "meh", "bad"] and r.pages == 2
+    assert r.scores["good"] == pytest.approx((r.by_corrector["claude"]["good"] + r.by_corrector["other"]["good"]) / 2)
+    assert r.kendall == 1.0 and r.ndcg == pytest.approx(1.0) and r.same_best
+    missing = rank_ocr(None, {"a": {1: PAGES[1]}, "b": dict(PAGES)}, {"c": dict(PAGES)})
+    assert missing.scores["a"] == 0.5  # a page it didn't read scores 0
+
+
+def test_an_engine_is_never_scored_against_its_own_corrections():
+    with pytest.raises(ValueError, match="good would be scored against its own corrections"):
+        rank_ocr(None, ENGINES, {"good": dict(PAGES)})
+    with pytest.raises(ValueError, match="meh would be scored"):
+        rank_ocr(None, ENGINES, {"claude": dict(PAGES)}, same_model={"meh": "claude"})
+
+
+class FakeClaude:
+    """Stands in for anthropic.Anthropic(): records the request, answers with `text`."""
+
+    def __init__(self, text, stop="end_turn"):
+        self.text, self.stop, self.requests = text, stop, []
+        self.messages = self
+
+    def create(self, **req):
+        self.requests.append(req)
+        return {"content": [{"type": "text", "text": self.text}], "stop_reason": self.stop, "model": req["model"],
+                "usage": {"input_tokens": 10, "output_tokens": 5}}
+
+
+def test_a_page_is_corrected_by_a_model_with_the_image_when_given():
+    from assay_sdk.llm import Judge
+    fake = FakeClaude("<ocr>\nInvoice 17\nTotal 1,250.00\n</ocr>")
+    got = correct_ocr("lnvoice 17\nTota1 1,25O.OO", Judge("anthropic", "claude-opus-5-5", client=fake),
+                      image=b"\x89PNG fake")
+    assert got == "Invoice 17\nTotal 1,250.00"
+    req = fake.requests[0]
+    assert req["model"] == "claude-opus-5-5" and req["extra_body"] == {"fallbacks": "default"}
+    blocks = req["messages"][0]["content"]
+    assert blocks[0]["type"] == "image" and blocks[0]["source"]["media_type"] == "image/png"
+    assert "lnvoice 17" in blocks[1]["text"] and "Correct only OCR errors" in blocks[1]["text"]
+    with pytest.raises(OcrCorrectionError, match="declined"):
+        correct_ocr("x", Judge("anthropic", "claude-opus-5-5", client=FakeClaude("", stop="refusal")))
+    with pytest.raises(OcrCorrectionError, match="cut off"):
+        correct_ocr("x", Judge("anthropic", "claude-opus-5-5", client=FakeClaude("partial", stop="max_tokens")))
+
+
+RANKED = f'''
+from assay_sdk.documents import rank_ocr
+PAGES = {PAGES!r}
+ENGINES = {ENGINES!r}
+
+def test_rank(assay_case):
+    rank_ocr(assay_case, ENGINES, {{"claude": PAGES}}, truth={{1: PAGES[1]}})
+'''
+
+
+def test_the_ranking_in_the_report_apart_from_ocr_scored_against_labels(project):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_rank.py").write_text(RANKED)
+    out = run(project)
+    assert out.returncode == 0, out.stdout
+    assert "OCR ranking  3 engines · 2 pages · against text corrected by claude (no labels): good 100%, " \
+           "meh " in out.stdout
+    assert "on the 1 labelled page: the same best engine · Kendall tau 1.00 · NDCG 1.00" in out.stdout
+    assert "OCR          " not in out.stdout  # nothing scored against a model's reading counts as OCR accuracy
