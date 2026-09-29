@@ -352,9 +352,22 @@ and a long page is scored quickly. The report sums the rates over every page, ag
 baseline, and shows the worst pages with a line that went wrong:
 
 ```
-OCR          1 page · characters wrong 2.2% (was 0%) · words wrong 11.1% (was 0%) · digits wrong 8.3% (was 0%) · 1 over the limit
+OCR          1 page · characters wrong 2.2% (was 0%) · words wrong 11.1% (was 0%) · digits wrong 8.3% (was 0%) · letters wrong 0% · 1 over the limit
              tests/test_pages.py::test_page ocr page 1: 2.2%, e.g. 'Total: 1,284.56 EUR' for 'Total: 1,234.56 EUR'
+             read as: '3' as '8' 1
+               since the baseline: new '3' as '8' 1
+             words read as: '1,234.56' as '1,284.56' 1
+               since the baseline: new '1,234.56' as '1,284.56' 1
 ```
+
+Digits and letters are counted apart: a wrong digit is a wrong amount, a wrong letter a wrong
+name or code. **What was read as what** is kept per page and summed over the run: characters
+("l" as "1", "0" as "O", "rn" as "m", "i" lost) and whole words ("modern" as "modem"). Against
+the baseline, the report says which confusions a new version brought, which grew, and which it
+fixed ("since the baseline: new 'l' as '1' 9; fixed 'S' as '5' (was 3)"), and the PR comment
+names the new ones. A change of OCR engine or preprocessing shows up as the confusions it
+changes, not only as a rate that moved. Lines only moved, not misread, add no confusions.
+`OcrScore.confusions` and `word_confusions` hold them per page.
 
 **Reading order** is scored apart from the text. Each line read is matched to the page's line it
 is, and the order score is the share of lines in the longest run that keeps the page's order: a
@@ -541,7 +554,7 @@ segment, with the usual expected range and alerts ([Measures](measures.md)):
 | Field cells right (`field_cell_f1`): F1 over header and line-item cells | `score_document` |
 | Fabricated values (`fabricated_value_rate`), inferred values (`inferred_value_rate`), format errors (`format_error_rate`): each a share of the values extracted, also by field | `score_document`, with `text=` for the first two |
 | Document splitting straight-through (`split_stp`), panoptic quality (`split_pq`), pages moved by hand (`split_drag_rate`) | `score_split` |
-| OCR characters wrong (`ocr_cer`), OCR digits wrong (`ocr_digit_error_rate`), OCR reading order (`ocr_reading_order`) | `score_ocr` |
+| OCR characters wrong (`ocr_cer`), digits wrong (`ocr_digit_error_rate`), letters wrong (`ocr_letter_error_rate`), reading order (`ocr_reading_order`) | `score_ocr` |
 | Fields read from the right place (`location_accuracy`), also by field | `score_locations` |
 | Table cells right (`table_cell_f1`), table similarity (`table_teds`) | `score_table` |
 | Escape rate (`escape_rate`), also by the way a value went out | `spot_check` |

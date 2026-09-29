@@ -1,8 +1,8 @@
 from assay.measures.base import Measure, MeasureOutput, SliceResult
 from assay.measures.cost import CostPerDocument, CostPerPage, HumanTouchRate, TotalSpend
 from assay.measures.documents import (FieldCellF1, LocationAccuracy, OcrCharacterErrors, OcrDigitErrors,
-                                      OcrReadingOrder, SplitDragRate, SplitPanopticQuality, SplitReworkCost,
-                                      TableCellAccuracy, TableTeds)
+                                      OcrLetterErrors, OcrReadingOrder, SplitDragRate, SplitPanopticQuality,
+                                      SplitReworkCost, TableCellAccuracy, TableTeds)
 from assay.measures.errors import ErrorsByOrigin, PromptErrorRate, ReportedErrorRate
 from assay.measures.ground_truth import (ConfidenceAurc, ConfidenceCalibration, ConfidentErrors,
                                          CriticalDocumentAccuracy, CriticalFieldAccuracy, DocumentAccuracy,
@@ -31,7 +31,8 @@ REGISTRY = {m.id: m for m in [
     # confidence: whether it can decide what skips review
     ConfidenceAurc(), ConfidentErrors(), ConfidenceCalibration(),
     # document quality, from scored checks
-    OcrCharacterErrors(), OcrDigitErrors(), OcrReadingOrder(), LocationAccuracy(), TableCellAccuracy(), TableTeds(),
+    OcrCharacterErrors(), OcrDigitErrors(), OcrLetterErrors(), OcrReadingOrder(), LocationAccuracy(),
+    TableCellAccuracy(), TableTeds(),
 ]}
 
 GROUPS = {
@@ -47,8 +48,8 @@ GROUPS = {
                                       "field_cell_f1", "fabricated_value_rate", "inferred_value_rate",
                                       "format_error_rate", "superseded_value_rate", "escape_rate"],
     "Confidence": ["confidence_aurc", "confident_error_rate", "confidence_ece"],
-    "Document quality": ["ocr_cer", "ocr_digit_error_rate", "ocr_reading_order", "location_accuracy",
-                         "table_cell_f1", "table_teds"],
+    "Document quality": ["ocr_cer", "ocr_digit_error_rate", "ocr_letter_error_rate", "ocr_reading_order",
+                         "location_accuracy", "table_cell_f1", "table_teds"],
 }
 
 __all__ = ["REGISTRY", "GROUPS", "Measure", "MeasureOutput", "SliceResult"]

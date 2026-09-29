@@ -69,6 +69,7 @@ def summarize(rows: List) -> Optional[dict]:
     docs, acc, confident = [], [], []
     confusion: Dict[tuple, int] = defaultdict(int)
     split, ocr, where = defaultdict(int), defaultdict(int), defaultdict(float)
+    confused, words_confused = defaultdict(int), defaultdict(int)
     worst_pages, ious = [], []
     tables, cells, made_up, unscored = defaultdict(int), defaultdict(int), defaultdict(int), defaultdict(int)
     items, teds, crit = defaultdict(int), [], defaultdict(int)
@@ -79,8 +80,13 @@ def summarize(rows: List) -> Optional[dict]:
         if raw.get("confidence") is not None and r.status in ("pass", "fail"):
             confident.append((float(raw["confidence"]), r.status == "pass"))
         if kind == "ocr":
-            for k in ("chars", "char_errors", "words", "word_errors", "digits", "digit_errors"):
+            for k in ("chars", "char_errors", "words", "word_errors", "digits", "digit_errors", "letters",
+                      "letter_errors"):
                 ocr[k] += int(raw.get(k) or 0)
+            for a, b, n in raw.get("confusions") or ():
+                confused[(a, b)] += n
+            for a, b, n in raw.get("word_confusions") or ():
+                words_confused[(a, b)] += n
             ocr["pages"] += 1
             ocr["failed"] += r.status == "fail"
             if raw.get("order") is not None:
@@ -193,10 +199,9 @@ def summarize(rows: List) -> Optional[dict]:
                        "notes": table_notes[:3]} if tables["n"] else None,
             "line_items": dict(items) if items["n"] else None,
             "critical": dict(crit) if crit["values"] else None,
-            "ocr": _ocr(ocr, worst_pages), "locations": {"n": int(where["n"]), "right": int(where["right"]),
-                                                          "wrong_page": int(where["wrong_page"]),
-                                                          "mean_iou": sum(ious) / len(ious) if ious else None}
-            if where["n"] else None}
+            "ocr": _ocr(ocr, worst_pages, confused, words_confused),
+            "locations": {"n": int(where["n"]), "right": int(where["right"]), "wrong_page": int(where["wrong_page"]),
+                          "mean_iou": sum(ious) / len(ious) if ious else None} if where["n"] else None}
 
 
 def check_gates(now: Optional[dict], before: Optional[dict], gates: Optional[dict]) -> List[dict]:
@@ -260,12 +265,15 @@ def _gate_lines(now: dict, before: Optional[dict], cfg: Optional[dict]) -> List[
     return [head + (":" if bad else "")] + [f"  failed: {g['why']}" for g in bad]
 
 
-def _ocr(o: Dict[str, int], worst: list) -> Optional[dict]:
+def _ocr(o: Dict[str, int], worst: list, confused: Optional[dict] = None,
+         words_confused: Optional[dict] = None) -> Optional[dict]:
     if not o.get("pages"):
         return None
+    top = lambda d: [[a, b, n] for (a, b), n in sorted((d or {}).items(), key=lambda kv: (-kv[1], kv[0]))[:40]]
     return {"pages": o["pages"], "failed": o["failed"], "cer": _ratio(o["char_errors"], o["chars"]),
             "wer": _ratio(o["word_errors"], o["words"]), "digit_error_rate": _ratio(o["digit_errors"], o["digits"]),
-            "digit_errors": o["digit_errors"],
+            "letter_error_rate": _ratio(o.get("letter_errors", 0), o.get("letters", 0)),
+            "digit_errors": o["digit_errors"], "confusions": top(confused), "word_confusions": top(words_confused),
             "order": _ratio(o.get("order_num", 0), o.get("order_den", 0)),
             "order_free_cer": _ratio(o.get("free_errors", 0), o.get("free_chars", 0)) if o.get("order_den") else None,
             "worst": [[c, case, field, lines] for c, case, field, lines in sorted(worst, key=lambda x: -x[0])[:3] if c]}
@@ -416,7 +424,8 @@ def _ocr_lines(o: Optional[dict], b: Optional[dict]) -> List[str]:
                                                           and o[k] is not None and abs(b[k] - o[k]) >= 0.0005 else "")
     out = [f"OCR          {o['pages']} page{'s' * (o['pages'] != 1)} · " + " · ".join(
         rate(k, label) for k, label in (("cer", "characters wrong"), ("wer", "words wrong"),
-                                        ("digit_error_rate", "digits wrong")) if o[k] is not None)
+                                        ("digit_error_rate", "digits wrong"), ("letter_error_rate", "letters wrong"))
+        if o.get(k) is not None)
            + (f" · {o['failed']} over the limit" if o["failed"] else "")]
     if o.get("order") is not None and (o["order"] < 1 or (b and (b.get("order") or 1) < 1)):
         out.append(f"             reading order {_pct(o['order'])} of lines" + _paren_was(o["order"], (b or {}).get("order"))
@@ -424,6 +433,47 @@ def _ocr_lines(o: Optional[dict], b: Optional[dict]) -> List[str]:
                       if o.get("order_free_cer") is not None else ""))
     for c, case, field, lines in o["worst"][:2]:
         out.append(f"             {case} {field}: {_pct(c)}" + (f", e.g. {lines[0]}" if lines else ""))
+    out += confusion_lines(o.get("confusions"), (b or {}).get("confusions") if b else None, "read as")
+    out += confusion_lines(o.get("word_confusions"), (b or {}).get("word_confusions") if b else None, "words read as")
+    return out
+
+
+def confusion_diff(now: Optional[list], before: Optional[list], min_change: int = 2) -> Dict[str, list]:
+    """Confusions against the baseline's: new (not there before), more (up by min_change or more),
+    fewer, and gone. Each [on the page, read as, now, before]."""
+    a = {(x, y): n for x, y, n in now or ()}
+    b = {(x, y): n for x, y, n in before or ()}
+    out: Dict[str, list] = {"new": [], "more": [], "fewer": [], "gone": []}
+    for k in sorted(set(a) | set(b), key=lambda k: -abs(a.get(k, 0) - b.get(k, 0))):
+        n, m = a.get(k, 0), b.get(k, 0)
+        kind = "new" if not m else "gone" if not n else "more" if n - m >= min_change else \
+            "fewer" if m - n >= min_change else None
+        if kind:
+            out[kind].append([k[0], k[1], n, m])
+    return out
+
+
+def _show(a: str, b: str) -> str:
+    return f"{a!r} as {b!r}" if a and b else f"{a!r} lost" if a else f"{b!r} added"
+
+
+def confusion_lines(now: Optional[list], before: Optional[list], label: str) -> List[str]:
+    """The most common confusions, and, against a baseline, what changed: a confusion a new version
+    brought, or one it fixed."""
+    if not now and not before:
+        return []
+    out = []
+    if now:
+        out.append(f"             {label}: " + ", ".join(f"{_show(a, b)} {n}" for a, b, n in now[:5]))
+    if before is not None:
+        d = confusion_diff(now, before)
+        parts = [f"new {', '.join(f'{_show(a, b)} {n}' for a, b, n, _ in d['new'][:3])}" if d["new"] else "",
+                 f"more {', '.join(f'{_show(a, b)} {n} (was {m})' for a, b, n, m in d['more'][:3])}"
+                 if d["more"] else "",
+                 f"fixed {', '.join(f'{_show(a, b)} (was {m})' for a, b, _, m in d['gone'][:3])}" if d["gone"] else ""]
+        parts = [p for p in parts if p]
+        if parts:
+            out.append("               since the baseline: " + "; ".join(parts))
     return out
 
 
@@ -607,6 +657,10 @@ def markdown(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = Non
     o, bo = now.get("ocr"), (before or {}).get("ocr")
     if o and o["cer"] is not None:
         parts.append(f"OCR characters wrong {_pct(o['cer'])}{_was(o['cer'], (bo or {}).get('cer'))}")
+        if bo:
+            new = confusion_diff(o.get("confusions"), bo.get("confusions"))["new"]
+            if new:
+                parts.append("new OCR confusions: " + ", ".join(f"{_show(a, b)} {n}" for a, b, n, _ in new[:3]))
     if not now["checked"]:
         return " · ".join(parts)
     share = now["all_correct"] / now["checked"] if now["checked"] else None

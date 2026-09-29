@@ -69,6 +69,19 @@ class OcrDigitErrors(OcrCharacterErrors):
         return sum(r["raw"].get("digit_errors") or 0 for r in rows), sum(r["raw"].get("digits") or 0 for r in rows)
 
 
+class OcrLetterErrors(OcrCharacterErrors):
+    id = "ocr_letter_error_rate"
+    name = "OCR letters wrong"
+    question = "Of the letters on the pages, what share did OCR read wrong? Names and codes live here."
+
+    def rows(self, source, window):
+        rows = super().rows(source, window)
+        return None if rows is None else [r for r in rows if "letters" in r["raw"]]  # sent before letters were
+
+    def ratio(self, rows):
+        return sum(r["raw"].get("letter_errors") or 0 for r in rows), sum(r["raw"].get("letters") or 0 for r in rows)
+
+
 class OcrReadingOrder(OcrCharacterErrors):
     id = "ocr_reading_order"
     name = "OCR reading order"

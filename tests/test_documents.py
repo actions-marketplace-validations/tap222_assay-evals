@@ -467,7 +467,10 @@ def test_ocr_and_grounding_in_the_report(project):
     out = run(project, env={"MODE": "after"})
     assert out.returncode == 1
     assert "OCR          1 page · characters wrong 2.2% (was 0%) · words wrong 11.1% (was 0%) · digits wrong 8.3% " \
-           "(was 0%) · 1 over the limit" in out.stdout  # 1 of the page's 12 digits
+           "(was 0%) · letters wrong 0% · 1 over the limit" in out.stdout  # 1 of the page's 12 digits
+    assert "read as: '3' as '8' 1" in out.stdout and "since the baseline: new '3' as '8' 1" in out.stdout
+    assert "words read as: '1,234.56' as '1,284.56' 1" in out.stdout
+    assert "new OCR confusions: '3' as '8' 1" in (project / ".assay" / "summary.md").read_text()
     assert "'Total: 1,284.56 EUR' for 'Total: 1,234.56 EUR'" in out.stdout
     assert "Locations    1 field · right page and box 1/1 (100%) · mean overlap 1.00" in out.stdout
     assert "not in the document's text: total '1284.56'" in out.stdout  # no labels needed to catch it
@@ -577,7 +580,8 @@ def test_dashboard_measures_and_the_report(project):
     src, now = EventsSource(engine, "local"), datetime.utcnow()
     w = Window(now - timedelta(days=1), now + timedelta(days=1))
     got = {mid: REGISTRY[mid].compute(src, w) for mid in ("ocr_cer", "ocr_digit_error_rate", "ocr_reading_order",
-                                                           "location_accuracy", "table_cell_f1")}
+                                                           "location_accuracy", "table_cell_f1",
+                                                           "ocr_letter_error_rate")}
     assert all(m.status == "measured" for m in got.values())
     assert got["ocr_reading_order"].overall.value == 0.875  # 100% then 75%, the same page twice
     assert got["location_accuracy"].overall.value == 0.5 and got["table_cell_f1"].overall.n == 2
@@ -1207,3 +1211,30 @@ def test_confidence_on_the_dashboard(project):
     other = store.make_engine("sqlite://")
     store.metadata.create_all(other)
     assert REGISTRY["confidence_aurc"].compute(EventsSource(other, "t"), w).status == "unmeasured"
+
+
+
+# ---------- OCR: letters apart from digits, and what was read as what ----------
+
+def test_ocr_says_what_was_read_as_what():
+    from assay_sdk.documents import score_ocr
+    s = score_ocr(None, "Total due 1,250.00\nInvoice modern clinic\nWill pay",
+                  "Tota1 due 1,25O.OO\nInvoice modem c1inic\nWiII pay")
+    assert s.confusions == {("l", "1"): 2, ("0", "O"): 3, ("rn", "m"): 1, ("l", "I"): 2}
+    assert s.word_confusions[("modern", "modem")] == 1 and s.word_confusions[("Will", "WiII")] == 1
+    assert s.letters == 34 and s.letter_errors == 9 and s.letter_error_rate == pytest.approx(9 / 34)
+    lost = score_ocr(None, "invoice", "invoce")
+    assert lost.confusions == {("i", ""): 1}
+    assert score_ocr(None, "a\nb\nc", "c\nb\na").confusions == {}  # only moved: nothing misread
+
+
+def test_confusions_diff_against_the_baseline():
+    from assay.documents import confusion_diff, confusion_lines
+    now = [["l", "1", 9], ["0", "O", 5], ["rn", "m", 2]]
+    before = [["0", "O", 5], ["rn", "m", 6], ["S", "5", 3]]
+    d = confusion_diff(now, before)
+    assert d["new"] == [["l", "1", 9, 0]] and d["fewer"] == [["rn", "m", 2, 6]] and d["gone"] == [["S", "5", 0, 3]]
+    assert d["more"] == []
+    lines = confusion_lines(now, before, "read as")
+    assert lines[0].strip() == "read as: 'l' as '1' 9, '0' as 'O' 5, 'rn' as 'm' 2"
+    assert lines[1].strip() == "since the baseline: new 'l' as '1' 9; fixed 'S' as '5' (was 3)"

@@ -1046,6 +1046,40 @@ def _changed_lines(ref: str, hyp: str) -> List[Tuple[str, str]]:
     return out
 
 
+def _confusions(lines: List[Tuple[str, str]], max_len: int = 2000) -> Tuple[Dict[Tuple[str, str], int],
+                                                                          Dict[Tuple[str, str], int]]:
+    """What was read as what, from the lines that differ: characters ("l" read as "i", "rn" as "m",
+    one lost: "l" as ""), and words ("Total" as "Tota1"). Aligned with difflib, stretch by
+    stretch; a line longer than max_len is skipped, not guessed at."""
+    import difflib
+    chars: Dict[Tuple[str, str], int] = defaultdict(int)
+    words: Dict[Tuple[str, str], int] = defaultdict(int)
+    for x, y in lines:
+        for a, b in zip(x.split("\n"), y.split("\n")) if x.count("\n") == y.count("\n") else [(x, y)]:
+            if len(a) > max_len or len(b) > max_len:
+                continue
+            for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+                if op == "equal":
+                    continue
+                e, r = a[i1:i2], b[j1:j2]
+                if op == "replace" and len(e) == len(r):
+                    for p, q in zip(e, r):
+                        if p != q:
+                            chars[(p, q)] += 1
+                elif len(e) <= 3 and len(r) <= 3:  # "rn" as "m", "l" lost: a confusion, not a rewrite
+                    chars[(e.strip(), r.strip())] += 1 if e.strip() or r.strip() else 0
+            aw, bw = a.split(), b.split()
+            for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, aw, bw, autojunk=False).get_opcodes():
+                if op == "replace" and i2 - i1 == j2 - j1:
+                    for p, q in zip(aw[i1:i2], bw[j1:j2]):
+                        words[(p, q)] += 1
+    return {k: v for k, v in chars.items() if v and k != ("", "")}, dict(words)
+
+
+def _top(counts: Dict[Tuple[str, str], int], n: int) -> List[list]:
+    return [[a, b, c] for (a, b), c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:n]]
+
+
 def _bounded(a: Sequence, b: Sequence) -> int:
     """Levenshtein, or when both are huge (a page read as something else entirely), the longer length."""
     return _edits(a, b) if len(a) * len(b) <= 4_000_000 else max(len(a), len(b))
@@ -1110,6 +1144,14 @@ class OcrScore:
     lines: List[Tuple[str, str]]  # (what the page says, what was read), where they differ
     order: Optional[float] = None  # the share of lines read in the page's order
     order_free_errors: int = 0  # character edits with the lines put back in the page's order
+    letters: int = 0
+    letter_errors: int = 0
+    confusions: Dict[Tuple[str, str], int] = dc_field(default_factory=dict)  # (on the page, read as): times
+    word_confusions: Dict[Tuple[str, str], int] = dc_field(default_factory=dict)
+
+    @property
+    def letter_error_rate(self) -> Optional[float]:
+        return self.letter_errors / self.letters if self.letters else None
 
     @property
     def order_free_cer(self) -> float:
@@ -1132,7 +1174,9 @@ def score_ocr(run, expected: str, read: str, page: Optional[int] = None, max_cer
               max_digit_errors: Optional[int] = None, case: bool = True, min_order: Optional[float] = None) -> OcrScore:
     """Score OCR text against what the page says, recorded as the check `ocr` (`ocr page 3` with
     `page`): the character error rate (edits over the page's characters), the word error rate, and
-    the digits on their own, since a wrong digit is a wrong amount. Spacing doesn't count; case
+    the digits on their own, since a wrong digit is a wrong amount, and the letters on their own. What
+    was read as what is kept too: characters ("l" as "i", "rn" as "m") and words, so the report can
+    say which confusions a new version brought or fixed. Spacing doesn't count; case
     does unless case=False. It fails over `max_cer`, or with more than `max_digit_errors` wrong
     digits when that's given.
 
@@ -1146,12 +1190,15 @@ def score_ocr(run, expected: str, read: str, page: Optional[int] = None, max_cer
         ref, hyp = ref.lower(), hyp.lower()
     lines = _changed_lines(ref, hyp)
     digits = lambda t: re.sub(r"\D", "", t)
+    letters = lambda t: re.sub(r"[\W\d_]", "", t)
     char_errors = sum(_bounded(x.replace("\n", ""), y.replace("\n", "")) for x, y in lines)
+    letter_errors = sum(_bounded(letters(x), letters(y)) for x, y in lines)
     word_errors = sum(_bounded(x.split(), y.split()) for x, y in lines)
     digit_errors = sum(_bounded(digits(x), digits(y)) for x, y in lines)
     order, free_errors = _reading_order(ref.split("\n"), hyp.split("\n")) if lines else (1.0 if ref else None, 0)
+    conf, word_conf = _confusions(lines) if free_errors else ({}, {})  # only moved: nothing misread
     score = OcrScore(len(ref.replace("\n", "")), char_errors, len(ref.split()), word_errors, len(digits(ref)),
-                     digit_errors, lines, order, free_errors)
+                     digit_errors, lines, order, free_errors, len(letters(ref)), letter_errors, conf, word_conf)
     if run is not None:
         out_of_order = min_order is not None and order is not None and order < min_order
         bad = score.cer > max_cer or (max_digit_errors is not None and digit_errors > max_digit_errors) or out_of_order
@@ -1169,7 +1216,9 @@ def score_ocr(run, expected: str, read: str, page: Optional[int] = None, max_cer
                   raw_output=json.dumps({"kind": "ocr", "chars": score.chars, "char_errors": char_errors,
                                          "words": score.words, "word_errors": word_errors, "digits": score.digits,
                                          "digit_errors": digit_errors, "worst": worst, "order": order,
-                                         "order_free_errors": free_errors}))
+                                         "order_free_errors": free_errors, "letters": score.letters,
+                                         "letter_errors": letter_errors, "confusions": _top(conf, 30),
+                                         "word_confusions": _top(word_conf, 15)}))
     return score
 
 
