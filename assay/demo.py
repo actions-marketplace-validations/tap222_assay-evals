@@ -165,7 +165,7 @@ def _step_outputs(rng, truth, itype, pages, age, completed):
 
 
 EXAMPLE_RATES = {"review_per_hour": 36.0, "rework_per_hour": 36.0,
-                 "platform_per_document": 0.004, "platform_per_page": 0.0008}
+                 "platform_per_document": 0.004, "platform_per_page": 0.0008, "seconds_per_drag": 15.0}
 
 EXAMPLE_SLOS = [
     ("fallback_attribution", None, None, 0.95, "Example target: every call says which tier answered"),

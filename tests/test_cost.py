@@ -146,6 +146,13 @@ def test_rates_reviews_and_breakdown_end_to_end(client):
     rows = {x["value"]: x for x in bd["rows"]}
     assert rows["contract"]["total_per_document"] == pytest.approx(0.1 + 30 / 5)
     assert rows["invoice"]["total_per_document"] == pytest.approx(0.1)
+    # the time a page dragged takes prices split rework (split_rework_cost), not the ledger: no double count
+    r = client.put("/v1/cost/rates", json={"source": "events:t", "rates": {"seconds_per_drag": 15}}).json()
+    assert r["rates"] == {"review_per_hour": 30, "seconds_per_drag": 15} and "seconds_per_drag" in r["keys"]
+    again = client.get("/v1/cost/breakdown", params={"source": "events:t", "by": "document_type", "days": 1}).json()
+    assert {x["value"]: x["total_per_document"] for x in again["rows"]} == \
+        {x["value"]: x["total_per_document"] for x in bd["rows"]}
+    client.put("/v1/cost/rates", json={"source": "events:t", "rates": {"seconds_per_drag": None}})
 
     run = client.post("/v1/runs", json={"source": "events:t", "days": 1}).json()
     assert run["measures"]["cost_per_document"]["overall"]["value"] == pytest.approx((1.0 + 30) / 10)

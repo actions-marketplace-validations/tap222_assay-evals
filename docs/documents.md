@@ -239,7 +239,7 @@ Each file is scored the ways the page stream segmentation literature does:
 | Where a document starts | precision and recall over the pages a new document starts on |
 | Documents right | precision and recall over documents, right only when their exact pages match |
 | Panoptic quality (`pq`) | documents matched when they share over half their pages, each match weighted by how much (IoU), over the matches plus half the documents unmatched on either side. A comparison of six metrics on the WooIR dataset found it the most fitting for this task. `sq` is the matches' mean IoU, `rq` the F1 of matching |
-| Pages to move by hand (`drags`) | the fewest pages a reviewer must drag to put the split right (minimum drags and drops): each correct document is kept as the predicted one it shares most pages with, one to one, and every other page moves once |
+| Pages to move by hand (`drags`) | the fewest pages a reviewer must drag to put the split right: MNDD, minimum number of drags and drops (Mungmeeprued et al., DocEng 2022). Each correct document is kept as the predicted one it shares most pages with, one to one, and every other page moves once, to a new document too. The same count as the paper's reference code (TABME, `num_of_swaps`), which tries every pairing; here the best one is found directly (the Hungarian method), so large files are fast |
 
 Boundaries a page off and merges score very differently on these: pages 1-10 cut in half has
 half its boundaries wrong, no document right, a panoptic quality of 0 (half the pages isn't over
@@ -262,7 +262,10 @@ Splitting    2 files · split right 0/2 (0%, was 100%)
 On the dashboard: **Document splitting straight-through** (`split_stp`), the share of files
 holding several documents that split right; **Splitting panoptic quality** (`split_pq`); and
 **Pages moved by hand** (`split_drag_rate`), the share of pages a reviewer would drag, by segment
-and document type.
+and document type; and under Cost, **Split rework cost per file** (`split_rework_cost`): the pages
+to drag x `seconds_per_drag` x `rework_per_hour` (else `review_per_hour`), all on the rate card.
+It's an estimate from scored files, kept apart from `cost_per_document`, where recorded rework
+minutes already count.
 
 ## Confidence: when is a value safe to approve without review?
 

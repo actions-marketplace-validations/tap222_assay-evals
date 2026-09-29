@@ -180,3 +180,31 @@ class SplitDragRate(_SplitChecks):
 
     def ratio(self, rows):
         return sum(r["raw"].get("drags") or 0 for r in rows), sum(r["raw"].get("pages") or 0 for r in rows)
+
+
+class SplitReworkCost(_SplitChecks):
+    """What wrong splits cost in reviewer time, per file split: the pages to drag (minimum drags
+    and drops) x seconds_per_drag x the rework rate (the review rate when there's none), from the
+    rate card. An estimate from scored files, apart from cost_per_document: recorded rework minutes
+    already count there, and would be counted twice."""
+    id = "split_rework_cost"
+    tag = "Cost"
+    name = "Split rework cost per file"
+    question = "What does fixing wrong splits cost a reviewer, per file (USD)?"
+    higher_is_better = False
+
+    def compute(self, source, window: Window) -> MeasureOutput:
+        rates = getattr(source, "cost_rates", None) or {}
+        sec = rates.get("seconds_per_drag")
+        per_hour = rates.get("rework_per_hour", rates.get("review_per_hour"))
+        rows = self.rows(source, window)
+        if rows is None:
+            return unmeasured(self.id, f"Nothing sent yet: {self.sent_by}.")
+        need = (["seconds_per_drag"] if not sec else []) + \
+            (["rework_per_hour (or review_per_hour)"] if per_hour is None else [])
+        if need:
+            return unmeasured(self.id, f"Set {' and '.join(need)} on the rate card to price the pages moved by hand.")
+        usd = sec / 3600 * per_hour
+        for r in rows:
+            r["raw"]["usd"] = (r["raw"].get("drags") or 0) * usd
+        return _slices(self.id, rows, self.dimensions, lambda g: (sum(r["raw"]["usd"] for r in g), len(g)))

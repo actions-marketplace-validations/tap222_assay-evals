@@ -41,6 +41,7 @@ RATE_KEYS = {
     "rework_per_hour": "Rework cost per hour (USD); defaults to the review rate",
     "platform_per_document": "Platform cost per document (USD)",
     "platform_per_page": "Platform cost per page (USD)",
+    "seconds_per_drag": "Seconds a reviewer takes to move one page when a file is split wrong",
 }
 
 PRIMARY_LAYERS = {"primary", "tier_0", "tier0", "0", "default"}

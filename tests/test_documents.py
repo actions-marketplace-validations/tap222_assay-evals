@@ -1087,3 +1087,55 @@ def test_every_measure_is_in_a_dashboard_group():
     from assay.measures import GROUPS, REGISTRY
     grouped = [m for ids in GROUPS.values() for m in ids]
     assert sorted(grouped) == sorted(REGISTRY) and len(grouped) == len(set(grouped))
+
+
+def _tabme_mndd(pred, gold):
+    """MNDD as TABME's reference code computes it (github.com/aldolipani/TABME, utils/evaluation.py,
+    num_of_swaps): exact documents set aside, then every pairing tried."""
+    import itertools
+    p = [d for d in pred if d not in gold]
+    g = [d for d in gold if d not in pred]
+    if len(g) < len(p):
+        p, g = g, p
+    return min((sum(len(a) - len(set(a) & set(b)) for a, b in zip(p, perm))
+                for perm in itertools.permutations(g)), default=0)
+
+
+def test_drags_are_the_minimum_number_of_drags_and_drops_of_the_paper():
+    import random
+    from assay_sdk.documents import _drags
+    rng = random.Random(7)
+
+    def split(n):
+        cuts = sorted(rng.sample(range(2, n + 1), rng.randint(0, min(5, n - 1))))
+        starts = [1] + cuts
+        return [(s, starts[i + 1] - 1 if i + 1 < len(starts) else n) for i, s in enumerate(starts)]
+    pages = lambda segs: [list(range(a, b + 1)) for a, b in segs]
+    for _ in range(300):
+        n = rng.randint(1, 12)
+        gold, pred = split(n), split(n)
+        assert _drags(gold, pred)[0] == _tabme_mndd(pages(pred), pages(gold)), (gold, pred)
+    # the paper's first two examples: page 6 to a new document is 1; pages 4 and 5 out are 2
+    assert _drags([(1, 3), (4, 5), (6, 6)], [(1, 3), (4, 6)])[0] == 1
+    assert _drags([(1, 3), (4, 5)], [(1, 5)])[0] == 2
+
+
+def test_split_rework_cost_on_the_dashboard(project):
+    from assay import coverage, store
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    (project / "tests").mkdir()
+    (project / "tests" / "test_split.py").write_text(SPLITS)
+    run(project, env={"MODE": "after"})  # 4 pages to drag over 2 files
+    engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
+    src, now = EventsSource(engine, "local"), datetime.utcnow()
+    w = Window(now - timedelta(days=1), now + timedelta(days=1))
+    m = REGISTRY["split_rework_cost"].compute(src, w)
+    assert m.status == "unmeasured" and "seconds_per_drag and rework_per_hour (or review_per_hour)" in m.reason
+    src.cost_rates = {"seconds_per_drag": 30, "review_per_hour": 60}  # no rework rate: the review rate
+    m = REGISTRY["split_rework_cost"].compute(src, w)
+    assert m.status == "measured" and m.overall.value == pytest.approx(4 * 30 / 3600 * 60 / 2)  # $1 a file
+    src.cost_rates = {"seconds_per_drag": 30, "review_per_hour": 60, "rework_per_hour": 30}
+    assert REGISTRY["split_rework_cost"].compute(src, w).overall.numerator == pytest.approx(1.0)
+    assert {x["id"]: x["status"] for x in coverage.compute(src, w)["measures"]}["split_rework_cost"] == "live"

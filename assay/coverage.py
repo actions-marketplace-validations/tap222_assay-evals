@@ -72,6 +72,8 @@ SCORED = {"field_accuracy": ("field_scores", (), "fields scored against their co
           "critical_field_accuracy": ("critical_scores", (), _CRITICAL),
           "split_stp": ("split_scores", (), "files scored against their correct boundaries (score_split)"),
           "split_pq": ("document_checks", ("split",), "files scored against their correct boundaries (score_split)"),
+          "split_rework_cost": ("document_checks", ("split",),
+                                "files scored against their correct boundaries (score_split)"),
           "split_drag_rate": ("document_checks", ("split",),
                               "files scored against their correct boundaries (score_split)"),
           "escape_rate": ("document_checks", ("spot_check", "assay.spotcheck@1"),

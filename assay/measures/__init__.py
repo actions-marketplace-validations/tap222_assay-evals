@@ -1,8 +1,8 @@
 from assay.measures.base import Measure, MeasureOutput, SliceResult
 from assay.measures.cost import CostPerDocument, CostPerPage, HumanTouchRate, TotalSpend
 from assay.measures.documents import (FieldCellF1, LocationAccuracy, OcrCharacterErrors, OcrDigitErrors,
-                                      OcrReadingOrder, SplitDragRate, SplitPanopticQuality, TableCellAccuracy,
-                                      TableTeds)
+                                      OcrReadingOrder, SplitDragRate, SplitPanopticQuality, SplitReworkCost,
+                                      TableCellAccuracy, TableTeds)
 from assay.measures.errors import ErrorsByOrigin, PromptErrorRate, ReportedErrorRate
 from assay.measures.ground_truth import (CriticalDocumentAccuracy, CriticalFieldAccuracy, DocumentAccuracy,
                                          EscapeRate, FabricatedValues, FieldAccuracy, FormatErrors, InferredValues,
@@ -17,7 +17,7 @@ REGISTRY = {m.id: m for m in [
     DocumentVolume(), StageFailureRate(), CallErrorRate(), CallLatencyP95(), TimeToComplete(),
     InputMixDrift(),
     # cost
-    CostPerDocument(), CostPerPage(), TotalSpend(), HumanTouchRate(),
+    CostPerDocument(), CostPerPage(), TotalSpend(), HumanTouchRate(), SplitReworkCost(),
     # pipeline integrity
     FallbackAttribution(), ModelMismatch(), CostCoverage(), RevisionCoverage(),
     NoOpStages(), SourcePositions(), HandoffLoss(),
@@ -34,7 +34,8 @@ REGISTRY = {m.id: m for m in [
 GROUPS = {
     "Operational health": ["document_volume", "stage_failure_rate", "call_error_rate",
                            "call_latency_p95", "time_to_complete_p90", "input_mix_drift"],
-    "Cost": ["cost_per_document", "cost_per_page", "total_spend", "human_touch_rate", "cost_coverage"],
+    "Cost": ["cost_per_document", "cost_per_page", "total_spend", "human_touch_rate", "split_rework_cost",
+             "cost_coverage"],
     "Pipeline integrity": ["fallback_attribution", "model_mismatch", "revision_coverage",
                            "noop_stage_rate", "source_positions", "handoff_loss"],
     "Errors": ["reported_error_rate", "errors_by_origin", "prompt_error_rate"],

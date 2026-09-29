@@ -28,7 +28,7 @@ Every alert has an **Investigate** link to its slice. `#measures/<id>` and
 | Group | Measures |
 |---|---|
 | **Operational health** | `document_volume`, `stage_failure_rate`, `call_error_rate`, `call_latency_p95`, `time_to_complete_p90`, `input_mix_drift` |
-| **Cost** | `cost_per_document`, `cost_per_page`, `total_spend`, `human_touch_rate`, `cost_coverage` (see Cost below) |
+| **Cost** | `cost_per_document`, `cost_per_page`, `total_spend`, `human_touch_rate`, `split_rework_cost` (what wrong splits cost reviewers per file, from the pages to drag), `cost_coverage` (see Cost below) |
 | **Pipeline integrity** | `fallback_attribution` (does each call record which model tier answered, and why), `model_mismatch` (served ≠ declared), `revision_coverage`, `noop_stage_rate` (stages that report success without doing work), `source_positions` (values a reviewer can click through to), `handoff_loss` (finished documents missing downstream) |
 | **Errors** | `reported_error_rate`, `errors_by_origin`, `prompt_error_rate` (see Error analysis and Prompt versions) |
 | **Document quality** | `ocr_cer`, `ocr_digit_error_rate`, `ocr_reading_order`, `location_accuracy`, `table_cell_f1`, `table_teds`: from OCR, locations and tables scored with `assay_sdk.documents` ([Document extraction](documents.md)) |
@@ -60,8 +60,9 @@ a document costs. Assay prices every component it can see and says which ones it
 | Platform | per-document + per-page rates × `page_count` |
 
 The **rate card** holds prices the pipeline can't record itself: reviewer and rework cost per
-hour, and platform cost per document and per page. It is set per source, in the Cost tab or with
-`PUT /v1/cost/rates`. Nothing is guessed silently:
+hour, platform cost per document and per page, and the seconds a reviewer takes to drag one
+page when a file is split wrong (`seconds_per_drag`, for `split_rework_cost`). It is set per
+source, in the Cost tab or with `PUT /v1/cost/rates`. Nothing is guessed silently:
 - Unpriced calls with nothing to estimate from make AI cost a stated floor.
 - No review records means people cost is shown as *missing*, not zero.
 - Review minutes without a rate are counted and reported.
