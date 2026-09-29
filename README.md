@@ -46,7 +46,8 @@ REGRESSIONS
   value in the wrong shape); line items paired for the most cells right, and complete only with
   none missing, made up or duplicated; groups (a party's name, address and role) scored as one
   unit; robustness slices (digital or scanned, stamps, handwriting, language, currency, unseen
-  supplier templates) against the baseline, and gated; rules such as line items adding up to the
+  supplier templates) against the baseline, and gated; whether the same document gives the same
+  values every time (not only the same pass or fail); rules such as line items adding up to the
   total; document types as a confusion matrix; files split into documents, with panoptic quality
   and the pages a reviewer would drag to fix them, priced on the dashboard; whether the
   extractor's confidence is safe to auto-approve on, with risk-coverage curves (what each

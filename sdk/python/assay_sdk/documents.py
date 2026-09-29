@@ -71,7 +71,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 __all__ = ["Text", "Number", "Money", "Date", "LineItems", "score_document", "infer_schema", "check_rules", "total_of",
            "before", "required", "rule", "DocumentScore", "FieldScore", "EVALUATOR", "classify_document",
            "score_split", "SplitScore", "score_ocr", "OcrScore", "score_locations", "appears_in", "score_table",
-           "TableScore", "teds", "Group", "FACETS", "anls", "correct_ocr", "rank_ocr", "OcrRanking",
+           "TableScore", "teds", "Group", "FACETS", "canonical", "anls", "correct_ocr", "rank_ocr", "OcrRanking",
            "OcrCorrectionError", "FORMAT", "INFERRED", "FABRICATED", "spot_check", "SPOT_CHECKS",
            "superseded_values", "SUPERSEDED"]
 
@@ -326,6 +326,7 @@ class FieldScore:
     counts: Dict[str, float] = dc_field(default_factory=dict)  # tp, fp, fn (and rows and cells, for line items)
     share: float = 1.0  # how much of it is right: 0 or 1, or the row F1 for line items
     part_of: Optional[str] = None  # a line-item column: the table it's part of, already counted there
+    value: Optional[str] = None  # the extracted value as its type reads it (canonical): repeats compare on it
     made_up: Optional[str] = None  # a wrong or invented value: format | inferred | fabricated (None: not told)
     grounded: bool = False  # scored with the document's text, so inferred and fabricated could be told apart
     grouped: bool = False  # a part of a Group, counted in it for accuracy, and as a value of its own
@@ -730,6 +731,26 @@ def _facets(facets: Optional[Dict[str, Any]]) -> Dict[str, str]:
     return out
 
 
+def canonical(spec: _Field, v: Any) -> str:
+    """A value as its type reads it, so repeats compare on meaning: "1,250.00" and 1250 are one
+    value, "4 March 2026" and "2026-03-04" one date. Line items as their rows, whatever the order;
+    long values as a digest."""
+    import hashlib
+    if empty(v):
+        return ""
+    if isinstance(spec, LineItems):
+        rows = sorted(json.dumps([canonical(spec.fields[c], _get(r, c)) for c in spec.fields]) for r in v or [])
+        out = json.dumps(rows)
+    elif isinstance(spec, Group):
+        out = json.dumps({c: canonical(sub, _get(v, c)) for c, sub in spec.fields.items()}, sort_keys=True)
+    else:
+        try:
+            out = spec.show(spec.read(v))
+        except (Unreadable, ValueError, TypeError):
+            out = Text().read(v)
+    return out if len(out) <= 200 else "sha1:" + hashlib.sha1(out.encode()).hexdigest()[:16]
+
+
 def _record(run, name: str, f: FieldScore, confidence: Optional[float] = None,
             facets: Optional[Dict[str, str]] = None) -> None:
     raw = json.dumps({"kind": f.kind, "weight": f.weight, "share": round(f.share, 6), **f.counts,
@@ -737,7 +758,8 @@ def _record(run, name: str, f: FieldScore, confidence: Optional[float] = None,
                       **({"made_up": f.made_up} if f.made_up else {}), **({"grounded": True} if f.grounded else {}),
                       **({"grouped": True} if f.grouped else {}), **({"critical": True} if f.critical else {}),
                       **({"confidence": float(confidence)} if confidence is not None else {}),
-                      **({"facets": facets} if facets else {})})
+                      **({"facets": facets} if facets else {}),
+                      **({"value": f.value} if f.value is not None else {})})
     if f.kind == "unreadable":
         run.check(name, "error", expected=f.expected, actual=f.actual, evaluator=EVALUATOR, reason=f.note,
                   error_kind="invalid", raw_output=raw)
@@ -791,14 +813,17 @@ def score_document(run, expected: Any, extracted: Any, schema: Optional[Dict[str
         e, a = _get(expected, name), _get(extracted, name)
         if isinstance(spec, LineItems):
             whole, cols = _score_rows(name, spec, e, a)
+            whole.value = canonical(spec, a)
             fields[name] = whole
             fields.update(cols)
         elif isinstance(spec, Group):
             whole, parts = _score_group(name, spec, e, a, text)
+            whole.value = canonical(spec, a)
             fields[name] = whole
             fields.update(parts)
         else:
             f = _score_value(name, spec, e, a)
+            f.value = canonical(spec, a)
             f.made_up, f.grounded = _made_up(spec, f, text), text is not None
             if f.made_up:
                 f.note = f"{f.note}; {f.made_up}: {_MADE_UP[f.made_up]}"

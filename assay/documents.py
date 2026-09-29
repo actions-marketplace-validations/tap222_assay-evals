@@ -45,6 +45,10 @@ def _whole(now: dict) -> Dict[str, dict]:
     if now.get("checked"):
         out["document"] = {"accuracy": now["all_correct"] / now["checked"], "n": now["checked"],
                            "errors": now["checked"] - now["all_correct"]}
+    st = now.get("stability")
+    if st:
+        out["stability"] = {"accuracy": st["same"] / st["fields"], "n": st["fields"],
+                            "errors": st["fields"] - st["same"]}
     for name, sl in (now.get("slices") or {}).items():
         out[f"document[{name}]"] = {"accuracy": sl["zero_errors"], "n": sl["n"],
                                     "errors": sl["n"] - round(sl["zero_errors"] * sl["n"])}
@@ -75,6 +79,7 @@ def summarize(rows: List) -> Optional[dict]:
     confused, words_confused = defaultdict(int), defaultdict(int)
     rankings: Dict[str, dict] = {}
     facet_docs: Dict[tuple, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    repeats: Dict[tuple, List[tuple]] = defaultdict(list)  # (case, field) -> [(value, passed)] over attempts
     worst_pages, ious = [], []
     tables, cells, made_up, unscored = defaultdict(int), defaultdict(int), defaultdict(int), defaultdict(int)
     items, teds, crit = defaultdict(int), [], defaultdict(int)
@@ -172,6 +177,8 @@ def summarize(rows: List) -> Optional[dict]:
                 f[k] += float(raw.get(k) or 0)
             f[kind or "unknown"] += 1
             f["n"] += 1
+            if "value" in raw and not raw.get("part_of"):
+                repeats[(r.case_id, r.field)].append((raw["value"], r.status == "pass"))
             f["table"] = f["table"] or "rows" in raw
             if raw.get("critical"):
                 f["critical"] = 1
@@ -208,6 +215,7 @@ def summarize(rows: List) -> Optional[dict]:
             if cells["tp"] + cells["fp"] + cells["fn"] else None,
             "unscored": dict(sorted(unscored.items(), key=lambda kv: (-kv[1], kv[0]))),
             "ocr_rankings": rankings or None,
+            "stability": _stability(repeats),
             "slices": {f"{k}={v}": {"n": int(d["n"]), "zero_errors": d["zero"] / d["n"],
                                     "accuracy": d["acc"] / d["acc_n"] if d["acc_n"] else None,
                                     "cell_f1": _ratio(2 * d["tp"], 2 * d["tp"] + d["fp"] + d["fn"])}
@@ -240,7 +248,8 @@ def check_gates(now: Optional[dict], before: Optional[dict], gates: Optional[dic
     baseline's). `document` gates the documents with every field right, `critical` the critical
     values (score_document critical=): critical = { min_accuracy = 0.999 }, and
     `document[facet=value]` one slice of documents (score_document facets=):
-    "document[template_seen=unseen]" = { min_accuracy = 0.9 }. Every line-items
+    "document[template_seen=unseen]" = { min_accuracy = 0.9 }. `stability` gates the fields with the
+    same value on every attempt (assay test --repeat): stability = { min_accuracy = 0.99 }. Every line-items
     table is gated at max_drop = TABLE_DROP unless configured (`line_items = {}` turns it off).
     A configured field this run didn't score fails: a gate can't pass on nothing.
     [{"field", "rule", "value", "limit", "was", "passed", "why", "default"}]."""
@@ -289,6 +298,26 @@ def _gate_lines(now: dict, before: Optional[dict], cfg: Optional[dict]) -> List[
     bad = [g for g in gates if g["passed"] is False]
     head = f"Gates        {len(gates) - len(bad)} of {len(gates)} held"
     return [head + (":" if bad else "")] + [f"  failed: {g['why']}" for g in bad]
+
+
+def _stability(repeats: Dict[tuple, List[tuple]]) -> Optional[dict]:
+    """The same document extracted several times (assay test --repeat): fields with the same value
+    every attempt, compared on what the value means (canonical). A field wrong every time, but
+    differently each time, never flips pass to fail, so flakiness can't see it; it's named here."""
+    many = {k: v for k, v in repeats.items() if len(v) > 1}
+    if not many:
+        return None
+    same = {k for k, v in many.items() if len({x for x, _ in v}) == 1}
+    cases = defaultdict(list)
+    for (case, _), v in many.items():
+        cases[case].append(len({x for x, _ in v}) == 1)
+    moving = [[case, field, sorted({x for x, _ in v})] for (case, field), v in sorted(many.items())
+              if (case, field) not in same and not any(ok for _, ok in v)]
+    return {"attempts": max(len(v) for v in many.values()), "fields": len(many), "same": len(same),
+            "documents": len(cases), "documents_same": sum(all(v) for v in cases.values()),
+            "wrong_and_moving": moving[:20], "wrong_and_moving_n": len(moving),
+            "flipping": sum(1 for (k, v) in many.items() if k not in same and any(ok for _, ok in v)
+                            and not all(ok for _, ok in v))}
 
 
 def _ocr(o: Dict[str, int], worst: list, confused: Optional[dict] = None,
@@ -418,6 +447,7 @@ def lines(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = None) 
     out = _field_lines(now, before, cfg) if now["checked"] or now["fields"] else []
     out += _gate_lines(now, before, cfg)
     out += _slice_lines(now.get("slices"), (before or {}).get("slices"))
+    out += _stability_lines(now.get("stability"), (before or {}).get("stability"))
     broken = {k: v for k, v in now["rules"].items() if v["held"] < v["checked"]}
     for k, v in broken.items():
         out.append(f"Rule         {k}: held on {v['held']} of {v['checked']}")
@@ -463,6 +493,20 @@ def _ocr_lines(o: Optional[dict], b: Optional[dict]) -> List[str]:
         out.append(f"             {case} {field}: {_pct(c)}" + (f", e.g. {lines[0]}" if lines else ""))
     out += confusion_lines(o.get("confusions"), (b or {}).get("confusions") if b else None, "read as")
     out += confusion_lines(o.get("word_confusions"), (b or {}).get("word_confusions") if b else None, "words read as")
+    return out
+
+
+def _stability_lines(s: Optional[dict], b: Optional[dict]) -> List[str]:
+    if not s:
+        return []
+    share, was = s["same"] / s["fields"], (b["same"] / b["fields"]) if b and b.get("fields") else None
+    out = [f"Stability    {s['attempts']} attempts · fields with the same value every time {_pct(share)} "
+           f"({s['same']}/{s['fields']}){_was(share, was)} · documents fully repeatable "
+           f"{s['documents_same']}/{s['documents']}"]
+    if s["wrong_and_moving_n"]:
+        case, field, values = s["wrong_and_moving"][0]
+        out.append(f"             {s['wrong_and_moving_n']} wrong every time and never the same way, which pass/fail "
+                   f"can't see as flaky: e.g. {field} in {case}: {', '.join(repr(v) for v in values[:4])}")
     return out
 
 
@@ -761,6 +805,9 @@ def markdown(now: dict, before: Optional[dict] = None, cfg: Optional[dict] = Non
     was = (before or {}).get("slices") or {}
     drops = {k: was[k]["zero_errors"] - v["zero_errors"] for k, v in (now.get("slices") or {}).items() if k in was}
     worse = sorted((k for k, d in drops.items() if d >= SLICE_DROP), key=lambda k: (-drops[k], k))  # worst first
+    st = now.get("stability")
+    if st and st["same"] < st["fields"]:
+        s += f" · same value every attempt {_pct(st['same'] / st['fields'])}"
     if worse:
         s += " · slices worse: " + ", ".join(worse[:3])
     bad = [g for g in check_gates(now, before, (cfg or {}).get("gates")) if g["passed"] is False]

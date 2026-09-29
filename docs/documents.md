@@ -195,6 +195,23 @@ sliced by every facet that was sent, and no others (a facet nobody sends isn't a
 slice). From `template`, Assay adds **`template_new`**: yes for a template's first 30 days, from
 its first document, so a supplier's new layout arriving in production is a slice of its own.
 
+## Stability: the same document, extracted again
+
+`assay test --repeat 3` runs every case three times. Pass/fail noise is handled as for any
+check (a check that flips is flaky, one whose pass rate fell beyond chance is a regression). But
+a field can be unstable without ever flipping: wrong every time, and wrong a different way each
+time. So each field's value is compared across attempts, on what it means (`canonical`: "1,250.00"
+and 1250 are one value, "4 March 2026" and "2026-03-04" one date, line items whatever their
+order):
+
+```
+Stability    4 attempts · fields with the same value every time 90.0% (9/10) · documents fully repeatable 4/5
+             1 wrong every time and never the same way, which pass/fail can't see as flaky: e.g. total in tests/test_rep.py::test_3: '100.00', '101.00', '102.00', '103.00'
+```
+
+Gate it like any field, `stability = { min_accuracy = 0.99 }`, and on the dashboard it's
+**Same value every attempt** (`value_stability`), by segment, document type, field and facet.
+
 ## Critical fields and straight-through processing
 
 Not every field stops a document. Name the ones that do:
@@ -638,6 +655,7 @@ segment, with the usual expected range and alerts ([Measures](measures.md)):
 | Measure | From |
 |---|---|
 | Documents with zero errors (`document_accuracy`) | `score_document` |
+| Same value every attempt (`value_stability`), also by field | `score_document`, under `assay test --repeat` |
 | Documents right on critical fields (`critical_document_accuracy`), critical field accuracy (`critical_field_accuracy`, also by field) | `score_document`, with `critical=` |
 | Severity-weighted field accuracy (`field_accuracy`), also by field | `score_document` |
 | Field cells right (`field_cell_f1`): F1 over header and line-item cells | `score_document` |

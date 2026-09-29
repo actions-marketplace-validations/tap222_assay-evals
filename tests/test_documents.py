@@ -1,5 +1,6 @@
 """Document extraction scored per field (assay_sdk/documents.py, assay/documents.py)."""
 import json
+import sys
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -118,7 +119,8 @@ def test_each_field_rule_and_the_document_is_a_check():
     assert by["invoice_date"]["status"] == "fail" and by["invoice_date"]["category"] == "wrong"
     assert by["invoice_date"]["reason"].startswith("wrong: 2026-04-03, not 2026-03-04")
     assert json.loads(by["invoice_date"]["raw_output"]) == {"kind": "wrong", "weight": 1.0, "share": 0.0,
-                                                             "fp": 1, "fn": 1, "made_up": "format"}
+                                                             "fp": 1, "fn": 1, "made_up": "format",
+                                                             "value": "2026-04-03"}
     doc = json.loads(by["document"]["raw_output"])
     assert doc["cells"] == {"tp": 6, "fp": 1, "fn": 1} and doc["f1"] == round(12 / 14, 6)
     assert by["document"]["status"] == "fail" and by["document"]["reason"] == "wrong: invoice_date (wrong)"
@@ -1430,3 +1432,75 @@ def test_documents_are_sent_with_their_facets(tmp_path):
     docs = list(EventsSource(store.make_engine(url), "t").documents(
         Window(now - timedelta(days=1), now + timedelta(days=1))))
     assert docs[0].facets == {"source": "scanned", "stamps": "yes", "template_seen": "unseen"}
+
+
+
+# ---------- stability: the same document extracted several times ----------
+
+def test_values_compare_on_what_they_mean():
+    from assay_sdk.documents import canonical
+    assert canonical(Money(), "1,250.00") == canonical(Money(), 1250) == "1,250.00"
+    assert canonical(Date(), "4 March 2026") == canonical(Date(), "2026-03-04")
+    li = LineItems({"d": Text(), "a": Money()})
+    assert canonical(li, [{"d": "a", "a": "1"}, {"d": "b", "a": "2"}]) == \
+        canonical(li, [{"d": "B", "a": "2.00"}, {"d": "a", "a": 1}])  # rows in any order
+    assert canonical(Money(), None) == "" and canonical(Date(), "sometime") == "sometime"
+
+
+def test_stability_counts_values_and_names_what_pass_fail_cant_see():
+    from assay.documents import _stability
+    reps = {("c1", "total"): [("10.00", True)] * 3,
+            ("c1", "date"): [("2026-03-04", True), ("2026-04-03", False), ("2026-03-04", True)],  # flips
+            ("c2", "total"): [("100.00", False), ("1,000.00", False), ("10.00", False)],  # wrong, moving
+            ("c2", "date"): [("2026-01-01", False)] * 3,  # wrong, but the same way: stable
+            ("c3", "total"): [("5.00", True)]}  # one attempt: nothing to compare
+    s = _stability(reps)
+    assert (s["attempts"], s["fields"], s["same"], s["documents"], s["documents_same"]) == (3, 4, 2, 2, 0)
+    assert s["wrong_and_moving"] == [["c2", "total", ["1,000.00", "10.00", "100.00"]]] and s["flipping"] == 1
+    assert _stability({("c", "f"): [("1", True)]}) is None
+
+
+REPEATED = '''
+import os
+from assay_sdk.documents import score_document, Text, Money
+S = {"number": Text(), "total": Money()}
+
+def case(i, run):
+    truth = {"number": str(i), "total": "10"}
+    got = dict(truth)
+    if i == 3:  # wrong every time, never the same way: a stable fail to pass/fail
+        got["total"] = str(100 + int(os.environ.get("ASSAY_TEST_ATTEMPT", "0")))
+    score_document(run, truth, got, S)
+''' + "".join(f"\ndef test_{i}(assay_case): case({i}, assay_case)\n" for i in range(5))
+
+
+def test_the_report_says_how_repeatable_extraction_is(project):
+    from assay.__main__ import main
+    (project / "tests").mkdir()
+    (project / "tests" / "test_rep.py").write_text(REPEATED)
+    (project / "assay.toml").write_text(
+        '[test]\ncommand = "' + sys.executable + ' -m pytest -q -p no:cacheprovider -p assay_sdk.pytest_plugin tests"\n'
+        "repeat = 4\n\n[documents.gates]\nstability = { min_accuracy = 0.99 }\n")
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = main(["test"])
+    out = buf.getvalue()
+    assert code == 1, out
+    assert "Stability    4 attempts · fields with the same value every time 90.0% (9/10)" in out
+    assert "documents fully repeatable 4/5" in out
+    assert "1 wrong every time and never the same way, which pass/fail can't see as flaky: e.g. total in " \
+           "tests/test_rep.py::test_3: '100.00', '101.00', '102.00', '103.00'" in out
+    assert "failed: stability: accuracy 90.0%, at least 99.0% required" in out
+    from assay import coverage, store
+    from assay.measures import REGISTRY
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    src, now = EventsSource(store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}"), "local"), \
+        datetime.utcnow()
+    w = Window(now - timedelta(days=1), now + timedelta(days=1))
+    m = REGISTRY["value_stability"].compute(src, w)
+    assert (m.overall.numerator, m.overall.denominator) == (9, 10)
+    assert {r.slice_value: r.value for r in m.results if r.dimension == "field"} == {"number": 1.0, "total": 0.8}
+    assert {x["id"]: x["status"] for x in coverage.compute(src, w)["measures"]}["value_stability"] == "live"

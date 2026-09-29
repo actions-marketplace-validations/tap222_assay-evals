@@ -70,6 +70,7 @@ SCORED = {"field_accuracy": ("field_scores", (), "fields scored against their co
           "document_accuracy": ("document_checks", ("document",),
                                 "fields scored against their correct values (score_document)"),
           "critical_document_accuracy": ("critical_scores", (), _CRITICAL),
+          "value_stability": ("repeated_values", (), "documents scored more than once in a run (assay test --repeat)"),
           "confidence_aurc": ("confident_scores", (), _CONFIDENT),
           "confident_error_rate": ("confident_scores", (), _CONFIDENT),
           "confidence_ece": ("confident_scores", (), _CONFIDENT),

@@ -135,6 +135,26 @@ class CriticalFieldAccuracy(_AwaitingTruth):
         return _slices(self.id, rows, self.dimensions, lambda g: (sum(r["right"] for r in g), len(g)))
 
 
+class ValueStability(_AwaitingTruth):
+    """The same document extracted several times in a run (assay test --repeat): the share of
+    fields with the same value every attempt, compared as each type reads it. Catches what
+    pass/fail flakiness can't: a field wrong every time, differently each time."""
+    id = "value_stability"
+    name = "Same value every attempt"
+    question = "Extracting the same document again, how often does each field come out the same?"
+    dimensions = ("segment", "document_type", "field")
+    waiting_on = "documents scored more than once in a run (assay test --repeat, with score_document)."
+
+    def compute(self, source, window: Window) -> MeasureOutput:
+        rows = source.repeated_values(window) if hasattr(source, "repeated_values") else None
+        if rows is None:
+            return super().compute(source, window)
+        if not rows:
+            return unmeasured(self.id, "No document was scored more than once in a run: assay test --repeat 3.")
+        from assay.measures.documents import _slices
+        return _slices(self.id, rows, self.dimensions, lambda g: (sum(r["same"] for r in g), len(g)))
+
+
 class _Confidence(_AwaitingTruth):
     """From fields scored with the extractor's confidence (score_document confidence=): whether it
     can decide what skips review. Values in n; slices by segment, document type and field."""

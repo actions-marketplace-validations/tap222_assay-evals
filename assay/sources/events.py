@@ -183,6 +183,40 @@ class EventsSource:
             f["template_new"] = "yes" if (when - first[tpl]).days < self.TEMPLATE_NEW_DAYS else "no"
         return f
 
+    def repeated_values(self, window: Window) -> Optional[List[dict]]:
+        """Fields extracted more than once in a run (assay test --repeat): {"document_id",
+        "document_type", "segment", "field", "attempts", "same", "facets"}, same when every attempt
+        gave one value (compared as its type reads it). None if no field was ever sent with a value."""
+        import json
+        from assay.local import BASELINE
+        t, d = store.eval_results, store.event_documents
+        cond = [t.c.tenant == self.tenant, t.c.evaluator == "assay.documents@1", t.c.raw_output.like('%"value": %'),
+                t.c.status.in_(("pass", "fail")), t.c.run_id != BASELINE]
+        with self.engine.connect() as conn:
+            if conn.execute(select(t.c.result_id).where(and_(*cond[:3])).limit(1)).first() is None:
+                return None
+            if window is not None:
+                cond += [t.c.ts >= window.start, t.c.ts < window.end]
+            rows = conn.execute(select(t.c.run_id, t.c.document_id, t.c.case_id, t.c.field, t.c.raw_output,
+                                       d.c.document_type, d.c.segment, d.c.facets).select_from(t.outerjoin(
+                d, and_(d.c.tenant == t.c.tenant, d.c.document_id == t.c.document_id))).where(and_(*cond))).all()
+        groups: Dict[tuple, dict] = {}
+        for r in rows:
+            try:
+                raw = json.loads(r.raw_output or "{}")
+            except ValueError:
+                continue
+            if raw.get("part_of") or "value" not in raw:
+                continue
+            g = groups.setdefault((r.run_id, r.case_id, r.field), {
+                "document_id": r.document_id or r.case_id, "document_type": r.document_type, "segment": r.segment,
+                "field": r.field, "values": set(), "attempts": 0,
+                "facets": {**(r.facets or {}), **(raw.get("facets") or {})}})
+            g["values"].add(raw["value"])
+            g["attempts"] += 1
+        return [{**{k: v for k, v in g.items() if k != "values"}, "same": len(g["values"]) == 1}
+                for g in groups.values() if g["attempts"] > 1]
+
     def critical_scores(self, window: Window) -> Optional[List[dict]]:
         """Critical fields scored (score_document critical=), for coverage: None if none ever were."""
         rows = self.field_scores(window)

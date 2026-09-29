@@ -7,7 +7,7 @@ from assay.measures.errors import ErrorsByOrigin, PromptErrorRate, ReportedError
 from assay.measures.ground_truth import (ConfidenceAurc, ConfidenceCalibration, ConfidentErrors,
                                          CriticalDocumentAccuracy, CriticalFieldAccuracy, DocumentAccuracy,
                                          EscapeRate, FabricatedValues, FieldAccuracy, FormatErrors, InferredValues,
-                                         SplitStraightThrough, SupersededValues)
+                                         SplitStraightThrough, SupersededValues, ValueStability)
 from assay.measures.operations import (CallErrorRate, CallLatencyP95, DocumentVolume, InputMixDrift,
                                        StageFailureRate)
 from assay.measures.pipeline import (CostCoverage, FallbackAttribution, HandoffLoss, ModelMismatch,
@@ -27,7 +27,7 @@ REGISTRY = {m.id: m for m in [
     # needs ground truth
     SplitStraightThrough(), SplitPanopticQuality(), SplitDragRate(), DocumentAccuracy(), CriticalDocumentAccuracy(),
     CriticalFieldAccuracy(), FieldAccuracy(), FieldCellF1(), FabricatedValues(), InferredValues(), FormatErrors(),
-    SupersededValues(), EscapeRate(),
+    SupersededValues(), EscapeRate(), ValueStability(),
     # confidence: whether it can decide what skips review
     ConfidenceAurc(), ConfidentErrors(), ConfidenceCalibration(),
     # document quality, from scored checks
@@ -46,7 +46,8 @@ GROUPS = {
     "Accuracy (needs ground truth)": ["split_stp", "split_pq", "split_drag_rate", "document_accuracy",
                                       "critical_document_accuracy", "critical_field_accuracy", "field_accuracy",
                                       "field_cell_f1", "fabricated_value_rate", "inferred_value_rate",
-                                      "format_error_rate", "superseded_value_rate", "escape_rate"],
+                                      "format_error_rate", "superseded_value_rate", "escape_rate",
+                                      "value_stability"],
     "Confidence": ["confidence_aurc", "confident_error_rate", "confidence_ece"],
     "Document quality": ["ocr_cer", "ocr_digit_error_rate", "ocr_letter_error_rate", "ocr_reading_order",
                          "location_accuracy", "table_cell_f1", "table_teds"],
