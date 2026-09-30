@@ -60,7 +60,7 @@ PII_EVALUATOR = "assay.pii@1"
 CONFIG_TEMPLATE = '''\
 # Assay: your AI tests are pytest tests. `pytest --assay` runs them, checks every run, and
 # compares each test with its last passing run; `assay test` does the same, with repeats.
-# Docs: https://github.com/tap222/docai-eval/tree/main/sdk/python#readme
+# Docs: https://github.com/tap222/assay-evals/tree/main/sdk/python#readme
 
 [test]
 command = "pytest -q tests/ai"   # what `assay test` runs
@@ -2037,7 +2037,7 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
                 f"{verdicts.VERDICTS[x['verdict']]}, {_md(x['reason'])[:300]}" for x in nj[:20]]
         out += ["", "</details>", ""]
     out.append(f"<sub>{_md(against or 'no baseline yet')} · run {_code(run_id)} · "
-               f"[Assay](https://github.com/tap222/docai-eval)</sub>")
+               f"[Assay](https://github.com/tap222/assay-evals)</sub>")
     md = "\n".join(out) + "\n"
     if len(md) > MAX_COMMENT:  # cut whole lines, and say so
         md = md[:md.rfind("\n", 0, MAX_COMMENT - 200)] + "\n\n…the rest is in the job's summary.\n"
@@ -2411,7 +2411,11 @@ def revision(root: Path, engine, run_id: str) -> dict:
     changes = (_git(root, "diff", "HEAD", *keep) or "") + (_git(root, "status", "--porcelain", *keep) or "") \
         if commit else ""
     cfg = (root / CONFIG).read_text() if (root / CONFIG).exists() else ""
-    lineage = sorted({json.dumps(r.lineage, sort_keys=True) for r in _rows(engine, run_id) if r.lineage})
+    rows = _rows(engine, run_id)
+    lineage = {json.dumps(r.lineage, sort_keys=True) for r in rows if r.lineage}
+    for s in _setups(engine, TENANT, [r.document_id for r in rows]).values():  # prompt@version and model per call
+        lineage |= {f"prompt:{p}" for p in s["prompts"]} | {f"model:{m}" for m in s["models"]}
+    lineage = sorted(lineage)
     return {"commit": commit, "changes": h(changes) if changes.strip() else None, "config": h(cfg),
             "prompts": h("|".join(lineage)) if lineage else None}
 
