@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - uses: tap222/assay-evals@main
+      - uses: tap222/assay-evals@v1
         with:
           command: pytest --assay tests/ai
 ```
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: tap222/assay-evals@main
+      - uses: tap222/assay-evals@v1
 ```
 
 Every `assay test` run records what it ran: the commit, a digest of uncommitted changes, of
