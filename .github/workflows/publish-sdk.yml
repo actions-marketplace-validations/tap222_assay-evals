@@ -60,6 +60,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          skip-existing: true  # a retried release: what TestPyPI already has stays, the check below still runs
       - name: Installs from TestPyPI
         run: |
           VERSION="${GITHUB_REF_NAME#sdk-v}"

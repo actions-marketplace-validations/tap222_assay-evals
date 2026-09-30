@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 __all__ = ["init", "run", "tagged", "claim_review", "feedback", "check", "correction", "expect", "prompt", "flush", "shutdown", "Run"]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 log = logging.getLogger("assay_sdk")
 SCHEMA = 1
