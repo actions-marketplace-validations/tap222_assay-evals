@@ -1,7 +1,5 @@
 name: Assay AI regression test
-description: >-
-  Run your AI tests with Assay, compare every test with its last passing run on the default branch,
-  and say what changed on the pull request.
+description: Run your AI tests, compare each with its last passing run, and post what changed on the pull request.
 branding:
   icon: check-circle
   color: blue
