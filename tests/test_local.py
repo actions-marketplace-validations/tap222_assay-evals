@@ -37,7 +37,7 @@ def test_init_writes_a_runnable_setup_once(project, capsys):
 
 
 # In this repo the pytest plugin isn't installed as a package, so name it.
-PYTEST = f"{sys.executable} -m pytest -q -p no:cacheprovider -p assay_sdk.pytest_plugin"
+PYTEST = f"{sys.executable} -m pytest -q -p no:cacheprovider"
 
 
 def init_pytest_example(project):
@@ -229,7 +229,7 @@ def test_without_the_fixture():
 
 def test_pytest_plugin_makes_each_test_a_case_and_counts_its_asserts(project, capsys):
     (project / "test_agent.py").write_text(PYTEST_SUITE)
-    config(project, f"{sys.executable} -m pytest -q -p no:cacheprovider -p assay_sdk.pytest_plugin test_agent.py")
+    config(project, f"{sys.executable} -m pytest -q -p no:cacheprovider test_agent.py")
     assert main(["test"]) == 1
     out = capsys.readouterr().out
     assert "2 cases" in out  # the test without the fixture isn't one
@@ -373,7 +373,7 @@ def test_plain_pytest_fails_a_test_whose_run_fails_assays_checks(project):
     import subprocess
     (project / "test_agent.py").write_text(PYTEST_AGENT)
     (project / "assay.toml").write_text('[[contracts]]\nkind = "never"\nstep = "delete_order"\n')
-    pytest_cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "assay_sdk.pytest_plugin",
+    pytest_cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                   "test_agent.py"]
     out = subprocess.run(pytest_cmd, capture_output=True, text=True, cwd=project).stdout
     assert "2 failed, 1 passed" in out
@@ -394,7 +394,7 @@ def test_report_by_test_file_and_junit(project, capsys):
     (project / "tests").mkdir()
     (project / "tests" / "test_agent.py").write_text(PYTEST_AGENT)
     (project / "tests" / "test_other.py").write_text("def test_ok(assay_case):\n    assay_case.answer('fine')\n")
-    config(project, f"{sys.executable} -m pytest -q -p no:cacheprovider -p assay_sdk.pytest_plugin tests",
+    config(project, f"{sys.executable} -m pytest -q -p no:cacheprovider tests",
            contracts='[[contracts]]\nkind = "never"\nstep = "delete_order"\n')
     assert main(["test", "--junit", "out.xml"]) == 1
     out = capsys.readouterr().out
@@ -446,8 +446,11 @@ def test_pytest_assay_compares_the_session_like_assay_test(project, monkeypatch)
 def test_pytest_assay_without_the_server_says_what_to_install(project):
     import subprocess
     (project / "test_x.py").write_text("def test_x(assay_case):\n    pass\n")
-    env = {**os.environ, "PYTHONPATH": SDK}  # the SDK, without assay-server
-    out = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "assay_sdk.pytest_plugin", "--assay",
+    hidden = project / "no_server" / "assay"  # first on the path: assay-server, as if not installed
+    hidden.mkdir(parents=True)
+    (hidden / "__init__.py").write_text("raise ImportError('assay-server is not installed')\n")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(hidden.parent), SDK])}
+    out = subprocess.run([sys.executable, "-m", "pytest", "-q", "--assay",
                           "test_x.py"], capture_output=True, text=True, cwd=project, env=env)
     assert out.returncode == 4 and "pip install assay-server" in out.stderr + out.stdout
 

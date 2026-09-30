@@ -91,7 +91,7 @@ def test_an_agent_that_varies_isnt_called_sensitive_to_wording(project):
     (project / "tests").mkdir()
     (project / "tests" / "test_suite.py").write_text(RANDOM)
     (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} -m pytest -q -p no:cacheprovider '
-                                        f'-p assay_sdk.pytest_plugin tests"\nrepeat = 4\n')
+                                        f'tests"\nrepeat = 4\n')
     assert main(["test"]) == 0  # attempt by attempt the two never match; path for path they always do
     from assay import rewordings, store
     from sqlalchemy import select

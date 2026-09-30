@@ -13,7 +13,7 @@ from assay.__main__ import main
 
 SDK = str(Path(__file__).resolve().parents[1] / "sdk" / "python")
 REPO = str(Path(__file__).resolve().parents[1])
-PYTEST = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "assay_sdk.pytest_plugin"]
+PYTEST = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 
 
 @pytest.fixture

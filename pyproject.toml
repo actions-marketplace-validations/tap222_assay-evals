@@ -1,6 +1,6 @@
 [project]
 name = "assay-server"
-version = "0.2.0"
+version = "0.2.1"
 description = "Assay server: evaluation and observability for AI pipelines and agents, with a dashboard and demo data"
 readme = "docs/assay-server.md"
 license = "MIT"

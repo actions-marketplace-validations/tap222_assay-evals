@@ -1501,7 +1501,7 @@ def test_the_report_says_how_repeatable_extraction_is(project):
     (project / "tests").mkdir()
     (project / "tests" / "test_rep.py").write_text(REPEATED)
     (project / "assay.toml").write_text(
-        '[test]\ncommand = "' + sys.executable + ' -m pytest -q -p no:cacheprovider -p assay_sdk.pytest_plugin tests"\n'
+        '[test]\ncommand = "' + sys.executable + ' -m pytest -q -p no:cacheprovider tests"\n'
         "repeat = 4\n\n[documents.gates]\nstability = { min_accuracy = 0.99 }\n")
     import contextlib
     import io
