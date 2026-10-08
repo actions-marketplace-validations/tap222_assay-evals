@@ -47,7 +47,8 @@ integrations.
 
 ### Part 2: integrate (in the dashboard, no code)
 
-Open the dashboard, paste the key when asked, and go to **Connect**. The details are in
+Open the dashboard, paste the key when asked, and go to **Connect**. **Settings** chooses the
+views (Agents, Documents) and the tabs your team sees; each view starts with its core tabs. The details are in
 [Getting started without code](#getting-started-without-code).
 
 **6. Pick how your data gets in.** Use one choice or several:
@@ -85,7 +86,8 @@ the past month so alerts work from day one.
 
 | Where | What you do |
 |---|---|
-| **Overview** and **Alerts** | see what's broken right now |
+| **Overview** and **Behavior diff** | see whether the latest test run got worse, and what changed |
+| **Alerts**, and **Summary** for a document pipeline | see what's broken right now |
 | **Failures** | see a test run's failures grouped into causes, and accept intended changes |
 | **Learn** | review draft test cases built from production failures, and approve them into a suite |
 | **Agents** and **Trace** | open any run step by step |

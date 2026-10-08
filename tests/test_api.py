@@ -258,3 +258,34 @@ def test_backfill_builds_history_once_and_quietly(tmp_path):
     hist = c.get("/v1/measures/document_volume/history", params={"source": "events:b"}).json()
     assert len(hist["points"]) == 10 and hist["band"] is not None  # a baseline exists on day one
     assert hist["points"] == sorted(hist["points"], key=lambda p: p["at"])
+
+
+def test_views_start_with_core_tabs_and_save_for_everyone(client):
+    got = client.get("/v1/views", params={"source": "events:acme"}).json()
+    assert not got["saved"] and got["read_only"] is None
+    assert got["config"]["views"]["agents"] == {"enabled": None, "tabs": ["overview", "diff", "failures", "agents", "alerts"]}
+    assert "learn" in got["catalog"]["views"]["agents"]["tabs"]
+
+    cfg = {"views": {"agents": {"enabled": True, "tabs": ["learn", "overview"]}, "documents": {"enabled": False}},
+           "measure_groups": ["Cost"]}
+    saved = client.put("/v1/views", json={"source": "events:acme", "config": cfg}).json()
+    assert saved["saved"] and saved["config"]["views"]["agents"]["tabs"] == ["overview", "learn"]  # the dashboard's order
+    assert saved["config"]["measure_groups"] == ["Cost"]
+    assert client.get("/v1/views", params={"source": "events:acme"}).json()["config"] == saved["config"]
+    assert not client.get("/v1/views", params={"source": "events:other"}).json()["saved"]  # per source
+
+    bad = lambda c: client.put("/v1/views", json={"source": "events:acme", "config": c})
+    assert bad({"views": {"agents": {"tabs": ["measures"]}}}).status_code == 422  # a documents tab
+    assert bad({"views": {"agents": {"enabled": False}, "documents": {"enabled": False}}}).status_code == 422
+    assert bad({"views": {"agents": {"enabled": True, "tabs": []}}}).status_code == 422
+    assert bad({"views": {"billing": {}}}).status_code == 422
+
+    assert not client.delete("/v1/views", params={"source": "events:acme"}).json()["saved"]
+
+
+def test_an_open_server_keeps_the_demo_views_as_they_are(client):
+    got = client.get("/v1/views", params={"source": "events:demo-agent"}).json()
+    assert "open demo" in got["read_only"]
+    r = client.put("/v1/views", json={"source": "events:demo-agent", "config": {"views": {}}})
+    assert r.status_code == 403 and "open demo" in r.json()["detail"]
+    assert client.put("/v1/views", json={"source": "events:mine", "config": {"views": {}}}).status_code == 200

@@ -4,10 +4,24 @@
 
 ## What you get
 
+The dashboard has two views, switched at the top: **Agents** (Overview, Behavior diff, Failures,
+Release gates, Prompts, Agents, Learn, Review, Alerts) and **Documents** (Summary, Pipeline,
+Measures, Cost, Errors, Trace, Alerts). **Connect** and **Settings** are in both.
+
+Each view starts with its core tabs: Overview, Behavior diff, Failures, Agents and Alerts; Summary,
+Pipeline, Measures and Errors. **Settings** turns on the rest one by one, turns a view on or off,
+and picks which measure groups the Measures tab shows. Settings are saved per source for
+everyone who opens it, and changing them needs a key with the `manage` scope (`GET`, `PUT` and
+`DELETE /v1/views`). Until a view is set, Agents is on, and Documents is on when the source has
+document data: extraction accuracy, document quality or confidence. On a server with no keys, the
+demo sources can't be changed for everyone: a visitor's changes stay in their browser.
+
 | View | Answers |
 |---|---|
-| **Overview** | What's broken right now? Open anomalies, SLO state, and the slices that moved beyond noise since the last run. Refreshes every minute. |
-| **Workflow** | The pipeline as a graph inferred from traffic: each step's health, errors and broken path contracts; the contracts and how each is holding up; suggested contracts; and path shifts. |
+| **Overview** | Did the latest test run get worse? It's compared with the run before it: how many cases regressed, changed, were flaky or stayed the same, and the worst regressions with their path before and now. With no test runs yet, the commands that send one. |
+| **Behavior diff** | Any two test runs side by side: regressions with the flow before and after, what changed but still passes, what's flaky and what improved. |
+| **Summary** | What's broken right now in a document pipeline? Open anomalies, SLO state, and the slices that moved beyond noise since the last run. Refreshes every minute. |
+| **Pipeline** | The pipeline as a graph inferred from traffic: each step's health, errors and broken path contracts; the contracts and how each is holding up; suggested contracts; and path shifts. |
 | **Learn** | Production traces scored without labels, clustered into patterns, drafted into test cases for review, and suites with the loop's coverage, time to test, and recurrences. |
 | **Agents** | An agent run's pass rate per check against the baseline, where failing runs first went wrong, efficiency (steps, repeats, tool errors, tokens, cost), runs that got longer, and every trajectory. Trace shows one step by step against its reference. |
 | **Failures** | Reported errors or an evaluation run, grouped into causes: each with its kind, confidence, evidence, what sets it apart from passes, and examples. Accept intended changes, confirm or dismiss the rest. |

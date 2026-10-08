@@ -14,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="docs/getting-started.md"><strong>Getting started</strong></a> ·
   <a href="#quickstart"><strong>Quickstart</strong></a> ·
   <a href="examples/prompt-regression"><strong>1-minute demo</strong></a> ·
   <a href="#features"><strong>Features</strong></a> ·
@@ -66,6 +67,9 @@ git clone https://github.com/tap222/assay-evals && cd assay-evals/examples/promp
 See [examples/prompt-regression](examples/prompt-regression) for what it shows.
 
 ## Quickstart
+
+New to Assay? [Getting started](docs/getting-started.md) adds it to the app you already have in
+four steps: install, two lines in your app, one test, run.
 
 ```bash
 pip install assay-server pytest
@@ -217,6 +221,10 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
 
 - **DeepEval and RAGAS.** Their metrics run as Assay checks, and an existing DeepEval suite changes
   one import. See [DeepEval and RAGAS](docs/frameworks.md).
+- **OpenTelemetry.** Already tracing? Add one exporter to your collector and change no code.
+  Assay reads `gen_ai.*` spans and OpenInference spans (Arize Phoenix and other instrumentors),
+  and becomes the regression gate on top of the tracing you already have. See
+  [Sending data](docs/api.md#sending-data).
 - **Existing apps.** `assay connect` attaches Assay to an app you already have, through its
   database, a few lines of code, or a proposed test per model call. See [Setup](docs/setup.md).
 - **Any model provider.**
@@ -228,9 +236,14 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
 assay demo && assay serve
 ```
 
-This loads synthetic data and opens the dashboard, document extraction metrics included. It covers
-seven weeks in which a release breaks totals, wrong values escape through auto-approval, and one
-customer's corrections stop reaching output.
+This loads synthetic data and opens the dashboard on the Tests overview: a support agent's new
+prompt version, compared with the one before it, with every case that regressed and how its tool
+calls changed. A document pipeline's seven weeks are under Documents, in which a release breaks
+totals, wrong values escape through auto-approval, and one customer's corrections stop reaching
+output. A live copy runs at [docai-eval.vercel.app](https://docai-eval.vercel.app).
+
+The dashboard has an Agents view and a Documents view. Each starts with its core tabs, and
+**Settings** turns on the rest, one by one, for everyone on the team. See [Measures](docs/measures.md#what-you-get).
 
 ## CLI reference
 
@@ -257,6 +270,7 @@ Run `assay --help` for every command and option.
 
 | Guide | Covers |
 |---|---|
+| [Getting started](docs/getting-started.md) | Add Assay to your app in four steps: install, two lines in your app, one test, run |
 | [Testing](docs/testing.md) | `pytest --assay`, the `assay_case` fixture, assertions, baselines, flakiness |
 | [Behavior diff](docs/diff.md) | What changed between two versions, with a severity |
 | [Repeated attempts](docs/repeats.md) | Chance, too few attempts, or a regression |

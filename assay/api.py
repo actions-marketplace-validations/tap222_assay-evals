@@ -21,7 +21,7 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, delete, desc, or_, select
 
-from assay import (agents, alerts, audit, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, lifecycle, prompts, rootcause, runner, store, trace, workflow)
+from assay import (agents, alerts, audit, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, lifecycle, prompts, rootcause, runner, store, trace, views, workflow)
 
 log = logging.getLogger("assay.api")
 from assay.auth import Principal
@@ -145,6 +145,11 @@ class SheetIn(BaseModel):
 
 
 class IntegrationIn(BaseModel):
+    source: str
+    config: Dict[str, Any]
+
+
+class ViewsIn(BaseModel):
     source: str
     config: Dict[str, Any]
 
@@ -856,6 +861,30 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def connect_handoff(request: Request, source: str, method: str = "otel", p: Principal = Depends(require("read"))):
         check_source(p, source)
         return {"text": connect.handoff(base_url(request), source, None, method)}
+
+    @app.get("/v1/views", tags=["operate"], summary="Which dashboard views and tabs a source shows")
+    def get_views(source: str, p: Principal = Depends(require("read"))):
+        check_source(p, source)
+        return views.get(engine, source) | {"catalog": views.catalog(), "read_only": views.why_not_saved(p, source)}
+
+    @app.put("/v1/views", tags=["operate"], summary="Turn dashboard views and tabs on or off, for everyone")
+    def put_views(body: ViewsIn, p: Principal = Depends(require("manage"))):
+        check_source(p, body.source)
+        why = views.why_not_saved(p, body.source)
+        if why:
+            raise HTTPException(403, why)
+        try:
+            return views.save(engine, body.source, body.config)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @app.delete("/v1/views", tags=["operate"], summary="Back to the default views and tabs")
+    def delete_views(source: str, p: Principal = Depends(require("manage"))):
+        check_source(p, source)
+        why = views.why_not_saved(p, source)
+        if why:
+            raise HTTPException(403, why)
+        return views.reset(engine, source)
 
     @app.get("/v1/integrations", tags=["operate"], summary="Slack, Jira and Linear, as set up (secrets masked)")
     def get_integrations(source: str, p: Principal = Depends(require("manage"))):

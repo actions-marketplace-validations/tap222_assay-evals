@@ -139,7 +139,7 @@ def pytest_configure(config):
     # Workers and anything the tests start inherit these: one recording for the whole session.
     os.environ.update(ASSAY_PATH=str(home / "runs" / f"{run_id}.jsonl"), ASSAY_TEST_RUN=run_id,
                       ASSAY_PYTEST_SESSION="1")
-    os.environ.pop("ASSAY_URL", None)  # record locally; --assay-upload sends it afterwards
+    url = os.environ.pop("ASSAY_URL", None)  # record locally; --assay-upload sends it there afterwards
     try:
         prices = (_config(config) or {}).get("prices")
     except Exception:  # a broken assay.toml is reported where it's read for the checks
@@ -150,7 +150,7 @@ def pytest_configure(config):
     if assay._client is not None:  # init() already ran, e.g. in a conftest: record to the session's file
         assay.init()
     config._assay_session = {"run_id": run_id, "other_failures": 0, "report": None, "done": threading.Event(),
-                             "lock": threading.Lock(), "code": None}
+                             "lock": threading.Lock(), "code": None, "url": url}
     timeout = _timeout(config)
     if timeout:
         threading.Thread(target=_watchdog, args=(config, timeout), name="assay-timeout", daemon=True).start()
@@ -276,7 +276,7 @@ def _finish(session, s, exitstatus):
         from contextlib import redirect_stdout, redirect_stderr
         buf = StringIO()
         with redirect_stdout(buf), redirect_stderr(buf):
-            sent = local.upload(session.config.rootpath, s["run_id"], None, None, None)
+            sent = local.upload(session.config.rootpath, s["run_id"], s["url"], None, None)
         text += "\n\n" + buf.getvalue().strip()
         code = code or sent
     if s["other_failures"]:
