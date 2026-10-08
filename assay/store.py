@@ -673,6 +673,14 @@ integrations = Table(
     Column("updated_at", DateTime, nullable=False),
 )
 
+# What the dashboard shows for a source (assay/views.py): its views, their tabs, the measure groups.
+dashboard_views = Table(
+    "dashboard_views", metadata,
+    Column("source", String(64), primary_key=True),
+    Column("config", JSON, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
 
 def upgrade(engine: Engine) -> List[str]:
     """Bring an existing database up to this version: create missing tables, and add

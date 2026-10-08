@@ -172,6 +172,6 @@ curl -X POST "$ASSAY/v1/contracts" -H "Authorization: Bearer $KEY" -H "Content-T
 - **Suggestions** (`GET /v1/contracts/suggestions`) are the contracts that the last 30 days of
   paths already keep, learned only from documents that keep your existing contracts. You
   confirm them rather than write them from scratch.
-- The **Workflow** view draws a red dashed ring around steps where contracts broke and a red
+- The **Pipeline** view draws a red dashed ring around steps where contracts broke and a red
   dashed edge on the move that broke them. **Trace** marks the step where a document broke
   a contract.

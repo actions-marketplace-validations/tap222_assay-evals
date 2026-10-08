@@ -535,3 +535,14 @@ def test_behavior_that_got_worse_fails_the_session(project, monkeypatch):
 def test_the_defaults_without_assay_toml_have_every_setting(tmp_path):
     (tmp_path / "assay.toml").write_text("")
     assert set(local.DEFAULT_CONFIG) == set(local.load_config(tmp_path))  # else pytest --assay without one breaks
+
+
+def test_pytest_assay_upload_sends_to_assay_url(project, monkeypatch):
+    import subprocess
+    init_pytest_example(project)
+    for k in ("ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("ASSAY_URL", "http://127.0.0.1:9")  # the session records locally, then sends it here
+    out = subprocess.run([*PYTEST.split(), "--assay", "--assay-upload", "tests/ai"], capture_output=True,
+                         text=True, cwd=project).stdout
+    assert "Where to?" not in out and "127.0.0.1:9" in out
