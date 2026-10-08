@@ -182,6 +182,10 @@ field fails the PR even when the average looks fine. Full guide: [docs/documents
 - **Tested beyond chance:** drops and worse slices are tested on the same documents, not against a
   fixed number of points.
 - **Escape rate** from spot checks of published output, and **replaced values** that output still holds.
+- **User edits sorted, not counted as errors.** When users edit a prefilled form, each change is the
+  model's error or the user's choice (a reformat, or a value the document backs that they changed
+  anyway), decided from the document's text, or by a judge when the text can't tell. Only model
+  errors become corrections and test cases.
 - Every metric is also a dashboard measure.
 
 ## CI and pull requests

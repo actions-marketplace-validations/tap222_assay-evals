@@ -83,6 +83,8 @@ SCORED = {"field_accuracy": ("field_scores", (), "fields scored against their co
                               "files scored against their correct boundaries (score_split)"),
           "escape_rate": ("document_checks", ("spot_check", "assay.spotcheck@1"),
                           "spot checks of published output (spot_check)"),
+          "prefill_error_rate": ("document_checks", ("user_edit", "assay.edits@1"),
+                                 "prefilled forms and what users submitted (user_edits)"),
           "superseded_value_rate": ("document_checks", ("superseded", "assay.superseded@1"),
                                     "documents checked against the later ones replacing them (superseded_values)"),
           "ocr_cer": ("document_checks", ("ocr",), "OCR text scored against the page (score_ocr)"),
