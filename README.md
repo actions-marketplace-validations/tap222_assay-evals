@@ -24,6 +24,11 @@
   <a href="docs/README.md"><strong>Docs</strong></a>
 </p>
 
+<p align="center">
+  <img src="docs/assets/assay-demo.gif" width="860"
+       alt="One line added to a support agent's prompt. pytest --assay fails on the case that now refunds without approval, and assay diff shows the path before and after, the prompt line that changed it, and a HIGH severity.">
+</p>
+
 ---
 
 ## Contents
