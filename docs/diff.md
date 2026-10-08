@@ -10,9 +10,9 @@ assay diff --format markdown    # for a PR or job summary; --format json for too
 ```
 
 It lists what regressed, what failed for the first time, what changed but still passes,
-what's flaky, what couldn't be judged, and what improved. Each regression shows its flow
-before and after, what differs ("an approval moved", "new: cancel_order"), the failing
-check's reason, and a severity:
+what's flaky, what varies with the judge, what couldn't be judged, and what improved. Each
+regression shows its flow before and after, what differs ("an approval moved", "new:
+cancel_order"), the failing check's reason, and a severity:
 - **HIGH:** a security check failed (safety contracts, PII, prompt injection, approvals), an
   approval moved, or the agent called a tool its baseline never called.
 - **MEDIUM:** another check failed, or accuracy on one of your fields dropped by 5 points or

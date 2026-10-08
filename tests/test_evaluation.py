@@ -115,3 +115,39 @@ def test_ingest_refuses_a_nan_score_and_a_misplaced_error_kind(tmp_path):
     assert r.status_code == 422 and "NaN" in r.text
     r = client.post("/v1/ingest", json=[{**base, "status": "fail", "error_kind": "invalid"}], headers={"X-Tenant": "t"})
     assert r.status_code == 422 and "error_kind is for status error" in r.text
+
+
+class _Run:
+    """A test case's run that keeps what evaluate() records."""
+    def __init__(self):
+        self.checks = []
+
+    def check(self, field, status, **kw):
+        self.checks.append({"field": field, "status": status, **kw})
+
+
+def test_rejudge_keeps_the_majority_and_records_the_votes():
+    run = _Run()
+    r = evaluate(answers(False, True, False), rejudge=3, run=run, field="helpful", backoff=0)
+    assert (r.status, r.votes, r.attempts) == ("FAIL", (1, 3), 3)
+    assert run.checks[0]["status"] == "fail" and (run.checks[0]["judgements"], run.checks[0]["judgements_passed"]) == (3, 1)
+    # A tie keeps the first verdict; an answer that isn't a verdict isn't a vote.
+    r = evaluate(answers(True, "not json", False), rejudge=3, backoff=0, retries=0)
+    assert (r.status, r.votes) == ("PASS", (1, 2))
+    # Nothing judged: the first judgement's error, and no votes.
+    r = evaluate(answers(TimeoutError("slow"), TimeoutError("slow")), rejudge=2, retries=0, backoff=0)
+    assert (r.status, r.votes) == ("TIMEOUT", None)
+    # Asked once, nothing changes.
+    run = _Run()
+    evaluate(answers(True), run=run)
+    assert "judgements" not in run.checks[0] and evaluate(answers(True)).votes is None
+
+
+def test_arejudge_keeps_the_majority():
+    import asyncio
+    outs = iter([True, False, True])
+
+    async def judge(*_a, **_k):
+        return next(outs)
+    r = asyncio.run(aevaluate(judge, rejudge=3, backoff=0))
+    assert (r.status, r.votes) == ("PASS", (2, 3))

@@ -203,6 +203,20 @@ changes. `judge_model=` and `judge_prompt="helpful@3"` say which judge it was (a
 answer gives its model on its own): a check judged by another model or prompt than its
 baseline's isn't compared with it as a regression.
 
+**Is it the AI or the judge?** `rejudge=3` asks the judge about the same answer three times and
+keeps the majority (a tie keeps the first verdict). `result.votes` is `(passed, judged)`, and
+it's recorded with the check. When a case varies across attempts and the judge also split on an
+answer it was asked about again, Assay reports it as judge unstable, not flaky: more attempts of
+the AI won't settle it, a steadier judge will. See
+[repeated attempts](../../docs/repeats.md#is-it-the-ai-or-the-judge).
+
+```python
+result = evaluate(my_judge, question, answer, threshold=0.7, rejudge=3, run=assay_case, field="helpful")
+result.votes              # (1, 3): one of three judgements passed the same answer
+```
+
+Sending your own checks, `run.check(..., judgements=3, judgements_passed=1)` says the same.
+
 ## Many samples at once: `EvalRuntime`
 
 Evaluating a dataset is where evaluation tools break down. A 429 cancels the whole run, a

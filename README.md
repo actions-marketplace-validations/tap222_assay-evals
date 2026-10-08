@@ -106,7 +106,8 @@ REGRESSIONS
 ```
 
 Exit codes for `pytest --assay`: `0` nothing got worse, `1` a regression, `6` inconclusive
-(nothing got worse, but some results couldn't be judged or need more attempts to tell).
+(nothing got worse, but some results couldn't be judged, need more attempts to tell, or could be
+worse with a judge that disagrees with itself).
 
 ## Features
 
@@ -115,6 +116,7 @@ Exit codes for `pytest --assay`: `0` nothing got worse, `1` a regression, `6` in
 | **Regression tests** | Tests are pytest tests. Each case is compared with its own last passing run: checks, tool calls in order, cost and context. | [Testing](docs/testing.md) |
 | **Behavior diff** | What changed between two versions, with the flow before and after and a severity. | [Diff](docs/diff.md) |
 | **Real change or noise** | Run each case several times and Assay separates chance (8/8 → 7/8, passes) from too few attempts to tell (inconclusive) from a regression (8/8 → 0/8, fails), corrected for the number of checks. A result that couldn't be judged is kept apart, never scored as 0. | [Repeated attempts](docs/repeats.md) |
+| **The AI or the judge** | Ask the judge again about the same answer (`evaluate(..., rejudge=3)`). A case that varies because the judge splits on it is reported as judge unstable, not flaky: more attempts won't settle it, a steadier judge will. | [AI or judge](docs/repeats.md#is-it-the-ai-or-the-judge) |
 | **Checks can't be loosened** | A PR that removes a contract, raises a limit, or deletes, skips or filters out the test its change breaks fails the run until a maintainer accepts it with a label. | [Security](docs/security.md) |
 | **Document extraction** | Field, line-item, table, OCR, splitting and confidence metrics, with per-field gates. See [below](#document-extraction). | [Documents](docs/documents.md) |
 | **Agents and workflows** | Trajectories, path and claim contracts, plan adherence, multi-turn conversations, simulated users, and [rewordings](docs/testing.md#rewordings-the-same-request-in-other-words): the same request in other words must get the same behavior. | [Agents](docs/agents.md) |

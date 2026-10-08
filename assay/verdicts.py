@@ -4,6 +4,8 @@
   FAIL             judged, and failed
   FLAKY            passes some attempts and fails others, the way it did before
   INCONCLUSIVE     plausibly worse, but too few attempts to tell (see assay/flaky.py)
+  JUDGE_UNSTABLE   varies, and the judge gave the same answer different verdicts when asked
+                   again: the judge's doing, at least partly. Not the AI's pass or fail
   INVALID          couldn't be judged: the evaluator answered, but not with a verdict
                    (unparseable, off its schema, a score that isn't a number). Never a 0.
   TIMEOUT          couldn't be judged: the evaluator timed out
@@ -19,7 +21,8 @@
 
 A check is a case, field and evaluator (flaky.check_key); its attempts decide it. Only
 FAIL says anything bad about the AI. The error verdicts and MISSING say the evaluation
-didn't happen; INCONCLUSIVE says it hasn't settled.
+didn't happen; INCONCLUSIVE says it hasn't settled; JUDGE_UNSTABLE says the judge is
+what varies.
 """
 from __future__ import annotations
 
@@ -31,6 +34,7 @@ from assay.failures import INFRA_REASON
 
 VERDICTS = {
     "PASS": "passed", "FAIL": "failed", "FLAKY": "flaky", "INCONCLUSIVE": "inconclusive",
+    "JUDGE_UNSTABLE": "judge unstable",
     "INVALID": "invalid result", "TIMEOUT": "timed out", "RATE_LIMITED": "rate limited",
     "EVALUATOR_ERROR": "evaluator error", "INFRA_ERROR": "infrastructure error", "MISSING": "missing",
 }
@@ -54,6 +58,13 @@ MISSING_COVERAGE = 0.5  # an evaluator is expected on every case once it has rep
 INLINE = ("deepeval:", "ragas:")
 
 
+def judge_text(state: dict) -> str:
+    """passed 5 of 8 attempts; judged again, the same answer got another verdict on 3 of 8"""
+    return (f"passed {state['passed']} of {state['attempts']} attempts; judged again, the same answer got another "
+            f"verdict on {state['judge_split']} of {state['rejudged']}"
+            + (f", and {state['base_passed']} of {state['base_attempts']} passed before" if state.get("worse") else ""))
+
+
 def of_check(state: dict, rows: list, findings: Optional[List[str]] = None) -> tuple:
     """(verdict, reason) for one check, from its state (flaky.assess) and its attempts."""
     if findings:
@@ -65,6 +76,8 @@ def of_check(state: dict, rows: list, findings: Optional[List[str]] = None) -> t
         return "INCONCLUSIVE", (f"passed {state['passed']} of {state['attempts']} attempts, "
                                 f"{state['base_passed']} of {state['base_attempts']} before: "
                                 f"{state.get('reruns') or 'more'} more attempts to tell")
+    if state["state"] == "judge_unstable":
+        return "JUDGE_UNSTABLE", judge_text(state)
     if state["state"] == "flaky" or (state.get("flake") and 0 < state["passed"] < state["attempts"]):
         return "FLAKY", f"passed {state['passed']} of {state['attempts']} attempts"
     judged = [r for r in rows if r.status != "error"]

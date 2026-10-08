@@ -14,6 +14,7 @@ Every check in an evaluation run gets one verdict:
 | `FAIL` | judged, and failed: the only verdict that says something about the AI |
 | `FLAKY` | passes some attempts and fails others, the way it did before |
 | `INCONCLUSIVE` | plausibly worse but too few attempts to tell, or an intended change nobody has accepted |
+| `JUDGE_UNSTABLE` | varies, and the judge gave the same answer another verdict when asked again (`evaluate(rejudge=)`): the judge's doing, at least partly. See [repeated attempts](repeats.md#is-it-the-ai-or-the-judge) |
 | `INVALID` | couldn't be judged: the evaluator answered, but not with a verdict (unparseable, off its schema, a score that's missing, `NaN` or out of range). Never a score of 0 |
 | `TIMEOUT` | couldn't be judged: the evaluator timed out |
 | `RATE_LIMITED` | couldn't be judged: the evaluator was rate limited |

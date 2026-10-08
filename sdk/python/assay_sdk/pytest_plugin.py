@@ -18,7 +18,7 @@ turns that off. assay_sdk.testing has assertions for the test body: assert_calle
 Assay's report is in pytest's summary, and the exit code says whether anything got worse. A test
 that failed before too doesn't fail the session; one that doesn't take the fixture fails it as
 usual. Exit 6 means inconclusive: nothing got worse, but some results couldn't be judged, or some checks
-could be worse and need more attempts to tell.
+could be worse and need more attempts to tell, or a judge that disagrees with itself to be fixed.
 
 A session that hangs (a test that never returns, e.g. an async evaluation stuck in a race) is
 stopped after `timeout` seconds (assay.toml, --assay-timeout or ASSAY_TIMEOUT): what it recorded
