@@ -34,7 +34,8 @@ jobs:
           test "$TAG" = "$PKG" && test "$PKG" = "$CODE"
       - name: Test against the server
         run: |
-          pip install -e ".[dev]"
+          # This SDK too: the server may require the version being released, not on PyPI yet.
+          pip install -e sdk/python -e ".[dev]"
           pytest -q tests/test_sdk.py
       - name: Build
         run: |
