@@ -64,7 +64,9 @@ class AckError(ValueError):
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    # To the millisecond: a run in the same second as an acknowledgement is before it or after it.
+    t = datetime.now(timezone.utc)
+    return t.replace(microsecond=t.microsecond // 1000 * 1000)
 
 
 def _aware(t: datetime) -> datetime:
@@ -136,7 +138,8 @@ def _s(v) -> str:
 
 
 def _t(v: datetime) -> str:
-    return _aware(v).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    v = _aware(v).astimezone(timezone.utc)
+    return v.strftime("%Y-%m-%dT%H:%M:%S") + (f".{v.microsecond // 1000:03d}" if v.microsecond else "") + "Z"
 
 
 def _inline(d: dict) -> str:

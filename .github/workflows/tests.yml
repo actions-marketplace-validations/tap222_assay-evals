@@ -1,0 +1,33 @@
+# Runs the server's and the SDK's tests on every push to main and on every pull request,
+# so a change is checked before it's merged, not only when a release is tagged.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        # The SDK from this commit, not the one on PyPI: a change to both is tested together.
+        run: pip install -e sdk/python -e ".[dev]"
+      - name: Test
+        run: pytest -q
