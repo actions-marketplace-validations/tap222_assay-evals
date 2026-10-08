@@ -1,0 +1,64 @@
+# Publishes the server's Docker image to GitHub's registry, ghcr.io/tap222/assay-server, when a
+# tag like server-v0.2.1 is pushed (the same tag that publishes to PyPI), or by hand from the
+# Actions tab ("Run workflow").
+#
+#   docker run -p 8400:8400 -v assay-data:/data ghcr.io/tap222/assay-server
+#
+# No secrets: the workflow's own token can write this repository's packages. A release tag
+# publishes <version> and latest; a run by hand publishes latest and sha-<commit>.
+# One-time setup, after the first run: the package's page → Package settings → Change
+# visibility → Public, so people can pull it without logging in.
+name: Publish image
+
+on:
+  push:
+    tags: ["server-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tags
+        id: tags
+        run: |
+          IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/assay-server
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            test "${GITHUB_REF_NAME#server-v}" = "$VERSION" || { echo "tag $GITHUB_REF_NAME, pyproject $VERSION"; exit 1; }
+            TAGS="$IMAGE:$VERSION,$IMAGE:latest"
+          else
+            TAGS="$IMAGE:latest,$IMAGE:sha-${GITHUB_SHA::7}"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=assay-server
+            org.opencontainers.image.description=Assay: regression testing for AI apps and agents. API and dashboard.
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+      - name: The image starts and answers
+        run: |
+          IMAGE=$(echo "${{ steps.tags.outputs.tags }}" | cut -d, -f1)
+          docker run -d --name assay -p 8400:8400 "$IMAGE"
+          for i in $(seq 1 30); do curl -sf localhost:8400/healthz && exit 0; sleep 2; done
+          docker logs assay; exit 1

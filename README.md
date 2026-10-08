@@ -24,6 +24,11 @@
   <a href="docs/README.md"><strong>Docs</strong></a>
 </p>
 
+<p align="center">
+  <img src="docs/assets/assay-demo.gif" width="860"
+       alt="One line added to a support agent's prompt. pytest --assay fails on the case that now refunds without approval, and assay diff shows the path before and after, the prompt line that changed it, and a HIGH severity.">
+</p>
+
 ---
 
 ## Contents
@@ -225,6 +230,9 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
   Assay reads `gen_ai.*` spans and OpenInference spans (Arize Phoenix and other instrumentors),
   and becomes the regression gate on top of the tracing you already have. See
   [Sending data](docs/api.md#sending-data).
+- **Claude Code.** `assay init --claude-code` adds a skill: after Claude changes a prompt or the
+  agent, it runs your tests, reads `assay diff`, and tells you what regressed before you commit.
+  It never accepts a new baseline on its own. See [Getting started](docs/getting-started.md#let-claude-code-run-it-for-you-optional).
 - **Existing apps.** `assay connect` attaches Assay to an app you already have, through its
   database, a few lines of code, or a proposed test per model call. See [Setup](docs/setup.md).
 - **Any model provider.**
@@ -234,6 +242,12 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
 
 ```bash
 assay demo && assay serve
+```
+
+Or with Docker, nothing to install but Docker:
+
+```bash
+docker run -p 8400:8400 -e ASSAY_AUTO_DEMO=1 ghcr.io/tap222/assay-server   # http://localhost:8400
 ```
 
 This loads synthetic data and opens the dashboard on the Tests overview: a support agent's new
@@ -249,7 +263,7 @@ The dashboard has an Agents view and a Documents view. Each starts with its core
 
 | Command | What it does |
 |---|---|
-| `assay init` | Set up local testing: `assay.toml` and a runnable example |
+| `assay init` | Set up local testing: `assay.toml` and a runnable example (`--claude-code` adds a Claude Code skill) |
 | `assay test` | Run your tests with recording, check every run, and compare with the baseline (`--repeat N`, `--junit`, `--failed`) |
 | `assay diff` | What behavior changed between two runs |
 | `assay accept` | Make the latest run the baseline |

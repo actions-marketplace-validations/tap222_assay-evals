@@ -36,3 +36,6 @@ REGRESSIONS
 
 The model is a stand-in (`fake_model` in [agent.py](agent.py)) so the demo is fast and needs no key.
 Replace it with your real model call and keep the tests as they are.
+
+The README's GIF is this demo, recorded with [VHS](https://github.com/charmbracelet/vhs):
+`vhs demo.tape` here writes `docs/assets/assay-demo.gif`.

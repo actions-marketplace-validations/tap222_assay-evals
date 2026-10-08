@@ -82,6 +82,20 @@ That's it. You're using Assay.
 | `assay diff` | Shows what changed, test by test. |
 | `assay accept` | The change was on purpose: save it as the new baseline. |
 
+## Let Claude Code run it for you (optional)
+
+If you use Claude Code, add a skill that has Claude run these tests whenever it changes a prompt,
+the model, a tool or the agent's code:
+
+```bash
+assay init --claude-code
+```
+
+This writes `.claude/skills/assay/SKILL.md`. Commit it, so everyone on your team gets it. After
+an edit, Claude runs `pytest --assay`, reads `assay diff`, and tells you what regressed and why,
+with a proposed fix. It never accepts a new baseline or loosens a test on its own; that stays
+your call.
+
 ## Run it on every pull request (optional)
 
 Copy this file into your repository as `.github/workflows/ai-tests.yml`. Each pull request then
