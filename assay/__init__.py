@@ -1,2 +1,2 @@
 """Assay: evaluation and observability for document-intelligence pipelines."""
-__version__ = "0.2.1"
+__version__ = "0.3.0"

@@ -6,7 +6,9 @@
 
 The dashboard has two views, switched at the top: **Agents** (Overview, Behavior diff, Failures,
 Release gates, Prompts, Agents, Learn, Review, Alerts) and **Documents** (Summary, Pipeline,
-Measures, Cost, Errors, Trace, Alerts). **Connect** and **Settings** are in both.
+Measures, Cost, Errors, Trace, Alerts). **All projects**, **Connect** and **Settings** are in both. All projects lists every
+source with test runs, each repository's latest run against the one before it
+(`GET /v1/projects`), with what regressed first.
 
 Each view starts with its core tabs: Overview, Behavior diff, Failures, Agents and Alerts; Summary,
 Pipeline, Measures and Errors. **Settings** turns on the rest one by one, turns a view on or off,

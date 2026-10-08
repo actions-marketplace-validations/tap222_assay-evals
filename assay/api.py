@@ -418,7 +418,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         with engine.connect() as conn:
             seen = [r[0] for r in conn.execute(select(store.measure_runs.c.source).distinct())]
             tenants = set()
-            for t in (store.event_documents, store.event_calls):
+            for t in (store.event_documents, store.event_calls, store.eval_results, store.agent_trajectories):
                 tenants |= {r[0] for r in conn.execute(select(t.c.tenant).distinct())}
         available = (["sql"] if settings.source_url else []) + sorted(f"events:{t}" for t in tenants)
         if not p.platform:
@@ -1259,6 +1259,35 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, f"No errors have been reported for {source}. POST /v1/errors, or send "
                                      "evaluation results to POST /v1/events/eval-results.")
         return _public(out)
+
+    @app.get("/v1/projects", tags=["results"],
+             summary="Every project with test runs: its latest run against the one before it")
+    def list_projects(p: Principal = Depends(require("read"))):
+        from assay import diff
+        with engine.connect() as conn:
+            tenants = set()
+            for t in (store.eval_results, store.agent_trajectories):
+                tenants |= {r[0] for r in conn.execute(select(t.c.tenant).distinct())}
+        out = []
+        for tenant in sorted(tenants):
+            source = f"events:{tenant}"
+            if not p.can_source(source):
+                continue
+            runs = failures.eval_runs(engine, tenant)
+            if not runs:
+                continue
+            cur = runs[0]
+            item = {"project": tenant, "source": source, "runs": len(runs), "latest": cur, "baseline": None,
+                    "counts": None}
+            base = failures._baseline(runs, cur["run_id"], None) if len(runs) > 1 else None
+            if base:
+                d = diff.compute(engine, tenant, cur["run_id"], base, {"tolerance": 0.01,
+                                                                       "behavior": {"fail": True, "ratios": {}}},
+                                 resolve(p, source))
+                if "error" not in d:
+                    item["baseline"], item["counts"] = base, d["counts"]
+            out.append(item)
+        return sorted(out, key=lambda x: x["latest"].get("start") or "", reverse=True)
 
     @app.get("/v1/evals/runs", tags=["results"], summary="Evaluation runs, newest first, with pass/fail counts")
     def list_eval_runs(source: str, p: Principal = Depends(require("read"))):

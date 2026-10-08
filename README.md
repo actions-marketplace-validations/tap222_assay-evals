@@ -232,7 +232,9 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
   [Sending data](docs/api.md#sending-data).
 - **Claude Code.** `assay init --claude-code` adds a skill: after Claude changes a prompt or the
   agent, it runs your tests, reads `assay diff`, and tells you what regressed before you commit.
-  It never accepts a new baseline on its own. See [Getting started](docs/getting-started.md#let-claude-code-run-it-for-you-optional).
+  It never accepts a new baseline on its own. `--global` installs it for every project, and with
+  `ASSAY_URL` and `ASSAY_UPLOAD=1` set every run lands in one dashboard, filed by repository,
+  with an **All projects** view. See [Getting started](docs/getting-started.md#all-your-repositories-in-one-dashboard-optional).
 - **Existing apps.** `assay connect` attaches Assay to an app you already have, through its
   database, a few lines of code, or a proposed test per model call. See [Setup](docs/setup.md).
 - **Any model provider.**

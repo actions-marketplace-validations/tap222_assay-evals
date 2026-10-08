@@ -1,6 +1,6 @@
 [project]
 name = "assay-server"
-version = "0.2.1"
+version = "0.3.0"
 description = "Assay server: evaluation and observability for AI pipelines and agents, with a dashboard and demo data"
 readme = "docs/assay-server.md"
 license = "MIT"
@@ -24,7 +24,7 @@ dependencies = [
   "sqlalchemy>=2.0",
   "pydantic>=2.5",
   "tomli>=2; python_version < '3.11'",
-  "assay-evals>=0.2.1",  # the SDK: the server imports it (assay/demo.py needs assay_sdk.documents)
+  "assay-evals>=0.3.0",  # the SDK: the server imports it (assay/demo.py needs assay_sdk.documents)
 ]
 
 [project.optional-dependencies]

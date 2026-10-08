@@ -73,6 +73,8 @@ def main(argv=None) -> int:
     i = sub.add_parser("init", help="Set up local testing here: assay.toml and a runnable example")
     i.add_argument("--claude-code", action="store_true",
                    help="Also add a Claude Code skill: Claude runs these tests after it changes a prompt or the agent")
+    i.add_argument("--global", dest="global_", action="store_true",
+                   help="With --claude-code: install the skill for every project (~/.claude), and nothing here")
     t = sub.add_parser("test", help="Run your tests with the SDK recording, check every run, compare with the "
                                     "last run that passed")
     t.add_argument("--repeat", type=int, metavar="N", help="Attempts per case (overrides assay.toml)")
@@ -330,9 +332,20 @@ def main(argv=None) -> int:
                 print(exc, file=sys.stderr)
                 return 2
         if args.cmd == "test":
-            send = {"url": args.url, "key": args.key, "tenant": args.send_tenant} if args.upload else None
+            send = ({"url": args.url, "key": args.key, "tenant": args.send_tenant}
+                    if local.upload_wanted(args.upload) else None)
             return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,
                               args.junit, args.timeout, args.failed, args.judge)
+        if args.global_:
+            if not args.claude_code:
+                print("--global goes with --claude-code: `assay init --claude-code --global`.", file=sys.stderr)
+                return 2
+            path = local.install_claude_skill(Path.home())
+            print(f"Created {path}." if path else f"{Path.home() / local.CLAUDE_SKILL} is already here; nothing changed.")
+            print("Claude Code now runs Assay tests in every project that has them. To send every run to your "
+                  "dashboard, filed by repository, set ASSAY_URL and ASSAY_UPLOAD=1 (in ~/.claude/settings.json "
+                  "under \"env\").")
+            return 0
         made = local.init(root, args.claude_code)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
         if local.CLAUDE_SKILL in made:
