@@ -96,6 +96,30 @@ an edit, Claude runs `pytest --assay`, reads `assay diff`, and tells you what re
 with a proposed fix. It never accepts a new baseline or loosens a test on its own; that stays
 your call.
 
+## All your repositories in one dashboard (optional)
+
+If you work across several repositories, set this up once and every repository's runs land in
+one dashboard, each under its own name:
+
+```bash
+docker run -d --restart unless-stopped -p 127.0.0.1:8400:8400 -v assay-data:/data \
+  --name assay ghcr.io/tap222/assay-server      # the dashboard, at http://localhost:8400
+assay init --claude-code --global               # the Claude Code skill, for every project
+```
+
+Then send every run there. Set these in your shell profile, or for Claude Code in
+`~/.claude/settings.json` under `"env"`:
+
+```bash
+export ASSAY_URL=http://localhost:8400
+export ASSAY_UPLOAD=1
+```
+
+Every `pytest --assay` run, yours or Claude's, then goes to the dashboard, filed under the
+repository's name from its git remote (`ASSAY_PROJECT` overrides it). **All projects** shows
+each repository's latest run against the one before it, with what regressed first. A repository
+needs Assay tests to show up; in one without them, Claude offers to set them up.
+
 ## Run it on every pull request (optional)
 
 Copy this file into your repository as `.github/workflows/ai-tests.yml`. Each pull request then

@@ -276,8 +276,9 @@ def test_pytest_plugin_makes_each_test_a_case_and_counts_its_asserts(project, ca
     assert "test_agent.py::test_refund[O-18]  Your asserts" in out and "assert 12.0 == 27.61" in out
 
 
-def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_path_factory):
+def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_path_factory, monkeypatch):
     from fastapi.testclient import TestClient
+    monkeypatch.setenv("ASSAY_PROJECT", "Shop App")  # an open server files each run under its project
     from assay.api import create_app
     from assay.config import Settings
     init_pytest_example(project)
@@ -289,11 +290,19 @@ def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_p
         r = server.request(method, url.replace("http://assay.test", ""), json=body, headers=headers)
         return r.status_code, r.json()
     assert local.upload(project, None, "http://assay.test", None, None, http=http) == 0
-    assert "tenant 'default'" in capsys.readouterr().out
-    runs = server.get("/v1/agents/runs", params={"source": "events:default"}).json()
+    assert "tenant 'shop-app'" in capsys.readouterr().out
+    runs = server.get("/v1/agents/runs", params={"source": "events:shop-app"}).json()
     assert len(runs) == 1 and runs[0]["trajectories"] == 2 and runs[0]["evaluated"]
     assert local.upload(project, None, "http://assay.test", None, None, http=http) == 0  # again: no doubles
-    assert server.get("/v1/agents/runs", params={"source": "events:default"}).json()[0]["trajectories"] == 2
+    assert server.get("/v1/agents/runs", params={"source": "events:shop-app"}).json()[0]["trajectories"] == 2
+    assert "events:shop-app" in server.get("/v1/sources").json()["configured"]
+    (only,) = server.get("/v1/projects").json()
+    assert only["project"] == "shop-app" and only["runs"] == 1 and only["counts"] is None  # nothing before it
+    main(["test"])
+    assert local.upload(project, None, "http://assay.test", None, None, http=http) == 0
+    (only,) = server.get("/v1/projects").json()
+    assert only["runs"] == 2 and only["baseline"] and only["counts"]["unchanged"] == 2 \
+        and only["counts"]["regressed"] == 0
     assert local.upload(project, None, None, None, None, http=http) == 2  # nowhere to send it
 
 
@@ -557,3 +566,42 @@ def test_init_adds_the_claude_code_skill_when_asked(project, capsys):
     assert text.startswith("---\nname: assay\ndescription: ") and "Never run `assay accept`" in text
     skill.write_text("mine")
     assert main(["init", "--claude-code"]) == 0 and skill.read_text() == "mine"  # left alone
+
+
+def test_a_project_is_named_after_its_repository(project, monkeypatch):
+    import re
+    import subprocess
+    monkeypatch.delenv("ASSAY_PROJECT", raising=False)
+    assert local.project_name(project) == re.sub(r"[^a-z0-9._-]+", "-", project.name.lower()).strip("-")
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    for remote, name in [("git@github.com:acme/Support-Bot.git", "support-bot"),
+                         ("https://github.com/acme/billing/", "billing")]:
+        subprocess.run(["git", "remote", "remove", "origin"], cwd=project, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", remote], cwd=project, check=True)
+        assert local.project_name(project) == name
+    monkeypatch.setenv("ASSAY_PROJECT", "mine")
+    assert local.project_name(project) == "mine"
+
+
+def test_assay_upload_env_sends_every_run(project, monkeypatch):
+    import subprocess
+    init_pytest_example(project)
+    for k in ("ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION"):
+        monkeypatch.delenv(k, raising=False)
+    run = lambda: subprocess.run([*PYTEST.split(), "--assay", "tests/ai"], capture_output=True, text=True,
+                                 cwd=project).stdout
+    monkeypatch.setenv("ASSAY_UPLOAD", "1")
+    assert "Where to?" not in run()  # no server set: nothing to send, and nothing said
+    monkeypatch.setenv("ASSAY_URL", "http://127.0.0.1:9")
+    out = run()
+    assert "127.0.0.1:9" in out and "passed" in out  # tried to send it; an unreachable server fails nothing
+
+
+def test_init_global_installs_the_skill_for_every_project(project, monkeypatch, capsys):
+    home = project / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    assert main(["init", "--global"]) == 2  # only with --claude-code
+    assert main(["init", "--claude-code", "--global"]) == 0
+    assert (home / local.CLAUDE_SKILL).exists() and not (project / "assay.toml").exists()  # nothing in the project
+    assert "ASSAY_UPLOAD=1" in capsys.readouterr().out
+    assert main(["init", "--claude-code", "--global"]) == 0 and "nothing changed" in capsys.readouterr().out

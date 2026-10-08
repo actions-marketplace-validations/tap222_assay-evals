@@ -102,6 +102,11 @@ broke something. Skip it for changes that can't reach the AI, such as docs or st
   or the contracts in `assay.toml`, and don't skip or delete a test.
 - Don't delete `.assay/`: it holds the baselines.
 - If `assay` or `pytest` isn't found, tell the user to run `pip install assay-server pytest`.
+- If the repository has no Assay tests (no `assay.toml`, no test taking the `assay_case` fixture),
+  say so once, and offer to set them up with `assay init` and a first test for the code you
+  changed. Don't set them up without the user's OK.
+- With `ASSAY_URL` and `ASSAY_UPLOAD=1` set, each run also goes to the Assay dashboard, filed
+  under this repository's name. Nothing to do for that.
 """
 
 CONFIG_TEMPLATE = '''\
@@ -657,6 +662,16 @@ def check_run(steps: List[dict], expected: Optional[dict], answer: Optional[str]
 
 class SetupError(Exception):
     pass
+
+
+def install_claude_skill(home: Path) -> Optional[str]:
+    """The Claude Code skill for every project: ~/.claude/skills/assay/SKILL.md. None if it's there."""
+    path = home / CLAUDE_SKILL
+    if path.exists():
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(CLAUDE_SKILL_TEMPLATE)
+    return str(path)
 
 
 def init(root: Path, claude_code: bool = False) -> List[str]:
@@ -3046,21 +3061,22 @@ def upload(root: Path, run_id: Optional[str], url: Optional[str], key: Optional[
         return 2
     events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    if tenant:
-        headers["X-Tenant"] = tenant
     try:
+        if not tenant:  # a platform key or an open server: each project gets its own source
+            code, me = http("GET", f"{url}/v1/whoami", None, headers)
+            me = me if code == 200 and isinstance(me, dict) else {}
+            tenant = project_name(root) if me.get("tenant") == "*" else me.get("tenant")
+        if tenant:
+            headers["X-Tenant"] = tenant
         for i in range(0, len(events), 1000):
             code, body = http("POST", f"{url}/v1/ingest", {"events": events[i:i + 1000]}, headers)
             if code != 200:
                 print(f"{url} refused the upload ({code}): {body}", file=sys.stderr)
                 return 2
-        code, me = http("GET", f"{url}/v1/whoami", None, headers)
     except OSError as exc:
         print(f"Couldn't reach {url}: {exc}", file=sys.stderr)
         return 2
-    if not tenant:
-        tenant = me.get("tenant") if code == 200 and isinstance(me, dict) else None
-        tenant = "default" if tenant in (None, "*") else tenant
+    tenant = tenant or "default"
     source = f"events:{tenant}"
     print(f"Sent run {run_id} ({len(events)} events) to {url}, tenant '{tenant}'.")
     if any(e.get("type") == "run.start" and e.get("test") for e in events):
@@ -3072,6 +3088,23 @@ def upload(root: Path, run_id: Optional[str], url: Optional[str], key: Optional[
             print(f"The server couldn't check it ({code}).", file=sys.stderr)
     print(f"See it in the dashboard at {url}: source {source}, run {run_id}.")
     return 0
+
+
+def project_name(root: Path) -> str:
+    """The project a run belongs to on a shared server: ASSAY_PROJECT, else the repository's name
+    from its git remote, else the folder's name."""
+    name = os.environ.get("ASSAY_PROJECT", "")
+    if not name:
+        remote = (_git(root, "remote", "get-url", "origin") or "").strip().rstrip("/")
+        name = re.sub(r"\.git$", "", re.split(r"[/:]", remote)[-1]) if remote else ""
+    name = name or root.resolve().name
+    return re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")[:48] or "default"
+
+
+def upload_wanted(flag: bool, url: Optional[str] = None) -> bool:
+    """--assay-upload / --upload, or ASSAY_UPLOAD=1 with a server to send to: every run goes there."""
+    return flag or (os.environ.get("ASSAY_UPLOAD", "").lower() in ("1", "true", "yes")
+                    and bool(url or os.environ.get("ASSAY_URL")))
 
 
 def split_command(argv: List[str]) -> Optional[str]:
