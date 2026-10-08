@@ -70,7 +70,9 @@ def main(argv=None) -> int:
     ld = sub.add_parser("load", help="Load events the SDK recorded locally (no server set) into the store")
     ld.add_argument("file", nargs="?", default=".assay/events.jsonl")
     ld.add_argument("--tenant", default="local", help="Tenant to load them into (default: local)")
-    sub.add_parser("init", help="Set up local testing here: assay.toml and a runnable example")
+    i = sub.add_parser("init", help="Set up local testing here: assay.toml and a runnable example")
+    i.add_argument("--claude-code", action="store_true",
+                   help="Also add a Claude Code skill: Claude runs these tests after it changes a prompt or the agent")
     t = sub.add_parser("test", help="Run your tests with the SDK recording, check every run, compare with the "
                                     "last run that passed")
     t.add_argument("--repeat", type=int, metavar="N", help="Attempts per case (overrides assay.toml)")
@@ -331,8 +333,11 @@ def main(argv=None) -> int:
             send = {"url": args.url, "key": args.key, "tenant": args.send_tenant} if args.upload else None
             return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,
                               args.junit, args.timeout, args.failed, args.judge)
-        made = local.init(root)
+        made = local.init(root, args.claude_code)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
+        if local.CLAUDE_SKILL in made:
+            print("Claude Code now runs `pytest --assay` after changing a prompt or the agent, and never accepts "
+                  "a new baseline on its own. Commit .claude/skills/assay so your team gets it too.")
         try:
             import pytest  # noqa: F401
             print("Next: `pytest --assay tests/ai`. Then add your own tests next to the example.")

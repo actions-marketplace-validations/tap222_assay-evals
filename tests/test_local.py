@@ -546,3 +546,14 @@ def test_pytest_assay_upload_sends_to_assay_url(project, monkeypatch):
     out = subprocess.run([*PYTEST.split(), "--assay", "--assay-upload", "tests/ai"], capture_output=True,
                          text=True, cwd=project).stdout
     assert "Where to?" not in out and "127.0.0.1:9" in out
+
+
+def test_init_adds_the_claude_code_skill_when_asked(project, capsys):
+    skill = project / local.CLAUDE_SKILL
+    assert main(["init"]) == 0 and not skill.exists()  # only when asked
+    assert main(["init", "--claude-code"]) == 0
+    assert local.CLAUDE_SKILL in capsys.readouterr().out
+    text = skill.read_text()
+    assert text.startswith("---\nname: assay\ndescription: ") and "Never run `assay accept`" in text
+    skill.write_text("mine")
+    assert main(["init", "--claude-code"]) == 0 and skill.read_text() == "mine"  # left alone
