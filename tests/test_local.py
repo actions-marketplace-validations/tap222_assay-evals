@@ -149,6 +149,45 @@ def test_repeated_attempts_tell_chance_from_a_regression(project, capsys, monkey
     assert main(["test"]) == 1 and "task_0" in capsys.readouterr().out
 
 
+JUDGED = '''
+import os
+import assay_sdk as assay
+from assay_sdk import evaluate
+assay.init()
+attempt, fails = int(os.environ["ASSAY_TEST_ATTEMPT"]), int(os.environ.get("FAILS", "0"))
+for i in range(5):
+    # task_0's answer is borderline on its first FAILS attempts: the judge, asked three times, splits on it.
+    votes = iter([False, True, False] if i == 0 and attempt < fails else [True] * 3)
+    r = evaluate(lambda: next(votes), rejudge=3, backoff=0)
+    assay.check(None, f"task_{i}", r.status.lower(), field="helpful", evaluator="helpful@1",
+                judgements=r.votes[1], judgements_passed=r.votes[0])
+'''
+
+
+def test_a_judge_that_disagrees_with_itself_is_inconclusive_not_a_regression(project, capsys, monkeypatch):
+    (project / "agent.py").write_text(JUDGED)
+    config(project, f"{sys.executable} agent.py", repeat=8)
+    assert main(["test"]) == 0
+    capsys.readouterr()
+
+    monkeypatch.setenv("FAILS", "1")  # 8/8 → 7/8, and the judge split on the answer it failed: not blocking
+    assert main(["test"]) == 0
+    out = capsys.readouterr().out
+    assert "? 1 judge unstable" in out and "verdict flipped on 1 of 8 answers judged again" in out
+    assert "flaky check" not in out and "coin flip" not in out
+
+    monkeypatch.setenv("FAILS", "4")  # 8/8 → 4/8: could be worse, and more attempts won't settle a judge
+    assert main(["test", "--junit", "report.xml"]) == 3
+    out = capsys.readouterr().out
+    assert "(could be worse)" in out and "needs reruns" not in out
+    assert "Inconclusive: nothing is proven worse, but 1 check could be, and its judge varies" in out
+    assert "the judge varies" in (project / "report.xml").read_text()
+    assert "unstable judge" in (project / ".assay" / "summary.md").read_text()
+    main(["diff"])
+    out = capsys.readouterr().out
+    assert "? 1 judge unstable: same answer, another verdict" in out and "JUDGE UNSTABLE" in out
+
+
 def test_setup_problems_exit_2(project, capsys):
     assert main(["test"]) == 2 and "Run `assay init` first" in capsys.readouterr().err
     config(project, f"{sys.executable} -c pass")

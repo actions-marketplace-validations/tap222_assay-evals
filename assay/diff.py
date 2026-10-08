@@ -221,13 +221,19 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
                        "flaky": len(b["flaky"]), "changed": len(changed), "new_failures": len(b["new failure"]),
                        "not_judged": len(b["couldn't be judged"]), "needs_reruns": len(b["needs reruns"]),
                        "known_failures": len(b["known failure"]),
-                       "acknowledged": len(b.get("acknowledged") or []), "judge_changed": len(b.get("judge changed") or [])},
+                       "acknowledged": len(b.get("acknowledged") or []), "judge_changed": len(b.get("judge changed") or []),
+                       "judge_unstable": len(b.get("judge unstable") or [])},
             "regressions": regressions, "new_failures": [entry(c) for c in b["new failure"]],
             "changed": changed, "flaky": flaky, "improved": [local._short(c) for c in sorted(improved)],
             "not_judged": [{"name": local._short(x["case_id"]), "field": x["field"], "reason": x["reason"]}
                            for x in result["not_judged"]],
             "judge_changed": [{"name": local._short(p["case_id"]), "field": p["field"], "before": p["before"],
                                "now": p["now"]} for p in c.get("judge_changed") or []],
+            "judge_unstable": [{"name": local._short(p["case_id"]), "field": p["field"], "worse": p["worse"],
+                                "detail": f"{local._label(p['field'])} passed {p['base_rate']:.0%} → {p['rate']:.0%}; "
+                                          f"same answer, verdict flipped on {p['judge_split']} of {p['rejudged']} "
+                                          f"judged again" + (" (could be worse)" if p["worse"] else "")}
+                               for p in c.get("judge_unstable") or []],
             "models": result.get("models") or {}, "surface": result.get("surface") or [],
             "kinds": result.get("kinds") or {}, "fixed_context": result.get("fixed_context"),
             "everywhere": [local.change_text(x) for x in (result.get("setup") or {}).get("everywhere") or []],
@@ -275,6 +281,7 @@ def text(d: dict) -> str:
                                  (k["regressed"], "✗", "regressed", "red"), (k["new_failures"], "✗", "new failing", "red"),
                                  (k["flaky"], "⚠", "flaky", "yellow"), (k["not_judged"], "?", "couldn't be judged", "yellow"),
                                  (k.get("needs_reruns", 0), "?", "could be worse, or chance: needs reruns", "yellow"),
+                                 (k.get("judge_unstable", 0), "?", "judge unstable: same answer, another verdict", "yellow"),
                                  (k["known_failures"], "·", "failing before too", "dim"),
                                  (k.get("acknowledged", 0), "·", "acknowledged, quiet until worse", "dim"),
                                  (k.get("judge_changed", 0), "?", "judged by a new judge, not compared", "yellow")):
@@ -313,6 +320,10 @@ def text(d: dict) -> str:
         out += ["", paint("SCORES THAT ROSE WITH THE SURFACE", "bold"), ""] + [f"- {x['text']}" for x in d["surface"]]
     if d.get("models"):
         out += ["", paint("BY MODEL", "bold"), ""] + [f"- {m}: {ok}/{n} cases passing" for m, (ok, n) in d["models"].items()]
+    if d.get("judge_unstable"):
+        out += ["", paint("JUDGE UNSTABLE", "bold"), ""] + [f"- {x['name']}: {x['detail']}" for x in d["judge_unstable"]]
+        out += ["", "More attempts of the AI won't settle these: tighten the rubric, check it deterministically, "
+                    "or `assay calibrate` the judge."]
     if d["flaky"]:
         out += ["", paint("FLAKY", "bold"), ""] + [f"- {x['name']}: {x['detail']}, the way it did before"
                                                    for x in d["flaky"]]
@@ -333,7 +344,8 @@ def markdown(d: dict) -> str:
                                                    (k["changed"], "changed, still passing"),
                                                    (k["regressed"], "regressed"), (k["new_failures"], "new failing"),
                                                    (k["flaky"], "flaky"), (k["not_judged"], "couldn't be judged"),
-                                                   (k.get("needs_reruns", 0), "need reruns"))
+                                                   (k.get("needs_reruns", 0), "need reruns"),
+                                                   (k.get("judge_unstable", 0), "judge unstable"))
                           if n or w in ("unchanged", "regressed")))
     for title, items in (("Regressions", d["regressions"]), ("New failing", d["new_failures"]),
                          ("Changed, still passing", d["changed"])):
@@ -351,6 +363,9 @@ def markdown(d: dict) -> str:
                         f"   - Actual: {_code(' → '.join(e['actual']) or '(no calls)', 300)}"]
             out += [f"   - {_md(r)}" for r in e["reasons"][:2]]
             out += [f"   - Changed: {_md(x)}" for x in e.get("setup") or []]
+    if d.get("judge_unstable"):
+        out += ["", "### Judge unstable", ""] + [f"- {_code(x['name'])}: {_md(x['detail'])}" for x in d["judge_unstable"]]
+        out += ["", "More attempts of the AI won't settle these: make the judge steadier."]
     if d.get("totals"):
         out += ["", "### Whole-run totals", ""]
         out += [f"- {_md(x['text'])}" + (f" (grew most: {', '.join(_code(m['name']) for m in x['most'])})"

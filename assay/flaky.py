@@ -17,13 +17,18 @@ in a run and in its baseline:
                 check drops a little by chance on almost every run, and 8/8 →
                 7/8 is no evidence of anything
   flaky         both outcomes seen, and no worse than chance
+  judge_unstable  flaky or plausibly worse, and the judge gave the same output different
+                verdicts when asked again (evaluate(rejudge=)): the variation is at least
+                partly the evaluator's. More attempts of the AI won't settle it; a steadier
+                judge will. One that could be worse still keeps the run from advancing
   improved      the pass rate rose beyond chance
   stable_pass / stable_fail
   errored       every attempt errored, so nothing was judged
 
 A flaky check also says what varies: the output itself (the model or
 pipeline is nondeterministic), only the verdict on the same output (the
-evaluator), or attempts that errored (infrastructure).
+evaluator: the same answer judged again got another verdict, or every attempt
+gave the same answer), or attempts that errored (infrastructure).
 
 The run-level decision uses pass rates, not single outcomes: a flaky check
 counts as 0.8, not as a pass one run and a fail the next. The noise that
@@ -148,10 +153,18 @@ def _counts(rows) -> Tuple[int, int, int]:
     return p, f, len(rows) - p - f
 
 
+def split_vote(r) -> bool:
+    """The judge was asked about this same output more than once, and didn't always agree."""
+    n, p = getattr(r, "judgements", None) or 0, getattr(r, "judgements_passed", None)
+    return n >= 2 and p is not None and 0 < p < n
+
+
 def flake_source(rows) -> Optional[str]:
     """What varies between attempts of a check that had both outcomes."""
     if any(r.status == "error" for r in rows):
         return "infrastructure"
+    if any(split_vote(r) for r in rows):
+        return "evaluator"
     outputs = {r.actual for r in rows}
     return "output" if len(outputs) > 1 else "evaluator"
 
@@ -170,7 +183,9 @@ def assess(candidate: Dict[tuple, List], baseline: Dict[tuple, List]) -> Dict[tu
              "low": lo, "high": hi, "base_passed": a if nb else None, "base_attempts": nb or None,
              "base_rate": a / nb if nb else None, "p_worse": None, "q_worse": None, "outcomes":
              "".join("●" if r.status == "pass" else "○" if r.status == "fail" else "×"
-                     for r in sorted(rows, key=lambda r: (r.attempt or 0, r.ts)))}
+                     for r in sorted(rows, key=lambda r: (r.attempt or 0, r.ts))),
+             "rejudged": sum(1 for r in rows if r.status != "error" and (getattr(r, "judgements", None) or 0) >= 2),
+             "judge_split": sum(1 for r in rows if r.status != "error" and split_vote(r))}
         if n and nb:
             if c / n < a / nb:
                 x["p_worse"] = fisher_lower(a, b, c, f)
@@ -206,8 +221,12 @@ def assess(candidate: Dict[tuple, List], baseline: Dict[tuple, List]) -> Dict[tu
             x["state"] = "flaky"
         else:
             x["state"] = "stable_pass" if x["passed"] == n else "stable_fail" if x["passed"] == 0 else "flaky"
+        if x["judge_split"] and x["state"] in ("flaky", "needs_reruns"):
+            # The same answer, judged again, got another verdict: the variation is the judge's (at least
+            # partly), and rerunning the AI doesn't settle a judge. One that could be worse still isn't a pass.
+            x["worse"], x["state"], x["reruns"] = x["state"] == "needs_reruns", "judge_unstable", None
         # Relative to the baseline: newly failing, failing as before, or flaky either way.
-        if x["state"] == "flaky":
+        if x["state"] in ("flaky", "judge_unstable"):
             x["since"] = "flaky"
         elif x["base_rate"] is None or x["passed"] == n:
             x["since"] = None
@@ -219,7 +238,8 @@ def assess(candidate: Dict[tuple, List], baseline: Dict[tuple, List]) -> Dict[tu
 
 
 STATES = {"got_worse": "Got worse", "needs_reruns": "Needs reruns", "flaky": "Flaky", "improved": "Improved",
-          "stable_fail": "Failing", "stable_pass": "Passing", "errored": "Couldn't be judged"}
+          "judge_unstable": "Judge unstable", "stable_fail": "Failing", "stable_pass": "Passing",
+          "errored": "Couldn't be judged"}
 
 
 def pooled(checks: List[dict]) -> Optional[dict]:
@@ -277,7 +297,8 @@ def summarize(states: Dict[tuple, dict], tolerance: float = 0.01, roles: Optiona
     def item(k, x, why=None):
         return dict(case_id=k[0], field=k[1] or None, evaluator=k[2] or None, why=why, **{
             f: x.get(f) for f in ("passed", "attempts", "rate", "low", "high", "base_passed", "base_attempts",
-                                  "base_rate", "q_worse", "p_worse", "flake", "reruns", "outcomes", "state")})
+                                  "base_rate", "q_worse", "p_worse", "flake", "reruns", "outcomes", "state",
+                                  "rejudged", "judge_split", "worse")})
 
     worse = sorted((item(k, x) for k, x in counted.items() if x["state"] == "got_worse"),
                    key=lambda i: (i["q_worse"] or 1, i["case_id"]))
@@ -287,6 +308,9 @@ def summarize(states: Dict[tuple, dict], tolerance: float = 0.01, roles: Optiona
                for k, x in states.items() if roles.get(k) == "infrastructure" and x["passed"] < x["attempts"]]
     flaky = sorted((item(k, x) for k, x in states.items() if x["state"] == "flaky"),
                    key=lambda i: (i["rate"] if i["rate"] is not None else 1, i["case_id"]))
+    unsteady = sorted((item(k, x) for k, x in states.items() if x["state"] == "judge_unstable"),
+                      key=lambda i: (not i["worse"], i["case_id"]))
+    unsteady_worse = sum(1 for k, x in counted.items() if x["state"] == "judge_unstable" and x["worse"])
     base_flaky = sum(1 for x in states.values() if x["base_attempts"] and 0 < (x["base_passed"] or 0) < x["base_attempts"])
     counted_worse = len(worse)
     more = sum(r["reruns"] or 0 for r in reruns)
@@ -308,6 +332,11 @@ def summarize(states: Dict[tuple, dict], tolerance: float = 0.01, roles: Optiona
         outcome = "rerun"
         reasons.append(f"{len(reruns):,} checks can't be judged yet. Rerun them ({more:,} more attempts in all) "
                        "instead of blocking.")
+    elif unsteady_worse:
+        outcome = "rerun"
+        reasons.append(f"{unsteady_worse:,} checks could be worse, but their judge gave the same answer different "
+                       "verdicts: more attempts won't settle it. Make the judge steadier, or check it "
+                       "deterministically, then rerun.")
     else:
         outcome = "advance"
         # Not proven worse, but not proven fine either. Said, not blocked: holding on it would hold
@@ -322,6 +351,9 @@ def summarize(states: Dict[tuple, dict], tolerance: float = 0.01, roles: Optiona
         reasons.append(f"{role_counts['intended']:,} checks {ROLES['intended']}.")
     if reruns and outcome != "rerun":
         reasons.append(f"{len(reruns):,} checks need reruns ({more:,} attempts) before they can be judged.")
+    if unsteady and not (outcome == "rerun" and unsteady_worse and not reruns):
+        reasons.append(f"{len(unsteady):,} checks vary with the judge: the same answer judged again got another "
+                       f"verdict{f' ({unsteady_worse:,} could be worse)' if unsteady_worse else ''}.")
     for r in ("evaluator", "evaluator_input", "accepted"):
         if role_counts[r]:
             reasons.append(f"Not counted: {role_counts[r]:,} checks {ROLES[r]}.")
@@ -334,4 +366,4 @@ def summarize(states: Dict[tuple, dict], tolerance: float = 0.01, roles: Optiona
             "roles": dict(role_counts), "change": change, "noise": noise,
             "pass_rate": sum(rates) / len(rates) if rates else None,
             "base_flaky": base_flaky, "got_worse": worse[:max_list], "reruns": reruns[:max_list],
-            "flaky": flaky[:max_list]}
+            "flaky": flaky[:max_list], "judge_unstable": unsteady[:max_list]}

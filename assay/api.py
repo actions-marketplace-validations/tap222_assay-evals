@@ -1281,7 +1281,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                         media_type="text/markdown" if format == "markdown" else "text/plain")
 
     @app.get("/v1/evals/runs/{run_id}/verdicts", tags=["results"],
-             summary="Every check's verdict: PASS, FAIL, FLAKY, INCONCLUSIVE, INVALID, TIMEOUT, RATE_LIMITED, "
+             summary="Every check's verdict: PASS, FAIL, FLAKY, INCONCLUSIVE, JUDGE_UNSTABLE, INVALID, TIMEOUT, RATE_LIMITED, "
                      "EVALUATOR_ERROR, INFRA_ERROR, MISSING")
     def eval_verdicts(run_id: str, source: str, verdict: Optional[str] = None, baseline: Optional[str] = None,
                       p: Principal = Depends(require("read"))):
@@ -1313,7 +1313,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         detail = {"kind": "eval_run", "slices": [], "reasons": out["reasons"], "states": out["states"],
                   "roles": out["roles"],
                   "change": out["change"], "noise": out["noise"], "reruns": out["reruns"][:200],
-                  "got_worse": out["got_worse"][:200]}
+                  "got_worse": out["got_worse"][:200], "judge_unstable": out["judge_unstable"][:200]}
         with engine.begin() as conn:
             gid = conn.execute(store.gate_decisions.insert().values(
                 created_at=datetime.utcnow(), outcome=out["outcome"], tenant=_tenant(body.source),

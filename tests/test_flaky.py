@@ -7,9 +7,10 @@ T = datetime(2026, 9, 1)
 
 
 class R:
-    def __init__(self, case, status, actual="x", attempt=0, field="f", evaluator="e"):
+    def __init__(self, case, status, actual="x", attempt=0, field="f", evaluator="e", votes=None):
         self.case_id, self.field, self.evaluator = case, field, evaluator
         self.status, self.actual, self.attempt, self.ts = status, actual, attempt, T + timedelta(seconds=attempt)
+        self.judgements_passed, self.judgements = votes or (None, None)
 
 
 def runs(case, outcomes, actuals=None, **kw):
@@ -107,3 +108,37 @@ def test_run_decisions():
     # Accepted as an intended change: advance.
     assert summarize(states, roles={k: "accepted" for k in roles})["outcome"] == "advance"
     assert summarize(states, roles={k: "intended" for k in roles})["outcome"] == "hold"
+
+
+def judged(case, outcomes, split, n=3):
+    """Attempts whose answer was judged n times: the first `split` of them got a split vote."""
+    out = runs(case, outcomes)
+    for i, r in enumerate(out):
+        p = n if r.status == "pass" else 0
+        r.judgements, r.judgements_passed = n, (n - 1 if r.status == "pass" else 1) if i < split else p
+    return out
+
+
+def test_a_judge_that_disagrees_with_itself_is_judge_unstable_not_flaky():
+    # 8/8 → 7/8, and the same answer judged again got another verdict: the judge varies, not only the AI.
+    x = one(judged("c", "PPPPPPPF", split=2), runs("c", "P" * 8))
+    assert x["state"] == "judge_unstable" and x["flake"] == "evaluator" and not x["worse"]
+    assert (x["judge_split"], x["rejudged"]) == (2, 8) and x["since"] == "flaky"
+    # 8/8 → 5/8 could be worse: still not settled, but more attempts of the AI won't settle it.
+    x = one(judged("c", "PPPPPFFF", split=3), runs("c", "P" * 8))
+    assert x["state"] == "judge_unstable" and x["worse"] and x["reruns"] is None
+    s = summarize({("c", "f", "e"): x, ("d", "f", "e"): one(runs("c", "P" * 8), runs("c", "P" * 8))})
+    assert s["outcome"] == "rerun" and s["states"]["judge_unstable"] == 1 and s["reruns"] == []
+    assert "their judge gave the same answer different verdicts" in s["reasons"][0]
+    assert s["judge_unstable"][0]["case_id"] == "c" and s["judge_unstable"][0]["worse"]
+    # Asked again, the judge agreed every time: the AI varies, and it's flaky or needs reruns as before.
+    assert one(judged("c", "PPPPPPPF", split=0), runs("c", "P" * 8))["state"] == "flaky"
+    assert one(judged("c", "PPPPPFFF", split=0), runs("c", "P" * 8))["state"] == "needs_reruns"
+    # A collapse is a regression whatever the judge did: 8/8 → 0/8 isn't the judge.
+    assert one(judged("c", "F" * 8, split=2), runs("c", "P" * 8))["state"] == "got_worse"
+
+
+def test_a_flaky_judge_that_isnt_worse_doesnt_hold_the_run():
+    states = assess(flaky.attempts_by_check(judged("c", "PPPPPPPF", split=2)), flaky.attempts_by_check(runs("c", "P" * 8)))
+    s = summarize(states)
+    assert s["outcome"] == "advance" and any("vary with the judge" in r for r in s["reasons"])

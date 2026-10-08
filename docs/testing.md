@@ -189,6 +189,10 @@ fail from them says little:
   Tighten its rubric or its expected output, or check it deterministically if it can be.
 ```
 
+A coin flip whose judge split on the same answer (`evaluate(rejudge=3)`) is listed as judge
+unstable instead: the system may not be what varies. See
+[repeated attempts](repeats.md#is-it-the-ai-or-the-judge).
+
 They don't fail the run. They're the cases worth rewriting: a tighter rubric, a fixed output
 format, or a deterministic check in place of the judge.
 
