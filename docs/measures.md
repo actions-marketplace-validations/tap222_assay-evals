@@ -4,11 +4,17 @@
 
 ## What you get
 
-The dashboard's tabs come in groups: **Tests** (Overview, Behavior diff, Failures, Release gates,
-Prompts), **Production** (Agents, Learn, Review, Alerts), **Documents** (Summary, Pipeline,
-Measures, Cost, Errors, Trace) and **Setup** (Connect). The Documents group shows only for a
-source with document data: extraction accuracy, document quality or confidence. The dashboard
-opens on the Tests overview.
+The dashboard has two views, switched at the top: **Agents** (Overview, Behavior diff, Failures,
+Release gates, Prompts, Agents, Learn, Review, Alerts) and **Documents** (Summary, Pipeline,
+Measures, Cost, Errors, Trace, Alerts). **Connect** and **Settings** are in both.
+
+Each view starts with its core tabs: Overview, Behavior diff, Failures, Agents and Alerts; Summary,
+Pipeline, Measures and Errors. **Settings** turns on the rest one by one, turns a view on or off,
+and picks which measure groups the Measures tab shows. Settings are saved per source for
+everyone who opens it, and changing them needs a key with the `manage` scope (`GET`, `PUT` and
+`DELETE /v1/views`). Until a view is set, Agents is on, and Documents is on when the source has
+document data: extraction accuracy, document quality or confidence. On a server with no keys, the
+demo sources can't be changed for everyone: a visitor's changes stay in their browser.
 
 | View | Answers |
 |---|---|

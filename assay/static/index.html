@@ -43,9 +43,17 @@ main{max-width:1280px;margin:0 auto;padding:20px 24px 60px}
 nav.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:20px;overflow-x:auto}
 nav.tabs a{padding:10px 12px;color:var(--muted);font-weight:500;text-decoration:none;border-bottom:2px solid transparent;white-space:nowrap}
 nav.tabs a[aria-current=page]{color:var(--ink);border-bottom-color:var(--accent)}
-nav.tabs .tabgroup{align-self:center;padding:0 4px 0 16px;font:600 10.5px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
-nav.tabs .tabgroup:first-child{padding-left:0}
-nav.tabs.nodocs .doc{display:none}
+nav.tabs .spacer{flex:1}
+.viewswitch{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;align-self:center}
+.viewswitch button{border:0;border-radius:0;padding:5px 14px;color:var(--muted);font-weight:500}
+.viewswitch button+button{border-left:1px solid var(--line)}
+.viewswitch button[aria-pressed=true]{background:var(--accent-soft);color:var(--accent-ink)}
+.viewhead{display:flex;gap:12px;align-items:flex-start;cursor:pointer}
+.viewhead h2{margin:0}
+.toggles{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
+.toggles label{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:8px;cursor:pointer;background:var(--surface)}
+.toggles label small{display:block;color:var(--muted);font-size:12.5px;line-height:1.35}
+.toggles input,.viewhead input{padding:0;margin:4px 0 0;flex:none}
 nav.tabs .badge{font-family:var(--mono);font-size:11px;background:var(--bad);color:#fff;border-radius:999px;padding:1px 6px;margin-left:6px}
 h2{font:600 20px var(--display);margin:0}
 h3{font:600 16px var(--display);margin:0}
@@ -249,7 +257,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
 </head>
 <body>
 <header>
-  <div class="brand"><b>Assay</b><span>Regression testing for AI apps and agents</span></div>
+  <div class="brand"><b>Assay</b><span>Regression testing for AI apps and agents</span><div class="viewswitch" id="viewswitch" role="group" aria-label="View" hidden></div></div>
   <div class="controls">
     <select id="source" aria-label="Source"></select>
     <select id="days" aria-label="Window for manual runs"><option value="1" selected>Last 24 h</option><option value="3">Last 3 days</option><option value="7">Last 7 days</option></select>
@@ -259,28 +267,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
   </div>
 </header>
 <main>
-  <nav class="tabs nodocs">
-    <span class="tabgroup">Tests</span>
-    <a href="#overview" data-tab="overview">Overview</a>
-    <a href="#diff" data-tab="diff">Behavior diff</a>
-    <a href="#failures" data-tab="failures">Failures</a>
-    <a href="#gates" data-tab="gates">Release gates</a>
-    <a href="#prompts" data-tab="prompts">Prompts</a>
-    <span class="tabgroup">Production</span>
-    <a href="#agents" data-tab="agents">Agents</a>
-    <a href="#learn" data-tab="learn">Learn</a>
-    <a href="#review" data-tab="review">Review</a>
-    <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
-    <span class="tabgroup doc">Documents</span>
-    <a class="doc" href="#summary" data-tab="summary">Summary</a>
-    <a class="doc" href="#workflow" data-tab="workflow">Pipeline</a>
-    <a class="doc" href="#measures" data-tab="measures">Measures</a>
-    <a class="doc" href="#cost" data-tab="cost">Cost</a>
-    <a class="doc" href="#errors" data-tab="errors">Errors</a>
-    <a class="doc" href="#trace" data-tab="trace">Trace</a>
-    <span class="tabgroup">Setup</span>
-    <a href="#connect" data-tab="connect">Connect</a>
-  </nav>
+  <nav class="tabs" id="tabs" aria-label="Tabs"></nav>
   <div id="keybox" class="panel keybox" hidden>
     <a id="ssologin" class="button" href="/auth/login" hidden>Sign in with SSO</a>
     <label for="apikey">This server requires an API key:</label>
@@ -303,6 +290,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
   <section id="tab-alerts" class="stack" hidden></section>
   <section id="tab-gates" class="stack" hidden></section>
   <section id="tab-connect" class="stack" hidden></section>
+  <section id="tab-settings" class="stack" hidden></section>
 </main>
 <script>
 const $=s=>document.querySelector(s);
@@ -394,12 +382,8 @@ function chart(h,m){
 /* ---------- sources, refresh ---------- */
 const DEMO_SOURCE="events:demo-agent";  // `assay demo`'s support agent: two test runs, the second regressed
 const GUIDE="https://github.com/tap222/assay-evals/blob/main/docs/getting-started.md";
-// Measure groups only document pipelines fill: the Documents tabs show when one of them has data.
+// Measure groups only document pipelines fill: the Documents view turns on by itself when one has data.
 const DOC_GROUPS=["Accuracy (needs ground truth)","Document quality","Confidence"];
-function showDocTabs(){
-  const docs=!!S.latest&&Object.entries(S.latest.measures||{}).some(([id,m])=>m&&m.status==="measured"&&DOC_GROUPS.includes(S.catalog[id]?.group));
-  $("nav.tabs").classList.toggle("nodocs",!docs);
-}
 async function loadSources(){
   const s=await api("/v1/sources");
   const all=[...new Set([...s.configured,...s.with_results])];
@@ -408,11 +392,11 @@ async function loadSources(){
   $("#source").innerHTML=all.length?all.map(x=>`<option ${x===pick?"selected":""}>${esc(x)}</option>`).join(""):`<option value="">No sources yet</option>`;
 }
 async function refresh(){
-  if(!src()){renderEmpty();return}
-  try{S.overview=await api(`/v1/overview?${q({source:src()})}`)}catch(e){S.overview=null;S.latest=null;showDocTabs();renderEmpty(e.message);return}
+  await loadViews();
+  if(!src()){buildNav();renderEmpty();return}
+  try{S.overview=await api(`/v1/overview?${q({source:src()})}`)}catch(e){S.overview=null;S.latest=null;buildNav();renderEmpty(e.message);return}
   try{S.latest=await api(`/v1/runs/latest?${q({source:src()})}`)}catch(e){S.latest=null}
-  showDocTabs();
-  const n=S.overview.open_alerts.length;$("#alert-badge").hidden=!n;$("#alert-badge").textContent=n;
+  S.alertCount=S.overview.open_alerts.length;buildNav();
   $("#updated").textContent="Last run "+ago(S.overview.run.started_at);
   render();
 }
@@ -420,13 +404,85 @@ function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
   ["summary","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
-  if(["overview","failures","diff","agents","learn","trace","workflow"].includes(tab()))render();  // drawn from events, no measure run needed
+  if(["overview","failures","diff","agents","learn","trace","workflow","gates","connect","settings"].includes(tab()))render();  // drawn from events, no measure run needed
+}
+
+/* ---------- views, tabs and settings ---------- */
+const TAB_INFO={overview:["Overview","The latest test run against the one before it"],diff:["Behavior diff","Any two test runs side by side"],
+  failures:["Failures","Failures grouped into causes"],gates:["Release gates","Advance, hold or roll back, decided in CI"],
+  prompts:["Prompts","Results for each prompt version"],agents:["Agents","Agent runs, step by step"],
+  learn:["Learn","Production failures drafted into test cases"],review:["Review","Read production conversations and say what went wrong"],
+  alerts:["Alerts","Open and resolved alerts"],summary:["Summary","What's broken in the pipeline right now"],
+  workflow:["Pipeline","The pipeline as a graph, with each step's health"],measures:["Measures","Each measure over time, with SLOs"],
+  cost:["Cost","Cost per document, by component and model"],errors:["Errors","Where reported wrong values start"],
+  trace:["Trace","One document through every step"],connect:["Connect",""],settings:["Settings",""]};
+const VIEW_INFO={agents:"Test runs, agent runs and production review.",documents:"A document pipeline's measures, cost and traces."};
+const viewsKey=()=>"assay-views:"+src();
+async function loadViews(){S.views=src()?await api(`/v1/views?${q({source:src()})}`).catch(()=>null):null}
+// The team's settings, or this viewer's own where they can't change them (an open demo, a read-only key).
+function viewsConfig(){
+  const V=S.views;if(!V)return null;
+  if(V.read_only){try{const own=JSON.parse(store.get(viewsKey())||"null");if(own)return own}catch(e){}}
+  return V.config}
+function hasDocs(){return !!S.latest&&Object.entries(S.latest.measures||{}).some(([id,m])=>m&&m.status==="measured"&&DOC_GROUPS.includes(S.catalog[id]?.group))}
+function viewOn(name){const e=viewsConfig()?.views[name]?.enabled;return e==null?(name==="agents"||hasDocs()):e}
+function enabledViews(){const on=["agents","documents"].filter(viewOn);return on.length?on:["agents"]}
+function viewTabs(name){return viewsConfig()?.views[name]?.tabs||{agents:["overview","diff","failures","agents","alerts"],documents:["summary","workflow","measures","errors"]}[name]}
+function currentView(){const on=enabledViews(),v=store.get("assay-view");return on.includes(v)?v:on[0]}
+function markTab(){const t=tab();document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")})}
+function buildNav(){
+  const on=enabledViews(),cur=currentView(),sw=$("#viewswitch");
+  sw.hidden=on.length<2;
+  sw.innerHTML=on.map(v=>`<button type="button" data-v="${v}" aria-pressed="${v===cur}">${v==="agents"?"Agents":"Documents"}</button>`).join("");
+  $("#tabs").innerHTML=[...viewTabs(cur),"connect","settings"].map(t=>`${t==="connect"?`<span class="spacer"></span>`:""}<a href="#${t}" data-tab="${t}">${esc(TAB_INFO[t][0])}${t==="alerts"?`<span class="badge" id="alert-badge"${S.alertCount?"":" hidden"}>${S.alertCount||""}</span>`:""}</a>`).join("");
+  markTab();
+}
+$("#viewswitch").onclick=e=>{const b=e.target.closest("[data-v]");if(!b)return;
+  store.set("assay-view",b.dataset.v);buildNav();location.hash=viewTabs(b.dataset.v)[0]};
+function renderSettings(){
+  const box=$("#tab-settings"),V=S.views;
+  if(!V){box.innerHTML=`<div class="empty">Pick a source first.</div>`;return}
+  const c=viewsConfig(),cat=V.catalog;
+  const where=V.read_only?`<span class="chip warn">this browser</span><span>${esc(V.read_only)}</span>`
+    :`<span class="chip good">everyone</span><span>Changes here apply to everyone who opens <b class="mono">${esc(src())}</b>.</span>`;
+  const block=name=>{const on=viewOn(name),v=cat.views[name];
+    return `<div class="panel stack" data-block="${name}">
+      <label class="viewhead"><input type="checkbox" data-viewon="${name}"${on?" checked":""}><span><h2>${esc(v.label)} view</h2>
+        <span class="sub">${esc(VIEW_INFO[name])}${name==="documents"&&!hasDocs()?" This source has no document data yet.":""}</span></span></label>
+      <div class="stack" data-more${on?"":" hidden"}>
+        <div class="toggles">${v.tabs.map(t=>`<label><input type="checkbox" data-tabon="${name}:${t}"${c.views[name].tabs.includes(t)?" checked":""}><span>${esc(TAB_INFO[t][0])}<small>${esc(TAB_INFO[t][1])}</small></span></label>`).join("")}</div>
+        ${name==="documents"?`<h3>Measures to show</h3><div class="toggles">${cat.measure_groups.map(g=>`<label><input type="checkbox" data-group="${esc(g)}"${c.measure_groups.includes(g)?" checked":""}><span>${esc(g)}</span></label>`).join("")}</div>`:""}
+      </div></div>`};
+  box.innerHTML=`<div class="panel stack"><div><h2>Settings</h2><p class="sub">Each view starts with its core tabs. Turn on more as you need them.</p></div><div class="flag">${where}</div></div>
+    ${block("agents")}${block("documents")}
+    <div class="row"><button class="primary" type="button" id="views-save">Save</button> <button type="button" id="views-reset">Back to defaults</button> <span class="note" id="views-msg" role="status"></span></div>`;
+  box.querySelectorAll("[data-viewon]").forEach(i=>i.onchange=()=>{i.closest("[data-block]").querySelector("[data-more]").hidden=!i.checked});
+  const msg=t=>$("#views-msg").textContent=t;
+  $("#views-save").onclick=async()=>{
+    const cfg={views:{},measure_groups:[...box.querySelectorAll("[data-group]:checked")].map(i=>i.dataset.group)};
+    ["agents","documents"].forEach(n=>cfg.views[n]={enabled:box.querySelector(`[data-viewon="${n}"]`).checked,
+      tabs:[...box.querySelectorAll(`[data-tabon^="${n}:"]:checked`)].map(i=>i.dataset.tabon.split(":")[1])});
+    try{
+      if(!cfg.views.agents.enabled&&!cfg.views.documents.enabled)throw new Error("Keep at least one view on.");
+      for(const n of ["agents","documents"])if(cfg.views[n].enabled&&!cfg.views[n].tabs.length)throw new Error(`Turn on at least one tab of the ${cat.views[n].label} view, or turn the view off.`);
+      if(V.read_only){store.set(viewsKey(),JSON.stringify(cfg));msg("Saved in this browser.")}
+      else{S.views={...V,...await api("/v1/views",{method:"PUT",body:JSON.stringify({source:src(),config:cfg})})};msg("Saved for everyone.")}
+      buildNav();
+    }catch(e){msg(e.message)}
+  };
+  $("#views-reset").onclick=async()=>{
+    try{
+      if(V.read_only){try{localStorage.removeItem(viewsKey())}catch(e){}}
+      else S.views={...V,...await api(`/v1/views?${q({source:src()})}`,{method:"DELETE"})};
+      buildNav();renderSettings();msg("Back to the defaults.");
+    }catch(e){msg(e.message)}
+  };
 }
 
 /* ---------- tests overview ---------- */
 async function renderTests(){
   const box=$("#tab-overview");
-  const demo=src().startsWith("events:demo")?`<div class="panel flags"><div class="flag"><span class="chip neutral">demo</span><span>Sample data, open to anyone. To test your own app, follow <a href="${GUIDE}" target="_blank" rel="noopener">Getting started</a>: install, two lines in your app, one test.</span></div></div>`:"";
+  const demo=src().startsWith("events:demo")?`<div class="panel flags"><div class="flag"><span class="chip neutral">demo</span><span>Sample data, open to anyone. To test your own app, follow <a href="${GUIDE}" target="_blank" rel="noopener">Getting started</a>: install, two lines in your app, one test. <a href="#settings">Settings</a> turns on more tabs.</span></div></div>`:"";
   const runs=await api(`/v1/evals/runs?${q({source:src()})}`).catch(()=>[]);
   if(!runs.length){box.innerHTML=demo+`<div class="panel stack"><div><h2>No test runs here yet</h2><p class="sub">Send your pytest runs to this server, and each run is compared with the one before it: what regressed, what changed, and what's flaky.</p></div>
 <pre class="code">pip install assay-server pytest
@@ -529,7 +585,9 @@ function renderOverview(){
 function openAlertsFor(mid){return (S.overview?.open_alerts||[]).filter(a=>a.measure_id===mid)}
 async function renderMeasureGrid(){
   const L=S.latest;if(!L){$("#tab-measures").innerHTML=`<div class="empty">No runs yet.</div>`;return}
-  const ids=Object.keys(S.catalog);
+  const on=viewsConfig()?.measure_groups,shown=Object.entries(S.groups).filter(([g])=>!on||on.includes(g));
+  if(!shown.length){$("#tab-measures").innerHTML=`<div class="empty">No measures turned on. Pick the ones to show in <a href="#settings">Settings</a>.</div>`;return}
+  const ids=shown.flatMap(([,ids])=>ids).filter(i=>S.catalog[i]);
   const hist=Object.fromEntries(await Promise.all(ids.map(async id=>[id,(await api(`/v1/measures/${id}/history?${q({source:src()})}`).catch(()=>({points:[]}))).points])));
   const card=id=>{
     const m=S.catalog[id],r=L.measures[id]||{status:"unmeasured",reason:"Not computed in this run."},on=r.status==="measured"&&r.overall;
@@ -544,7 +602,7 @@ async function renderMeasureGrid(){
       <h3>${esc(m.name)}</h3>
       ${on?`<div class="val"><b>${esc(fmt(r.overall.value,m.unit))}</b><small>n = ${r.overall.n.toLocaleString()}</small></div>${tr}${spark(hist[id])}`:`<p class="reason">${esc(r.reason)}</p>`}
     </button>`};
-  $("#tab-measures").innerHTML=Object.entries(S.groups).map(([g,ids])=>`<div><div class="group-title">${esc(g)}</div><div class="grid">${ids.filter(i=>S.catalog[i]).map(card).join("")}</div></div>`).join("")
+  $("#tab-measures").innerHTML=shown.map(([g,ids])=>`<div><div class="group-title">${esc(g)}</div><div class="grid">${ids.filter(i=>S.catalog[i]).map(card).join("")}</div></div>`).join("")
     +`<p class="note">Run ${esc(L.run_id)} · window ${L.window[0].slice(0,16).replace("T"," ")} → ${L.window[1].slice(0,16).replace("T"," ")} UTC</p>`;
 }
 async function renderMeasureDetail(){
@@ -2022,9 +2080,9 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","summary","workflow","measures","cost","errors","failures","diff","agents","learn","review","prompts","trace","alerts","gates","connect"];
+const TABS=["overview","summary","workflow","measures","cost","errors","failures","diff","agents","learn","review","prompts","trace","alerts","gates","connect","settings"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
-function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
+function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:viewTabs(currentView())[0]}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
 async function render(){
   const t=tab(),hm=hashMeasure();
@@ -2032,9 +2090,12 @@ async function render(){
   if(t==="measures"&&!hm)S.measure=null;
   const hp=location.hash.slice(1).split("/");if(t==="trace"&&hp[1]){S.trace.doc=decodeURIComponent(hp[1]);S.trace.step=hp[2]?decodeURIComponent(hp[2]):null}
   if(t==="workflow")S.wfStep=hp[1]?decodeURIComponent(hp[1]):null;
-  document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
+  // A link to a tab of the other view (a trace from a diff, say) switches to that view.
+  const owner=enabledViews().find(v=>viewTabs(v).includes(t));
+  if(owner&&!viewTabs(currentView()).includes(t)){store.set("assay-view",owner);buildNav()}
+  markTab();
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
-  if(!S.overview&&!["overview","gates","connect","failures","diff","agents","learn","review","trace","workflow"].includes(t))return;  // these don't need a measure run
+  if(!S.overview&&!["overview","gates","connect","settings","failures","diff","agents","learn","review","trace","workflow"].includes(t))return;  // these don't need a measure run
   try{
     if(t==="overview")await renderTests();
     if(t==="summary"){renderOverview();overviewFlow()}
@@ -2052,6 +2113,7 @@ async function render(){
     if(t==="alerts")await renderAlerts();
     if(t==="gates")await renderGates();
     if(t==="connect")await renderConnect();
+    if(t==="settings")renderSettings();
   }catch(e){$("#tab-"+t).innerHTML=`<div class="empty">${esc(e.message)}</div>`}
 }
 document.addEventListener("click",e=>{

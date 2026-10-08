@@ -238,6 +238,9 @@ calls changed. A document pipeline's seven weeks are under Documents, in which a
 totals, wrong values escape through auto-approval, and one customer's corrections stop reaching
 output. A live copy runs at [docai-eval.vercel.app](https://docai-eval.vercel.app).
 
+The dashboard has an Agents view and a Documents view. Each starts with its core tabs, and
+**Settings** turns on the rest, one by one, for everyone on the team. See [Measures](docs/measures.md#what-you-get).
+
 ## CLI reference
 
 | Command | What it does |

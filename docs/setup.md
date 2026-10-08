@@ -47,7 +47,8 @@ integrations.
 
 ### Part 2: integrate (in the dashboard, no code)
 
-Open the dashboard, paste the key when asked, and go to **Connect**. The details are in
+Open the dashboard, paste the key when asked, and go to **Connect**. **Settings** chooses the
+views (Agents, Documents) and the tabs your team sees; each view starts with its core tabs. The details are in
 [Getting started without code](#getting-started-without-code).
 
 **6. Pick how your data gets in.** Use one choice or several:
