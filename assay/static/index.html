@@ -43,6 +43,9 @@ main{max-width:1280px;margin:0 auto;padding:20px 24px 60px}
 nav.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:20px;overflow-x:auto}
 nav.tabs a{padding:10px 12px;color:var(--muted);font-weight:500;text-decoration:none;border-bottom:2px solid transparent;white-space:nowrap}
 nav.tabs a[aria-current=page]{color:var(--ink);border-bottom-color:var(--accent)}
+nav.tabs .tabgroup{align-self:center;padding:0 4px 0 16px;font:600 10.5px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+nav.tabs .tabgroup:first-child{padding-left:0}
+nav.tabs.nodocs .doc{display:none}
 nav.tabs .badge{font-family:var(--mono);font-size:11px;background:var(--bad);color:#fff;border-radius:999px;padding:1px 6px;margin-left:6px}
 h2{font:600 20px var(--display);margin:0}
 h3{font:600 16px var(--display);margin:0}
@@ -246,7 +249,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
 </head>
 <body>
 <header>
-  <div class="brand"><b>Assay</b><span>Evaluation &amp; observability for document intelligence</span></div>
+  <div class="brand"><b>Assay</b><span>Regression testing for AI apps and agents</span></div>
   <div class="controls">
     <select id="source" aria-label="Source"></select>
     <select id="days" aria-label="Window for manual runs"><option value="1" selected>Last 24 h</option><option value="3">Last 3 days</option><option value="7">Last 7 days</option></select>
@@ -256,21 +259,26 @@ table.lineage td.v-evidence{background:var(--sunk)}
   </div>
 </header>
 <main>
-  <nav class="tabs">
+  <nav class="tabs nodocs">
+    <span class="tabgroup">Tests</span>
     <a href="#overview" data-tab="overview">Overview</a>
-    <a href="#workflow" data-tab="workflow">Workflow</a>
-    <a href="#measures" data-tab="measures">Measures</a>
-    <a href="#cost" data-tab="cost">Cost</a>
-    <a href="#errors" data-tab="errors">Errors</a>
-    <a href="#failures" data-tab="failures">Failures</a>
     <a href="#diff" data-tab="diff">Behavior diff</a>
+    <a href="#failures" data-tab="failures">Failures</a>
+    <a href="#gates" data-tab="gates">Release gates</a>
+    <a href="#prompts" data-tab="prompts">Prompts</a>
+    <span class="tabgroup">Production</span>
     <a href="#agents" data-tab="agents">Agents</a>
     <a href="#learn" data-tab="learn">Learn</a>
     <a href="#review" data-tab="review">Review</a>
-    <a href="#prompts" data-tab="prompts">Prompts</a>
-    <a href="#trace" data-tab="trace">Trace</a>
     <a href="#alerts" data-tab="alerts">Alerts<span class="badge" id="alert-badge" hidden></span></a>
-    <a href="#gates" data-tab="gates">Release gates</a>
+    <span class="tabgroup doc">Documents</span>
+    <a class="doc" href="#summary" data-tab="summary">Summary</a>
+    <a class="doc" href="#workflow" data-tab="workflow">Pipeline</a>
+    <a class="doc" href="#measures" data-tab="measures">Measures</a>
+    <a class="doc" href="#cost" data-tab="cost">Cost</a>
+    <a class="doc" href="#errors" data-tab="errors">Errors</a>
+    <a class="doc" href="#trace" data-tab="trace">Trace</a>
+    <span class="tabgroup">Setup</span>
     <a href="#connect" data-tab="connect">Connect</a>
   </nav>
   <div id="keybox" class="panel keybox" hidden>
@@ -280,6 +288,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
     <button id="savekey" type="button">Use key</button>
   </div>
   <section id="tab-overview" class="stack"></section>
+  <section id="tab-summary" class="stack" hidden></section>
   <section id="tab-workflow" class="stack" hidden></section>
   <section id="tab-measures" class="stack" hidden></section>
   <section id="tab-cost" class="stack" hidden></section>
@@ -383,16 +392,26 @@ function chart(h,m){
 }
 
 /* ---------- sources, refresh ---------- */
+const DEMO_SOURCE="events:demo-agent";  // `assay demo`'s support agent: two test runs, the second regressed
+const GUIDE="https://github.com/tap222/assay-evals/blob/main/docs/getting-started.md";
+// Measure groups only document pipelines fill: the Documents tabs show when one of them has data.
+const DOC_GROUPS=["Accuracy (needs ground truth)","Document quality","Confidence"];
+function showDocTabs(){
+  const docs=!!S.latest&&Object.entries(S.latest.measures||{}).some(([id,m])=>m&&m.status==="measured"&&DOC_GROUPS.includes(S.catalog[id]?.group));
+  $("nav.tabs").classList.toggle("nodocs",!docs);
+}
 async function loadSources(){
   const s=await api("/v1/sources");
   const all=[...new Set([...s.configured,...s.with_results])];
   const keep=new URLSearchParams(location.search).get("source")||store.get("assay-source");  // ?source= for a link to one pipeline
-  $("#source").innerHTML=all.length?all.map(x=>`<option ${x===keep?"selected":""}>${esc(x)}</option>`).join(""):`<option value="">No sources yet</option>`;
+  const pick=all.includes(keep)?keep:all.includes(DEMO_SOURCE)?DEMO_SOURCE:all[0];
+  $("#source").innerHTML=all.length?all.map(x=>`<option ${x===pick?"selected":""}>${esc(x)}</option>`).join(""):`<option value="">No sources yet</option>`;
 }
 async function refresh(){
   if(!src()){renderEmpty();return}
-  try{S.overview=await api(`/v1/overview?${q({source:src()})}`)}catch(e){S.overview=null;renderEmpty(e.message);return}
+  try{S.overview=await api(`/v1/overview?${q({source:src()})}`)}catch(e){S.overview=null;S.latest=null;showDocTabs();renderEmpty(e.message);return}
   try{S.latest=await api(`/v1/runs/latest?${q({source:src()})}`)}catch(e){S.latest=null}
+  showDocTabs();
   const n=S.overview.open_alerts.length;$("#alert-badge").hidden=!n;$("#alert-badge").textContent=n;
   $("#updated").textContent="Last run "+ago(S.overview.run.started_at);
   render();
@@ -400,8 +419,44 @@ async function refresh(){
 function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
-  ["overview","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
-  if(["failures","agents","learn","trace","workflow"].includes(tab()))render();  // drawn from events, no measure run needed
+  ["summary","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
+  if(["overview","failures","diff","agents","learn","trace","workflow"].includes(tab()))render();  // drawn from events, no measure run needed
+}
+
+/* ---------- tests overview ---------- */
+async function renderTests(){
+  const box=$("#tab-overview");
+  const demo=src().startsWith("events:demo")?`<div class="panel flags"><div class="flag"><span class="chip neutral">demo</span><span>Sample data, open to anyone. To test your own app, follow <a href="${GUIDE}" target="_blank" rel="noopener">Getting started</a>: install, two lines in your app, one test.</span></div></div>`:"";
+  const runs=await api(`/v1/evals/runs?${q({source:src()})}`).catch(()=>[]);
+  if(!runs.length){box.innerHTML=demo+`<div class="panel stack"><div><h2>No test runs here yet</h2><p class="sub">Send your pytest runs to this server, and each run is compared with the one before it: what regressed, what changed, and what's flaky.</p></div>
+<pre class="code">pip install assay-server pytest
+export ASSAY_URL=${esc(location.origin)}
+export ASSAY_KEY=ak_...        # an API key from Connect
+pytest --assay --assay-upload tests</pre>
+    <p class="note"><a href="${GUIDE}" target="_blank" rel="noopener">Getting started</a> shows the two lines to add to your app and a first test.</p></div>`;return}
+  const cur=runs[0],prev=runs[1];
+  const label=r=>Object.entries(r.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" · ");
+  const head=`<div class="panel-head"><div><h2>Latest test run</h2><p class="sub"><b class="mono">${esc(cur.run_id)}</b> ${esc(ago(cur.start))}${prev?`, compared with <b class="mono">${esc(prev.run_id)}</b>`:""}</p>${cur.lineage&&Object.keys(cur.lineage).length?`<p class="sub">${label(cur)}</p>`:""}</div><a href="#diff" class="ref">Open behavior diff →</a></div>`;
+  if(!prev){box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">${cur.passed.toLocaleString()} of ${cur.results.toLocaleString()} checks passed. The next run is compared with this one.</p></div>`;return}
+  box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">Comparing…</p></div>`;
+  let d;
+  try{d=await api(`/v1/evals/runs/${encodeURIComponent(cur.run_id)}/diff?${q({source:src(),baseline:prev.run_id})}`)}
+  catch(e){box.querySelector(".note").outerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
+  const k=d.counts,worse=k.regressed+k.new_failures,SEV={HIGH:"bad",MEDIUM:"warn",LOW:"neutral"};
+  const bad=[...d.regressions,...d.new_failures];
+  const row=e=>"field" in e?`<li><b class="mono">${esc(e.name)}</b> ${esc(e.change)} ${e.severity?`<span class="chip ${SEV[e.severity]}">${esc(e.severity)}</span>`:""}</li>`
+    :`<li><b class="mono">${esc(e.name)}</b> ${e.severity?`<span class="chip ${SEV[e.severity]}">${esc(e.severity)}</span>`:""}
+    ${e.flow_change?`<div class="mono ref">Before: ${esc((e.expected||[]).join(" → ")||"(no calls)")}</div><div class="mono">Now:&nbsp;&nbsp;&nbsp; ${esc((e.actual||[]).join(" → ")||"(no calls)")}</div>`:""}
+    ${(e.reasons||[]).slice(0,1).map(r=>`<div>${esc(r)}</div>`).join("")}</li>`;
+  box.innerHTML=demo+`<div class="panel stack">${head}</div>
+  <div class="strip">
+    <div class="${worse?"bad":"good"}"><b>${worse.toLocaleString()}</b><span>regressed</span></div>
+    <div class="${k.changed?"warn":"good"}"><b>${k.changed.toLocaleString()}</b><span>changed, still passing</span></div>
+    <div class="${k.flaky?"warn":"good"}"><b>${k.flaky.toLocaleString()}</b><span>flaky</span></div>
+    <div><b>${k.unchanged.toLocaleString()}</b><span>unchanged of ${d.scenarios.toLocaleString()}</span></div>
+  </div>
+  <div class="panel stack"><div class="panel-head"><h2>${worse?"What got worse":"Nothing got worse"}</h2>${bad.length>5?`<a href="#diff" class="ref">All ${bad.length} →</a>`:""}</div>
+    ${bad.length?`<ol class="stack">${bad.slice(0,5).map(row).join("")}</ol>`:`<p class="note">Every scenario passes as it did in ${esc(prev.run_id)}${k.changed?`, though ${k.changed} took a different path`:""}.</p>`}</div>`;
 }
 
 /* ---------- overview ---------- */
@@ -437,7 +492,7 @@ function renderOverview(){
   const anomalies=open.filter(a=>a.kind==="anomaly"||a.kind==="regression"||a.kind==="contract"),sloAlerts=open.filter(a=>a.kind==="slo");
   const sched=o.scheduler;
   const learning=o.run_count<4?`<div class="panel flags"><div class="flag"><span class="chip warn">learning</span>Alerts compare each slice with its recent past and need 4 runs; this source has ${o.run_count}. <a href="#connect">Backfill history</a> to get baselines now.</div></div>`:"";
-  $("#tab-overview").innerHTML=learning+`
+  $("#tab-summary").innerHTML=learning+`
   <div class="panel" id="ov-flow"><div class="panel-head"><h2>Pipeline</h2><a href="#workflow" class="ref">Open workflow →</a></div><p class="note">Loading…</p></div>
   <div class="strip">
     <div class="${anomalies.length?"bad":"good"}"><b>${anomalies.length}</b><span>open alerts</span></div>
@@ -1967,7 +2022,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","workflow","measures","cost","errors","failures","diff","agents","learn","review","prompts","trace","alerts","gates","connect"];
+const TABS=["overview","summary","workflow","measures","cost","errors","failures","diff","agents","learn","review","prompts","trace","alerts","gates","connect"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:"overview"}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -1979,9 +2034,10 @@ async function render(){
   if(t==="workflow")S.wfStep=hp[1]?decodeURIComponent(hp[1]):null;
   document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.tab===t)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
-  if(!S.overview&&!["gates","connect","failures","diff","agents","learn","review","trace","workflow"].includes(t))return;  // these don't need a measure run
+  if(!S.overview&&!["overview","gates","connect","failures","diff","agents","learn","review","trace","workflow"].includes(t))return;  // these don't need a measure run
   try{
-    if(t==="overview"){renderOverview();overviewFlow()}
+    if(t==="overview")await renderTests();
+    if(t==="summary"){renderOverview();overviewFlow()}
     if(t==="workflow")await renderWorkflow();
     if(t==="measures")await (S.measure?renderMeasureDetail():renderMeasureGrid());
     if(t==="cost")await renderCost();
@@ -2028,7 +2084,7 @@ async function boot(){
 }
 boot();
 // Keep the overview live without a manual refresh.
-setInterval(()=>{if(!document.hidden&&tab()==="overview"&&src())refresh()},60000);
+setInterval(()=>{if(!document.hidden&&["overview","summary"].includes(tab())&&src())refresh()},60000);
 </script>
 </body>
 </html>

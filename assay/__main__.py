@@ -13,7 +13,7 @@ from assay.config import Settings
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="assay", description="Evaluation and observability for document-intelligence pipelines.")
+    p = argparse.ArgumentParser(prog="assay", description="Regression testing for AI apps and agents: what changed, and whether it's real.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="Run the API and dashboard")

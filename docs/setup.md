@@ -85,7 +85,8 @@ the past month so alerts work from day one.
 
 | Where | What you do |
 |---|---|
-| **Overview** and **Alerts** | see what's broken right now |
+| **Overview** and **Behavior diff** | see whether the latest test run got worse, and what changed |
+| **Alerts**, and **Summary** for a document pipeline | see what's broken right now |
 | **Failures** | see a test run's failures grouped into causes, and accept intended changes |
 | **Learn** | review draft test cases built from production failures, and approve them into a suite |
 | **Agents** and **Trace** | open any run step by step |
