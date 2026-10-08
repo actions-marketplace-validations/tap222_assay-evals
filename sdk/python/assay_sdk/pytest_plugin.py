@@ -271,7 +271,7 @@ def _finish(session, s, exitstatus):
         cfg = {**cfg, "judge": {**cfg["judge"], "enabled": True}}
     code, text = local.finish(session.config.rootpath, cfg, s["run_id"], 1, [],
                               session.config.getoption("assay_baseline"))
-    if session.config.getoption("assay_upload") and code != 2:
+    if local.upload_wanted(session.config.getoption("assay_upload"), s["url"]) and code != 2:
         from io import StringIO
         from contextlib import redirect_stdout, redirect_stderr
         buf = StringIO()

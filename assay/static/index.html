@@ -291,6 +291,7 @@ table.lineage td.v-evidence{background:var(--sunk)}
   <section id="tab-gates" class="stack" hidden></section>
   <section id="tab-connect" class="stack" hidden></section>
   <section id="tab-settings" class="stack" hidden></section>
+  <section id="tab-projects" class="stack" hidden></section>
 </main>
 <script>
 const $=s=>document.querySelector(s);
@@ -404,7 +405,7 @@ function renderEmpty(msg){
   const html=src()?`<div class="empty">No runs yet for <b>${esc(src())}</b>. <a href="#connect">Open Connect</a> to see what its data can answer and backfill history, or press “Run now”.</div>`
     :`<div class="empty">${msg?esc(msg)+"<br><br>":""}Nothing connected yet. <a href="#connect">Connect your pipeline</a>, or load the demo with <code>python -m assay demo</code>.</div>`;
   ["summary","measures","cost","errors","prompts","trace","alerts"].forEach(t=>$("#tab-"+t).innerHTML=html);
-  if(["overview","failures","diff","agents","learn","trace","workflow","gates","connect","settings"].includes(tab()))render();  // drawn from events, no measure run needed
+  if(["overview","failures","diff","agents","learn","trace","workflow","gates","projects","connect","settings"].includes(tab()))render();  // drawn from events, no measure run needed
 }
 
 /* ---------- views, tabs and settings ---------- */
@@ -415,7 +416,7 @@ const TAB_INFO={overview:["Overview","The latest test run against the one before
   alerts:["Alerts","Open and resolved alerts"],summary:["Summary","What's broken in the pipeline right now"],
   workflow:["Pipeline","The pipeline as a graph, with each step's health"],measures:["Measures","Each measure over time, with SLOs"],
   cost:["Cost","Cost per document, by component and model"],errors:["Errors","Where reported wrong values start"],
-  trace:["Trace","One document through every step"],connect:["Connect",""],settings:["Settings",""]};
+  trace:["Trace","One document through every step"],projects:["All projects",""],connect:["Connect",""],settings:["Settings",""]};
 const VIEW_INFO={agents:"Test runs, agent runs and production review.",documents:"A document pipeline's measures, cost and traces."};
 const viewsKey=()=>"assay-views:"+src();
 async function loadViews(){S.views=src()?await api(`/v1/views?${q({source:src()})}`).catch(()=>null):null}
@@ -434,7 +435,7 @@ function buildNav(){
   const on=enabledViews(),cur=currentView(),sw=$("#viewswitch");
   sw.hidden=on.length<2;
   sw.innerHTML=on.map(v=>`<button type="button" data-v="${v}" aria-pressed="${v===cur}">${v==="agents"?"Agents":"Documents"}</button>`).join("");
-  $("#tabs").innerHTML=[...viewTabs(cur),"connect","settings"].map(t=>`${t==="connect"?`<span class="spacer"></span>`:""}<a href="#${t}" data-tab="${t}">${esc(TAB_INFO[t][0])}${t==="alerts"?`<span class="badge" id="alert-badge"${S.alertCount?"":" hidden"}>${S.alertCount||""}</span>`:""}</a>`).join("");
+  $("#tabs").innerHTML=[...viewTabs(cur),"projects","connect","settings"].map(t=>`${t==="projects"?`<span class="spacer"></span>`:""}<a href="#${t}" data-tab="${t}">${esc(TAB_INFO[t][0])}${t==="alerts"?`<span class="badge" id="alert-badge"${S.alertCount?"":" hidden"}>${S.alertCount||""}</span>`:""}</a>`).join("");
   markTab();
 }
 $("#viewswitch").onclick=e=>{const b=e.target.closest("[data-v]");if(!b)return;
@@ -477,6 +478,38 @@ function renderSettings(){
       buildNav();renderSettings();msg("Back to the defaults.");
     }catch(e){msg(e.message)}
   };
+}
+
+/* ---------- all projects ---------- */
+// Every repository that sends its test runs here, filed under its name: its latest run against the one before.
+async function renderProjects(){
+  const box=$("#tab-projects");
+  let list;
+  try{list=await api("/v1/projects")}catch(e){box.innerHTML=`<div class="empty">${esc(e.message)}</div>`;return}
+  if(!list.length){box.innerHTML=`<div class="panel stack"><div><h2>All projects</h2><p class="sub">Each repository that sends its test runs here gets a row, under its own name.</p></div>
+<pre class="code">export ASSAY_URL=${esc(location.origin)}
+export ASSAY_UPLOAD=1          # every run is sent, from any repository
+pytest --assay tests</pre></div>`;return}
+  const worse=x=>x.counts?x.counts.regressed+x.counts.new_failures:0,bad=list.filter(worse).length;
+  list=[...list.filter(worse),...list.filter(x=>!worse(x))];  // what regressed first, then by latest run
+  const row=x=>{const k=x.counts,L=x.latest,w=worse(x);
+    const state=!k?`<span class="chip neutral">first run</span>`:w?`<span class="chip bad">${w} regressed</span>`:`<span class="chip good">nothing worse</span>`;
+    return `<tr class="click" data-project="${esc(x.source)}"><td><b class="mono">${esc(x.project)}</b></td><td>${state}</td>
+      <td class="num">${L.passed.toLocaleString()} / ${L.results.toLocaleString()}</td><td class="num">${k?k.changed:"—"}</td>
+      <td class="num">${k?k.flaky:"—"}</td><td class="num">${x.runs}</td><td class="ref">${esc(ago(L.start))}</td></tr>`};
+  box.innerHTML=`<div class="strip">
+    <div><b>${list.length}</b><span>project${list.length>1?"s":""}</span></div>
+    <div class="${bad?"bad":"good"}"><b>${bad}</b><span>with a regression in its latest run</span></div>
+    <div><b>${list.reduce((n,x)=>n+x.runs,0).toLocaleString()}</b><span>test runs</span></div>
+    <div><b style="font-size:20px;padding-top:6px">${esc(ago(list[0].latest.start))}</b><span>latest run, ${esc(list[0].project)}</span></div>
+  </div>
+  <div class="panel"><div class="panel-head"><div><h2>All projects</h2><p class="sub">Each repository's latest test run against the one before it. Open one to see what changed.</p></div></div>
+    <div class="scroll"><table><tr><th>Project</th><th>Latest run</th><th class="num">Checks passed</th><th class="num">Changed</th><th class="num">Flaky</th><th class="num">Runs</th><th>When</th></tr>
+    ${list.map(row).join("")}</table></div></div>`;
+  box.querySelectorAll("[data-project]").forEach(r=>r.onclick=()=>{
+    const s=r.dataset.project,sel=$("#source");
+    if(![...sel.options].some(o=>o.value===s))sel.insertAdjacentHTML("beforeend",`<option>${esc(s)}</option>`);
+    sel.value=s;store.set("assay-source",s);store.set("assay-view","agents");location.hash="overview";refresh()});
 }
 
 /* ---------- tests overview ---------- */
@@ -2080,7 +2113,7 @@ async function renderGates(){
 }
 
 /* ---------- routing ---------- */
-const TABS=["overview","summary","workflow","measures","cost","errors","failures","diff","agents","learn","review","prompts","trace","alerts","gates","connect","settings"];
+const TABS=["overview","summary","workflow","measures","cost","errors","failures","diff","agents","learn","review","prompts","trace","alerts","gates","projects","connect","settings"];
 // Hash is "#<tab>" or "#measures/<measure_id>" (the link alert notifications use).
 function tab(){const h=location.hash.slice(1).split("/")[0];return TABS.includes(h)?h:viewTabs(currentView())[0]}
 function hashMeasure(){const p=location.hash.slice(1).split("/");return p[0]==="measures"&&p[1]?decodeURIComponent(p[1]):null}
@@ -2095,7 +2128,7 @@ async function render(){
   if(owner&&!viewTabs(currentView()).includes(t)){store.set("assay-view",owner);buildNav()}
   markTab();
   TABS.forEach(x=>$("#tab-"+x).hidden=x!==t);
-  if(!S.overview&&!["overview","gates","connect","settings","failures","diff","agents","learn","review","trace","workflow"].includes(t))return;  // these don't need a measure run
+  if(!S.overview&&!["overview","projects","gates","connect","settings","failures","diff","agents","learn","review","trace","workflow"].includes(t))return;  // these don't need a measure run
   try{
     if(t==="overview")await renderTests();
     if(t==="summary"){renderOverview();overviewFlow()}
@@ -2114,6 +2147,7 @@ async function render(){
     if(t==="gates")await renderGates();
     if(t==="connect")await renderConnect();
     if(t==="settings")renderSettings();
+    if(t==="projects")await renderProjects();
   }catch(e){$("#tab-"+t).innerHTML=`<div class="empty">${esc(e.message)}</div>`}
 }
 document.addEventListener("click",e=>{
