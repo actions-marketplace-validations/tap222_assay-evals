@@ -61,6 +61,34 @@ With one task collapsed from 8/8 to 0/8, the run is blocked every time, among 7 
 - **"Not proven worse" isn't "proven fine".** When the interval still reaches past the
   tolerance, the reasons say so ("could be lower by up to 6%"), without blocking.
 
+## Is it the AI or the judge?
+
+A check graded by an LLM judge can vary for two reasons: the AI answered differently, or the
+judge gave a similar answer a different verdict. Repeated attempts alone can't separate them.
+Ask the judge again about the same answer, with `evaluate(..., rejudge=3)`, and Assay can:
+
+```
+? 1 check with an unstable judge: the same answer, judged again, got another verdict
+  test_refund_tone  helpful  100% → 50%, verdict flipped on 3 of 8 answers judged again (could be worse)
+  More attempts of the AI won't settle these. Tighten the rubric, check it deterministically, or `assay calibrate` the judge.
+```
+
+A check is **judge unstable** when it would be flaky or need reruns, and the judge split on at
+least one answer it was asked about more than once. Each attempt's result is the majority of
+its judgements, so a judge that wavers on a borderline answer moves the pass rate less too.
+
+| What happened | Result | Exit |
+|---|---|---|
+| Varies, no worse than chance, and the judge split | judge unstable, not blocking | 0 |
+| Could be worse, and the judge split | judge unstable, inconclusive: fix the judge, then rerun | 3 (6 for pytest) |
+| Got worse beyond chance, the judge split or not | a regression | 1 |
+
+Nothing is loosened: a check that could be worse is still inconclusive, and a collapse (8/8 →
+0/8) is still a regression. What changes is the advice. "Rerun with more attempts" doesn't help
+when the judge is what varies. A judge that agreed with itself every time leaves the check
+flaky, or needing reruns, as before. `assay calibrate` measures a judge's consistency on a
+labeled set ahead of time; `rejudge` measures it on this run's answers.
+
 ## Two cases that aren't left to chance
 
 - **A drop that follows the model.** If a check fails on exactly the model a call was routed

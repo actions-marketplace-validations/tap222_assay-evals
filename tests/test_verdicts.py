@@ -44,7 +44,7 @@ def test_each_check_gets_one_verdict(app):
             ev.append(check(i, "r", c, "pass"))
     assert app.post("/v1/ingest", json=ev, headers=H).status_code == 200
     out = app.get("/v1/evals/runs/r/verdicts", params=SRC).json()
-    assert out["counts"] == {"PASS": 14, "FAIL": 1, "FLAKY": 1, "INCONCLUSIVE": 0, "INVALID": 0, "TIMEOUT": 0,
+    assert out["counts"] == {"PASS": 14, "FAIL": 1, "FLAKY": 1, "INCONCLUSIVE": 0, "JUDGE_UNSTABLE": 0, "INVALID": 0, "TIMEOUT": 0,
                              "RATE_LIMITED": 0, "EVALUATOR_ERROR": 1, "INFRA_ERROR": 1, "MISSING": 2}
     by = {(c["case_id"], c["evaluator"]): c for c in out["checks"]}
     assert by[("c1", "helpful@1")]["verdict"] == "INFRA_ERROR" and "503" in by[("c1", "helpful@1")]["reason"]
@@ -133,3 +133,17 @@ def test_the_same_judgement_sent_twice_counts_once(app):
     app.post("/v1/ingest", json=[judged(3, "fail", 1, attempt=1), judged(4, "pass", 5)], headers=H)
     c = app.get("/v1/evals/runs/r/verdicts", params=SRC).json()["checks"]
     assert [(x["verdict"], x["attempts"]) for x in c] == [("EVALUATOR_ERROR", 3)]
+
+
+def test_a_judge_that_disagrees_with_itself_gets_its_own_verdict(app):
+    def voted(i, run, status, passed):
+        return check(i, run, "c0", status, attempt=i) | {"judgements": 3, "judgements_passed": passed}
+    base = [check(i, "b", "c0", "pass", attempt=i) for i in range(8)]
+    now = [voted(i, "n", "pass", 2 if i < 2 else 3) for i in range(7)] + [voted(7, "n", "fail", 1)]
+    assert app.post("/v1/ingest", json=base + now, headers=H).status_code == 200
+    out = app.get("/v1/evals/runs/n/verdicts", params={**SRC, "baseline": "b"}).json()
+    c = next(c for c in out["checks"] if c["case_id"] == "c0")
+    assert out["counts"]["JUDGE_UNSTABLE"] == 1 and c["verdict"] == "JUDGE_UNSTABLE"
+    assert c["reason"] == "passed 7 of 8 attempts; judged again, the same answer got another verdict on 3 of 8"
+    bad = check(0, "x", "c0", "pass") | {"judgements": 2, "judgements_passed": 3}
+    assert app.post("/v1/ingest", json=[bad], headers=H).status_code == 422

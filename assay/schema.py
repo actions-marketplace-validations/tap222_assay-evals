@@ -225,6 +225,8 @@ class Check(_E):
     judge_prompt: Optional[str] = Field(None, max_length=192, description="The judge's prompt or rubric, as id@version: changing it makes a new judge, like its model")
     duration_ms: Optional[float] = Field(None, ge=0, description="How long the evaluator took: whether it could run in the request path")
     cost_usd: Optional[float] = Field(None, ge=0, description="What the evaluator cost to run (a judge's model call)")
+    judgements: Optional[int] = Field(None, ge=1, description="How many times the judge was asked about this same output (evaluate(rejudge=))")
+    judgements_passed: Optional[int] = Field(None, ge=0, description="How many of those judgements passed it: a split vote is the judge disagreeing with itself, not the AI")
     category: Optional[str] = Field(None, max_length=64, pattern=r"^[A-Za-z0-9 _./-]+$", description="fail: the kind of failure, as the evaluator names it (grounding, policy_refusal, ...). An acknowledged failure wakes when it changes")
     run_id: Optional[str] = Field(None, max_length=128, description="The run that produced the output")
     field: Optional[str] = Field(None, max_length=256)
@@ -244,6 +246,8 @@ class Check(_E):
             raise ValueError("error_kind is for status error: a result that couldn't be judged")
         if self.score is not None and (self.score != self.score or abs(self.score) == float("inf")):
             raise ValueError("score is NaN or infinite: send status error with error_kind invalid instead")
+        if self.judgements_passed is not None and (self.judgements is None or self.judgements_passed > self.judgements):
+            raise ValueError("judgements_passed needs judgements, and can't be more than it")
         return self
 
 
@@ -433,6 +437,7 @@ def ingest(engine: Engine, events: List[BaseModel], tenant: str) -> Dict[str, in
                                        "tries": e.tries, "raw_output": e.raw_output, "category": e.category,
                                        "judge_model": e.judge_model, "judge_prompt": e.judge_prompt,
                                        "duration_ms": e.duration_ms, "cost_usd": e.cost_usd,
+                                       "judgements": e.judgements, "judgements_passed": e.judgements_passed,
                                        "lineage": e.version or (known.get(e.run_id) or {}).get("version")})
             elif isinstance(e, Correction):
                 rows["errors"].append({"tenant": tenant, "error_id": e.id, "document_id": e.run_id, "field": e.field,

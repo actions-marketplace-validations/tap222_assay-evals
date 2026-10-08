@@ -225,6 +225,8 @@ eval_results = Table(
     Column("judge_prompt", String(192)),  # the judge's prompt or rubric, id@version
     Column("duration_ms", Float),  # how long the evaluator took (assay/guardrails.py)
     Column("cost_usd", Float),  # what the evaluator cost to run
+    Column("judgements", Integer),  # the same output judged this many times (evaluate(rejudge=))
+    Column("judgements_passed", Integer),  # and passed by this many: a split vote is the judge, not the AI
 )
 
 # --- Agents: one trajectory per run of an agent on a task, its steps, and what a case expects ---

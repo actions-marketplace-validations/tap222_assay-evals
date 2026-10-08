@@ -143,6 +143,8 @@ class EvalResultEvent(Event):
     raw_output: Optional[str] = Field(None, max_length=16384, description="What the evaluator returned, as it did")
     judge_model: Optional[str] = Field(None, max_length=128, description="The model that judged: a result judged by another model isn't compared with its baseline as like for like")
     judge_prompt: Optional[str] = Field(None, max_length=192, description="The judge's prompt or rubric, as id@version: changing it makes a new judge, like its model")
+    judgements: Optional[int] = Field(None, ge=1, description="How many times the judge was asked about this same output")
+    judgements_passed: Optional[int] = Field(None, ge=0, description="How many of those judgements passed it: a split vote is the judge disagreeing with itself, not the AI")
     category: Optional[str] = Field(None, max_length=64, pattern=r"^[A-Za-z0-9 _./-]+$", description="fail: the kind of failure, as the evaluator names it (grounding, policy_refusal, ...). An acknowledged failure wakes when it changes")
 
     @model_validator(mode="after")
@@ -151,6 +153,8 @@ class EvalResultEvent(Event):
             raise ValueError("error_kind is for status error: a result that couldn't be judged")
         if self.score is not None and (self.score != self.score or abs(self.score) == float("inf")):
             raise ValueError("score is NaN or infinite: send status error with error_kind invalid instead")
+        if self.judgements_passed is not None and (self.judgements is None or self.judgements_passed > self.judgements):
+            raise ValueError("judgements_passed needs judgements, and can't be more than it")
         return self
 
 

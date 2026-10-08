@@ -1705,7 +1705,7 @@ async function renderFailures(){
 }
 const CALL={advance:["good","Advance"],rerun:["warn","Rerun"],hold:["warn","Hold"],rollback:["bad","Roll back"]};
 // One verdict per check (assay/verdicts.py): only FAIL is about the AI.
-const EVAL_VERDICT=[["PASS","Passed","good"],["FAIL","Failed","bad"],["FLAKY","Flaky","warn"],["INCONCLUSIVE","Inconclusive","warn"],
+const EVAL_VERDICT=[["PASS","Passed","good"],["FAIL","Failed","bad"],["FLAKY","Flaky","warn"],["INCONCLUSIVE","Inconclusive","warn"],["JUDGE_UNSTABLE","Judge unstable","warn"],
   ["INVALID","Invalid result","neutral"],["TIMEOUT","Timed out","neutral"],["RATE_LIMITED","Rate limited","neutral"],
   ["EVALUATOR_ERROR","Evaluator error","neutral"],["INFRA_ERROR","Infra error","neutral"],["MISSING","Missing","neutral"]];
 const verdictRow=v=>v?`<div class="tiles">${EVAL_VERDICT.map(([k,l,c])=>`<div class="tile"><b>${(v[k]||0).toLocaleString()}</b><span><span class="chip ${c}">${l}</span></span></div>`).join("")}</div>

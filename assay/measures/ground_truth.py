@@ -302,6 +302,27 @@ class SupersededValues(_AwaitingTruth):
                        lambda g: (sum(r["raw"].get("outcome") == "escaped" for r in g), len(g)))
 
 
+class PrefillErrors(_AwaitingTruth):
+    """From forms a model prefilled and users then submitted (assay_sdk.documents.user_edits): of the
+    fields that could be sorted, the share the model got wrong. A field the user reformatted, or
+    changed although the document backs the prefill, is the user's choice, not an error, so this is
+    lower than the share of fields edited. Edits that couldn't be sorted are left out."""
+    id = "prefill_error_rate"
+    name = "Prefill errors"
+    question = "Of the values a model prefilled, how many did users correct because they were wrong?"
+    higher_is_better = False
+    dimensions = ("segment", "document_type", "field")
+    waiting_on = "prefilled forms and what users submitted (assay_sdk.documents.user_edits)."
+
+    def compute(self, source, window: Window) -> MeasureOutput:
+        rows = source.document_checks(window, "user_edit", "assay.edits@1") \
+            if hasattr(source, "document_checks") else None
+        if rows is None:
+            return super().compute(source, window)
+        from assay.measures.documents import _slices
+        return _slices(self.id, rows, self.dimensions, lambda g: (sum(not r["passed"] for r in g), len(g)))
+
+
 class EscapeRate(_AwaitingTruth):
     """From spot checks of published output (assay_sdk.documents.spot_check): the share of values
     checked that were wrong. Everything published has cleared automation and, where it applied,

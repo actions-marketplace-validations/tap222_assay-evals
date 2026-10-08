@@ -543,6 +543,77 @@ def test_spot_checks_of_published_output_give_the_escape_rate(project, monkeypat
     assert by_path == {"auto-approved": 2 / 3, "reviewed": 0.0}  # auto-approval lets more through
 
 
+
+JOB = "Senior Data Engineer, Munich. Salary 70,000 to 90,000 EUR. Start 1 December 2026. Work with Python and AWS."
+
+
+def test_an_edit_is_sorted_into_the_users_choice_or_the_models_error():
+    from assay_sdk.documents import sort_edit
+    kind = lambda *a, **k: sort_edit(*a, **k).kind
+    assert kind("title", "Senior Data Engineer", "Senior Data Engineer", JOB) == "kept"
+    assert kind("salary_min", "70000", "70,000", JOB) == "reformatted"  # the same number
+    assert kind("tags", ["python", "aws"], ["AWS", "Python"], JOB) == "reformatted"
+    assert kind("location", "Berlin", "Munich", JOB) == "model_error"  # the document says Munich
+    assert kind("start", None, "1 December 2026", JOB) == "model_error"  # missed: the document has it
+    assert kind("title", "Senior Data Engineer", "Staff Engineer", JOB) == "preference"  # the document backs the prefill
+    assert kind("location", "Munich", "Remote", JOB) == "preference"
+    # "IT" isn't in "with": whole words only.
+    assert kind("category", "IT", "Engineering", "Work with our team.") == "unsure"
+    # Neither value in the document, or no document: unsure without a judge.
+    s = sort_edit("category", "Engineering", "Analytics", JOB)
+    assert s.kind == "unsure" and s.model_wrong is None and "no judge" in s.reason
+    assert kind("location", "Berlin", "Munich") == "unsure"
+
+
+def test_a_judge_sorts_what_the_document_cant():
+    from assay_sdk.documents import sort_edit
+    asked = []
+
+    def judge(field, prefilled, submitted, text):
+        asked.append(field)
+        return {"passed": field != "category", "reason": f"{field}: judged"}
+    assert sort_edit("category", "Engineering", "Analytics", JOB, judge=judge).kind == "model_error"
+    s = sort_edit("seniority", "Senior", "Lead", "no such words", judge=judge)
+    assert (s.kind, s.by, s.reason) == ("preference", "judge", "seniority: judged")
+    # The document decides first: the judge isn't asked, and isn't paid for.
+    assert sort_edit("location", "Berlin", "Munich", JOB, judge=judge).by == "rule"
+    assert asked == ["category", "seniority"]
+    s = sort_edit("category", "a", "b", JOB, judge=lambda *a: "not a verdict")
+    assert s.kind == "unsure" and "couldn't answer" in s.reason
+
+
+def test_user_edits_give_corrections_only_for_model_errors_and_the_prefill_error_rate(project, monkeypatch):
+    import json as json_
+    import assay_sdk as assay
+    from assay import local, store
+    from assay.measures.ground_truth import PrefillErrors
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    from assay_sdk.documents import user_edits
+    path = project / "edits.jsonl"
+    monkeypatch.setenv("ASSAY_PATH", str(path))
+    assay.init()
+    out = user_edits("job-1", {"title": "Senior Data Engineer", "location": "Berlin", "salary_min": "70000",
+                               "category": "Engineering"},
+                     {"title": "Staff Engineer", "location": "Munich", "salary_min": "70,000", "category": "Analytics"},
+                     text=JOB, reporter="recruiter-7")
+    assert {k: v.kind for k, v in out.items()} == {"title": "preference", "location": "model_error",
+                                                   "salary_min": "reformatted", "category": "unsure"}
+    assay.shutdown()
+    events = [json_.loads(x) for x in path.read_text().splitlines()]
+    fixes = [e for e in events if e["type"] == "correction"]
+    assert [(e["field"], e["expected"], e["observed"], e["kind"]) for e in fixes] == \
+        [("location", "Munich", "Berlin", "wrong")]  # the user's choice of title is never a label
+    engine = store.make_engine("sqlite://")
+    store.metadata.create_all(engine)
+    assert local.load_file(engine, str(path), "t")[1] == []
+    now = datetime.utcnow()
+    m = PrefillErrors().compute(EventsSource(engine, "t"), Window(now - timedelta(days=1), now + timedelta(days=1)))
+    # Of the three fields that could be sorted, one was the model's error; 3 of 4 were edited.
+    assert m.status == "measured" and round(m.overall.value, 3) == 0.333
+    assert {r.slice_value: r.value for r in m.results if r.dimension == "field"}["location"] == 1.0
+
+
 DASH = '''
 import os
 from assay_sdk.documents import score_ocr, score_locations, score_table
@@ -1567,3 +1638,53 @@ def test_slices_worse_beyond_chance_are_corrected_for_how_many_there_are():
     gained = slice_changes({"a": {"zero_errors": 1.0, "cases": {"c0": True}}},
                            {"a": {"zero_errors": 0.0, "cases": {"c0": False}}})
     assert gained["a"]["p"] == 1.0 and not gained["a"]["worse"]
+
+
+# ---------- web addresses ----------
+
+from assay_sdk.documents import Url, appears_in, infer_schema  # noqa: E402
+
+
+def test_a_web_address_is_compared_by_where_it_points():
+    same = lambda spec, a, b: score_document(None, {"u": a}, {"u": b}, {"u": spec}).fields["u"].passed
+    u = Url()
+    assert same(u, "https://www.Acme.com/", "acme.com")  # scheme, www, case, trailing slash
+    assert same(u, "http://acme.com:80/team/", "https://acme.com/team#people")  # default port, fragment
+    assert same(u, "acme.com/jobs?utm_source=clutch&b=2&a=1&gclid=x", "acme.com/jobs?a=1&b=2")  # tracking, order
+    assert not same(u, "acme.com/Team", "acme.com/team")  # a path keeps its case
+    assert not same(u, "acme.com/about", "acme.com") and same(Url(site_only=True), "acme.com/about", "www.acme.com")
+    assert not same(u, "acme.com", "acme.co")
+    f = score_document(None, {"u": "acme.com"}, {"u": "acme.com/about"}, {"u": u}).fields["u"]
+    assert f.kind == "wrong" and "the same site, another page" in f.note
+    assert score_document(None, {"u": "acme.com"}, {"u": "not a url at all"}, {"u": u}).fields["u"].kind == "wrong"
+
+
+def test_a_redirect_link_is_caught_or_read_through():
+    wrapped = "https://r.clutch.co/redirect?provider=1&u=https%3A%2F%2Fwww.acme.com%2F%3Futm_source%3Dclutch"
+    f = score_document(None, {"u": "acme.com"}, {"u": wrapped}, {"u": Url()}).fields["u"]
+    assert not f.passed and "a tracking or redirect link around the right address" in f.note  # the directory's link
+    assert score_document(None, {"u": "acme.com"}, {"u": wrapped}, {"u": Url(unwrap=True)}).fields["u"].passed
+
+
+def test_addresses_are_recognised_without_a_schema_and_found_in_text():
+    assert {k: type(v).__name__ for k, v in infer_schema(
+        {"a": "https://x.io", "b": "www.x.io", "c": "acme.co.uk/team", "d": "report.pdf", "e": "Jane Doe"}).items()} \
+        == {"a": "Url", "b": "Url", "c": "Url", "d": "Text", "e": "Text"}
+    assert score_document(None, {"site": "https://acme.com"}, {"site": "www.acme.com/"}).all_correct  # no schema needed
+    text = "Acme builds data tools. Visit https://www.acme.com/ or email us. Partner: acme.company"
+    ok, _ = appears_in(text, {"site": Url()}).fn({"site": "acme.com"})
+    gone, why = appears_in(text, {"site": Url()}).fn({"site": "acme.co"})
+    assert ok and not gone and "acme.co" in why  # "acme.co" isn't in "acme.company"
+
+
+def test_listings_split_across_chunks_are_matched_by_website():
+    # The chunk-overlap bug: www and trailing slashes differ between chunks, one listing has no website,
+    # one is extracted twice by the overlap, and one fell between chunks.
+    spec = {"companies": LineItems({"name": Text(), "website": Url()}, key="name")}
+    truth = [{"name": "Acme", "website": "https://acme.com"}, {"name": "Bolt Labs", "website": "boltlabs.io"},
+             {"name": "Cora", "website": None}, {"name": "Delta", "website": "delta.dev"}]
+    got = [{"name": "Acme", "website": "www.acme.com/"}, {"name": "Bolt Labs", "website": "https://boltlabs.io/"},
+           {"name": "Bolt Labs", "website": "boltlabs.io"}, {"name": "Cora", "website": ""}]
+    f = score_document(None, {"companies": truth}, {"companies": got}, spec).fields["companies"]
+    assert f.counts["rows_duplicated"] == 1 and "1 row(s) missing" in f.note and "duplicated" in f.note
+    assert f.counts["tp"] == 3  # Acme, Bolt Labs and Cora right, whatever their addresses looked like

@@ -8,6 +8,10 @@
     result.category          # the kind of failure, when the judge names one ("category" in its verdict)
     result.judge_model       # which model judged: from its Response, or judge_model=
 
+rejudge=3 asks the judge about the same output three times and keeps the majority (a tie keeps
+the first verdict). result.votes is (passed, judged); recorded with the check, a split vote tells
+a judge that disagrees with itself apart from an AI that answered differently (assay/flaky.py).
+
 judge_model and judge_prompt ("rubric@3") say which judge this was; a Judge's answer gives its
 model on its own. They're recorded with the check, so a result judged by another model or
 prompt isn't compared with its baseline as if only the AI had changed.
@@ -59,6 +63,7 @@ class Result:
     category: Optional[str] = None  # the judge's name for the kind of failure (grounding, policy_refusal, ...)
     judge_model: Optional[str] = None  # the model that judged
     judge_prompt: Optional[str] = None  # the judge's prompt or rubric, id@version
+    votes: Optional[Tuple[int, int]] = None  # with rejudge: (passed, judged) over the same output
 
     @property
     def valid(self) -> bool:
@@ -215,6 +220,7 @@ def _record(result: Result, run, field: Optional[str], evaluator: Optional[str],
               error_kind=None if result.valid else result.error_kind, tries=result.attempts, raw_output=raw,
               **({"category": result.category} if result.category else {}),
               **{k: getattr(result, k) for k in ("judge_model", "judge_prompt") if getattr(result, k)},
+              **({"judgements": result.votes[1], "judgements_passed": result.votes[0]} if result.votes else {}),
               **{k: v for k, v in (spent or {}).items() if v is not None})
 
 
@@ -258,7 +264,7 @@ def model_of(judge) -> Optional[str]:
 
 
 OWN = ("schema", "threshold", "score_range", "retries", "backoff", "run", "field", "evaluator", "inputs",
-       "judge_model", "judge_prompt")
+       "judge_model", "judge_prompt", "rejudge")
 
 
 def _collisions(judge: Callable, given: Dict[str, Any]) -> None:
@@ -274,15 +280,28 @@ def _collisions(judge: Callable, given: Dict[str, Any]) -> None:
                       f"to the judge, use judge_kwargs={{...}}.", stacklevel=3)
 
 
-def evaluate(judge: Callable, *args, schema: Optional[dict] = None, threshold: Optional[float] = 0.5,
-             score_range: Tuple[float, float] = (0.0, 1.0), retries: int = 2, backoff: float = 1.0,
-             run=None, field: Optional[str] = None, evaluator: Optional[str] = None,
-             inputs: Optional[Dict[str, Any]] = None, judge_kwargs: Optional[Dict[str, Any]] = None,
-             judge_model: Optional[str] = None, judge_prompt: Optional[str] = None,
-             **kwargs) -> Result:
-    """Call `judge`, and say whether what came back is a verdict (see the module docstring)."""
-    _collisions(judge, {"schema": schema, "run": run, "field": field, "evaluator": evaluator, "inputs": inputs})
-    kwargs = {**kwargs, **(judge_kwargs or {})}
+def _majority(results: list) -> Result:
+    """One Result for several judgements of the same output: the majority verdict (a tie keeps the
+    first), its score and reason, with every call counted and the votes kept."""
+    judged = [r for r in results if r.valid]
+    if not judged:
+        out = results[0]
+    else:
+        passed = sum(1 for r in judged if r.status == PASS)
+        win = PASS if 2 * passed > len(judged) else FAIL if 2 * passed < len(judged) else judged[0].status
+        out = next(r for r in judged if r.status == win)
+        out.votes = (passed, len(judged))
+    out.attempts = sum(r.attempts for r in results)
+    out.history = [h for r in results for h in r.history]
+    return out
+
+
+def _sum(spent: list) -> dict:
+    costs = [s["cost_usd"] for s in spent if s["cost_usd"] is not None]
+    return {"duration_ms": sum(s["duration_ms"] for s in spent), "cost_usd": sum(costs) if costs else None}
+
+
+def _once(judge, args, kwargs, schema, threshold, score_range, retries, backoff, judge_model, judge_prompt):
     result = Result(status=INVALID, judge_model=judge_model or model_of(judge), judge_prompt=judge_prompt)
     spent = {"duration_ms": 0.0, "cost_usd": None}  # the calls, not the waits between them
     for i in range(retries + 1):
@@ -299,19 +318,10 @@ def evaluate(judge: Callable, *args, schema: Optional[dict] = None, threshold: O
             break
         if i < retries and backoff:
             time.sleep(backoff * 2 ** i)
-    _record(result, run, field, evaluator, inputs, spent)
-    return result
+    return result, spent
 
 
-async def aevaluate(judge: Callable, *args, schema: Optional[dict] = None, threshold: Optional[float] = 0.5,
-                    score_range: Tuple[float, float] = (0.0, 1.0), retries: int = 2, backoff: float = 1.0,
-                    run=None, field: Optional[str] = None, evaluator: Optional[str] = None,
-                    inputs: Optional[Dict[str, Any]] = None, judge_kwargs: Optional[Dict[str, Any]] = None,
-             judge_model: Optional[str] = None, judge_prompt: Optional[str] = None,
-                    **kwargs) -> Result:
-    """evaluate() for an async judge."""
-    _collisions(judge, {"schema": schema, "run": run, "field": field, "evaluator": evaluator, "inputs": inputs})
-    kwargs = {**kwargs, **(judge_kwargs or {})}
+async def _aonce(judge, args, kwargs, schema, threshold, score_range, retries, backoff, judge_model, judge_prompt):
     result = Result(status=INVALID, judge_model=judge_model or model_of(judge), judge_prompt=judge_prompt)
     spent = {"duration_ms": 0.0, "cost_usd": None}
     for i in range(retries + 1):
@@ -328,5 +338,36 @@ async def aevaluate(judge: Callable, *args, schema: Optional[dict] = None, thres
             break
         if i < retries and backoff:
             await asyncio.sleep(backoff * 2 ** i)
-    _record(result, run, field, evaluator, inputs, spent)
+    return result, spent
+
+
+def evaluate(judge: Callable, *args, schema: Optional[dict] = None, threshold: Optional[float] = 0.5,
+             score_range: Tuple[float, float] = (0.0, 1.0), retries: int = 2, backoff: float = 1.0,
+             run=None, field: Optional[str] = None, evaluator: Optional[str] = None,
+             inputs: Optional[Dict[str, Any]] = None, judge_kwargs: Optional[Dict[str, Any]] = None,
+             judge_model: Optional[str] = None, judge_prompt: Optional[str] = None, rejudge: int = 1,
+             **kwargs) -> Result:
+    """Call `judge`, and say whether what came back is a verdict (see the module docstring)."""
+    _collisions(judge, {"schema": schema, "run": run, "field": field, "evaluator": evaluator, "inputs": inputs})
+    kwargs = {**kwargs, **(judge_kwargs or {})}
+    done = [_once(judge, args, kwargs, schema, threshold, score_range, retries, backoff, judge_model, judge_prompt)
+            for _ in range(max(1, rejudge))]
+    result = _majority([r for r, _ in done]) if rejudge > 1 else done[0][0]
+    _record(result, run, field, evaluator, inputs, _sum([s for _, s in done]))
+    return result
+
+
+async def aevaluate(judge: Callable, *args, schema: Optional[dict] = None, threshold: Optional[float] = 0.5,
+                    score_range: Tuple[float, float] = (0.0, 1.0), retries: int = 2, backoff: float = 1.0,
+                    run=None, field: Optional[str] = None, evaluator: Optional[str] = None,
+                    inputs: Optional[Dict[str, Any]] = None, judge_kwargs: Optional[Dict[str, Any]] = None,
+                    judge_model: Optional[str] = None, judge_prompt: Optional[str] = None, rejudge: int = 1,
+                    **kwargs) -> Result:
+    """evaluate() for an async judge."""
+    _collisions(judge, {"schema": schema, "run": run, "field": field, "evaluator": evaluator, "inputs": inputs})
+    kwargs = {**kwargs, **(judge_kwargs or {})}
+    done = [await _aonce(judge, args, kwargs, schema, threshold, score_range, retries, backoff, judge_model,
+                         judge_prompt) for _ in range(max(1, rejudge))]
+    result = _majority([r for r, _ in done]) if rejudge > 1 else done[0][0]
+    _record(result, run, field, evaluator, inputs, _sum([s for _, s in done]))
     return result

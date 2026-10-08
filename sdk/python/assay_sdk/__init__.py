@@ -547,7 +547,8 @@ def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[
           error_kind: Optional[str] = None, tries: Optional[int] = None, raw_output: Optional[str] = None,
           category: Optional[str] = None, judge_model: Optional[str] = None,
           judge_prompt: Optional[str] = None, duration_ms: Optional[float] = None,
-          cost_usd: Optional[float] = None) -> None:
+          cost_usd: Optional[float] = None, judgements: Optional[int] = None,
+          judgements_passed: Optional[int] = None) -> None:
     """One result from a test run: status pass, fail, or error (the check couldn't run). Send passes too.
     test_run None: the run `assay test` is doing (else "local").
     inputs: what the evaluator saw, e.g. {"query": ..., "output": ..., "context": ...}, so Assay can
@@ -559,7 +560,8 @@ def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[
     judge_model, judge_prompt ("rubric@3"): which judge it was. When either differs from the
     baseline's, the check isn't compared with it as if nothing changed but the AI. duration_ms and
     cost_usd: what the evaluator took to run (`assay evals guardrails` asks whether it could run in the
-    request path)."""
+    request path). judgements and judgements_passed: the same output judged that many times, and
+    how many passed it (evaluate(rejudge=)): a split vote is the judge, not the AI."""
     s = lambda v: None if v is None else v if isinstance(v, str) else json.dumps(_json_safe(v))
     t = _test({"case": case, **({"run": test_run} if test_run else {}),
                **({"attempt": attempt} if attempt is not None else {})})
@@ -572,7 +574,8 @@ def check(test_run: Optional[str], case: str, status: str, *, attempt: Optional[
                "judge_model": None if judge_model is None else str(judge_model)[:128],
                "judge_prompt": None if judge_prompt is None else str(judge_prompt)[:192],
                "duration_ms": None if duration_ms is None else round(float(duration_ms), 3),
-               "cost_usd": cost_usd})
+               "cost_usd": cost_usd,
+               **({"judgements": judgements, "judgements_passed": judgements_passed} if judgements else {})})
 
 
 def _category(v: Any) -> Optional[str]:

@@ -43,7 +43,8 @@ Zero is a value, not an empty one: 0 extracted where the document has nothing is
 nothing extracted where it says 0 is missing, so the two errors stay apart.
 
 "Matches" is per type: Text ignores case and spacing; Number and Money compare numbers with a
-tolerance ("1.234,56 €" is 1234.56); Date reads the usual formats, with day_first for 03/04/2026.
+tolerance ("1.234,56 €" is 1234.56); Date reads the usual formats, with day_first for 03/04/2026;
+Url compares where a web address points (https://www.acme.com/ is acme.com).
 A correct value that can't be read (a date that isn't one) is the label's problem: the check
 couldn't be judged, and never counts against the extractor.
 
@@ -68,12 +69,12 @@ from dataclasses import dataclass, field as dc_field
 from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-__all__ = ["Text", "Number", "Money", "Date", "LineItems", "score_document", "infer_schema", "check_rules", "total_of",
+__all__ = ["Text", "Number", "Money", "Date", "Url", "LineItems", "score_document", "infer_schema", "check_rules", "total_of",
            "before", "required", "rule", "DocumentScore", "FieldScore", "EVALUATOR", "classify_document",
            "score_split", "SplitScore", "score_ocr", "OcrScore", "score_locations", "appears_in", "score_table",
            "TableScore", "teds", "Group", "FACETS", "canonical", "anls", "correct_ocr", "rank_ocr", "OcrRanking",
            "OcrCorrectionError", "FORMAT", "INFERRED", "FABRICATED", "spot_check", "SPOT_CHECKS",
-           "superseded_values", "SUPERSEDED"]
+           "superseded_values", "SUPERSEDED", "sort_edit", "user_edits", "EditSort", "USER_EDITS"]
 
 EVALUATOR = "assay.documents@1"
 CORRECT, WRONG, MISSING, INVENTED = "correct", "wrong", "missing", "invented"
@@ -287,6 +288,90 @@ class Date(_Field):
     def reshaped(self, expected, actual):  # 03/04 for 04/03
         return expected.year == actual.year and expected.day == actual.month and expected.month == actual.day \
             and expected != actual
+
+
+_TRACKING = re.compile(r"^(utm_.+|gclid|fbclid|msclkid|mc_eid|mc_cid|_hsenc|_hsmi)$", re.I)
+_FILES = {"pdf", "doc", "docx", "txt", "csv", "xls", "xlsx", "png", "jpg", "jpeg", "gif", "json", "xml", "html", "htm",
+          "zip", "md", "py", "js"}
+_BARE_HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.([a-z]{2,24})", re.I)
+
+
+def _wrapped(s: str) -> Optional[str]:
+    """The URL a tracking or redirect link carries in its query (?u=, ?url=, ?redirect=...), if any."""
+    from urllib.parse import parse_qsl, urlsplit
+    for _, val in parse_qsl(urlsplit(s if "://" in s else "http://" + s).query):
+        if re.match(r"(https?://|www\.)", val, re.I):
+            return val
+    return None
+
+
+class Url(_Field):
+    """A web address, compared by where it points: https://www.Acme.com/ and acme.com are one
+    address. The scheme, "www.", the host's case, a default port, a trailing slash and the #fragment
+    are ignored, as are tracking parameters (utm_*, gclid, fbclid, ...) and the order of the rest.
+    The path keeps its case. site_only=True: only the site counts (acme.com/about is acme.com), for
+    a company's website. unwrap=True: a tracking or redirect link (a directory's
+    r.example.com/redirect?u=https://acme.com) is read as the address it carries. Off by default,
+    since a redirect link given as a company's website is itself worth catching."""
+
+    def __init__(self, site_only: bool = False, unwrap: bool = False, weight: float = 1.0):
+        self.site_only, self.unwrap, self.weight = site_only, unwrap, weight
+
+    def read(self, v):
+        from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
+        s = str(v).strip()
+        for _ in range(3 if self.unwrap else 0):
+            inner = _wrapped(s)
+            if not inner:
+                break
+            s = inner
+        if not re.match(r"[a-z][a-z0-9+.-]*://", s, re.I):
+            s = "http://" + s.lstrip("/")
+        try:
+            p = urlsplit(s)
+            port = p.port
+        except ValueError:
+            raise Unreadable(f"{v!r} isn't a web address")
+        host = (p.hostname or "").lower().rstrip(".")
+        if not host or not re.fullmatch(r"[a-z0-9.-]+", host) or ("." not in host and host != "localhost"):
+            raise Unreadable(f"{v!r} isn't a web address")
+        host = host[4:] if host.startswith("www.") else host
+        if port and not (port == 80 and p.scheme in ("http", "")) and not (port == 443 and p.scheme == "https"):
+            host += f":{port}"
+        if self.site_only:
+            return host
+        path = unquote(p.path).rstrip("/")
+        query = sorted((k, x) for k, x in parse_qsl(p.query, keep_blank_values=True) if not _TRACKING.match(k))
+        return host + path + (f"?{urlencode(query)}" if query else "")
+
+    def show(self, v):
+        return v
+
+    def why(self, expected, actual):
+        if expected.split("/")[0] == actual.split("/")[0] and expected != actual:
+            return "the same site, another page"
+        if expected in unquote_all(actual):
+            return "a tracking or redirect link around the right address (Url(unwrap=True) reads through it)"
+        return None
+
+    def reshaped(self, expected, actual):  # the right address, inside a redirect link
+        return expected != actual and expected in unquote_all(actual)
+
+
+def unquote_all(s: str) -> str:
+    from urllib.parse import unquote
+    for _ in range(3):
+        s, before = unquote(s), s
+        if s == before:
+            break
+    return re.sub(r"https?://(www\.)?", "", s.lower())
+
+
+def _looks_like_url(s: str) -> bool:
+    if re.match(r"(https?://|www\.)\S+$", s, re.I):
+        return True
+    m = re.fullmatch(_BARE_HOST.pattern + r"(?:[/?#]\S*)?", s, re.I)
+    return bool(m) and m.group(1).lower() not in _FILES
 
 
 def _year(s: str) -> int:
@@ -861,6 +946,8 @@ def _guess(v: Any) -> _Field:
     if isinstance(v, (date, datetime)):
         return Date()
     s = str(v).strip()
+    if _looks_like_url(s):
+        return Url()
     try:
         Date().read(s)
         return Date()
@@ -1488,7 +1575,19 @@ _DATEISH = re.compile(r"\b\d{1,4}[./-]\d{1,2}[./-]\d{1,4}\b|\b\d{1,2}(?:st|nd|rd
                       r"\b[A-Za-z]{3,9}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4}\b")
 
 
+_URLISH = re.compile(r"(?:https?://|www\.)[^\s<>()\[\]\"']+|" + _BARE_HOST.pattern + r"(?:/[^\s<>()\[\]\"']*)?", re.I)
+
+
 def _found(spec: _Field, value: Any, text: str) -> bool:
+    if isinstance(spec, Url):
+        want = spec.read(value)
+        for m in _URLISH.finditer(text):
+            try:
+                if spec.read(m.group(0).rstrip(".,;:!?")) == want:
+                    return True
+            except Unreadable:
+                pass
+        return False
     if isinstance(spec, Date):
         want = spec.read(value)
         for m in _DATEISH.finditer(text):
@@ -1780,4 +1879,136 @@ def superseded_values(old_document_id: str, new_document_id: str, old: Dict[str,
               if outcome == "escaped" else None, category="superseded" if outcome == "escaped" else None,
               raw_output=json.dumps({"kind": "superseded", "outcome": outcome, "link": link,
                                      "new_document": new_document_id, "by": checked_by}))
+    return out
+
+
+# ---------- user edits: a prefill the user changed isn't always one the model got wrong ----------
+
+USER_EDITS = "user-edits"
+KEPT, REFORMATTED, PREFERENCE, MODEL_ERROR, UNSURE = "kept", "reformatted", "preference", "model_error", "unsure"
+
+
+@dataclass
+class EditSort:
+    """What a user's edit to one prefilled field says about the model.
+
+      kept         unchanged
+      reformatted  the same value, written another way ("1,250" for 1250): not an error
+      preference   the prefill was right, and the user chose something else: not an error
+      model_error  the prefill was wrong: a correction, and a label worth testing against
+      unsure       nothing could tell: neither or both values are in the document, and no judge"""
+    field: str
+    kind: str
+    prefilled: Any
+    submitted: Any
+    reason: Optional[str] = None
+    by: str = "rule"  # rule | judge
+
+    @property
+    def model_wrong(self) -> Optional[bool]:
+        return None if self.kind == UNSURE else self.kind == MODEL_ERROR
+
+
+def _items(v: Any) -> Optional[List[str]]:
+    """A list value (tags) as its items, read as text."""
+    return [Text().read(x) for x in v if not empty(x)] if isinstance(v, (list, tuple, set)) else None
+
+
+def _same_value(spec: _Field, a: Any, b: Any) -> bool:
+    ia, ib = _items(a), _items(b)
+    if ia is not None or ib is not None:
+        return sorted(ia or []) == sorted(ib or [])
+    return _cell_ok(spec, a, b)
+
+
+def _word_in(v: Any, text: str) -> bool:
+    """Text found as whole words: "IT" isn't in "with"."""
+    t, w = Text().read(text), Text().read(v)
+    return bool(w) and re.search(rf"(?<!\w){re.escape(w)}(?!\w)", t) is not None
+
+
+def _in_text(spec: _Field, v: Any, text: str) -> bool:
+    if empty(v):
+        return False
+    items = _items(v)
+    try:
+        if items is not None:
+            return all(_word_in(x, text) for x in items)
+        return _word_in(v, text) if type(spec) is Text else _found(spec, v, text)
+    except Unreadable:
+        return False
+
+
+def sort_edit(field: str, prefilled: Any, submitted: Any, text: Optional[str] = None,
+              spec: Optional[_Field] = None, judge: Optional[Callable] = None, rejudge: int = 1) -> EditSort:
+    """Sort one field a user saw prefilled and then submitted. The value is compared by its type
+    (`spec`, else the type it looks like), so a reformatted value is the same value. Then, given the
+    document's text, whichever value the document holds decides:
+
+      the submitted value is in the document and the prefill isn't   model_error
+      the prefill is in the document and the submitted value isn't   preference
+
+    Anything else (free text, a category the document never names, both values in it) goes to
+    `judge`, when given: judge(field, prefilled, submitted, text), called through evaluate(), so
+    retries, invalid answers and `rejudge` work as they do there. It answers whether the prefill
+    was right for this document: a pass means the edit was the user's choice, a fail that the
+    model got it wrong. Without a judge, or when it can't answer, the edit is unsure."""
+    spec = spec or _guess(submitted if not empty(submitted) else prefilled)
+    if _same_value(spec, prefilled, submitted):
+        same = (prefilled == submitted) or (empty(prefilled) and empty(submitted))
+        return EditSort(field, KEPT if same else REFORMATTED, prefilled, submitted,
+                        None if same else "the same value, written another way")
+    if text:
+        was, now = _in_text(spec, prefilled, text), _in_text(spec, submitted, text)
+        if now and not was:
+            return EditSort(field, MODEL_ERROR, prefilled, submitted, "the document has the submitted value"
+                            + ("; nothing was prefilled" if empty(prefilled) else ", not the prefilled one"))
+        if was and not now:
+            return EditSort(field, PREFERENCE, prefilled, submitted,
+                            "the prefill is what the document says; the user changed it anyway")
+    if judge is not None:
+        from assay_sdk.evaluation import evaluate
+        r = evaluate(judge, field, prefilled, submitted, text, rejudge=rejudge)
+        if r.valid:
+            return EditSort(field, PREFERENCE if r.passed else MODEL_ERROR, prefilled, submitted,
+                            r.reason or ("the judge found the prefill right" if r.passed
+                                         else "the judge found the prefill wrong"), by="judge")
+        return EditSort(field, UNSURE, prefilled, submitted, f"the judge couldn't answer: {r.error}", by="judge")
+    why = "no document text to check against" if not text else \
+        "both values are in the document" if _in_text(spec, prefilled, text) else "neither value is in the document"
+    return EditSort(field, UNSURE, prefilled, submitted, f"{why}, and no judge")
+
+
+def user_edits(document_id: str, prefilled: Dict[str, Any], submitted: Dict[str, Any], text: Optional[str] = None,
+               schema: Optional[Dict[str, _Field]] = None, judge: Optional[Callable] = None, rejudge: int = 1,
+               reporter: Optional[str] = None, fields: Optional[Sequence[str]] = None) -> Dict[str, EditSort]:
+    """A form the model prefilled from a document, and what the user submitted: every field sorted
+    (sort_edit). Only a model error is a correction: it's sent as one, so it's a label for
+    test cases and traced to the step it started at, like a reviewer's. A preference, a reformat
+    or an unsure edit never becomes an expected value.
+
+    Every field is also sent as a check of the run `user-edits` against the document: passing
+    when the prefill was right (kept, reformatted or a preference), failing on a model error, and
+    not judged when unsure. The dashboard's **Prefill errors** is the share the model got wrong.
+    Returns {field: EditSort}."""
+    from assay_sdk import check, correction
+    schema = schema or {}
+    names = list(fields or dict.fromkeys(list(prefilled) + list(submitted)))
+    out = {}
+    for name in names:
+        spec = schema.get(name)
+        if isinstance(spec, LineItems):
+            continue
+        before, after = _get(prefilled, name), _get(submitted, name)
+        s = sort_edit(name, before, after, text, spec, judge, rejudge)
+        out[name] = s
+        if s.kind == MODEL_ERROR:
+            correction(document_id, name, expected=None if empty(after) else after,
+                       observed=None if empty(before) else before,
+                       kind="missing" if empty(before) else "extra" if empty(after) else "wrong", reporter=reporter)
+        status = "error" if s.kind == UNSURE else "fail" if s.kind == MODEL_ERROR else "pass"
+        check(USER_EDITS, f"{document_id}:{name}", status, run_id=document_id, field=name, expected=after,
+              actual=before, evaluator="assay.edits@1", reason=s.reason if s.kind != KEPT else None,
+              category=None if s.kind != MODEL_ERROR else "prefill", error_kind="invalid" if status == "error" else None,
+              raw_output=json.dumps({"kind": "user_edit", "outcome": s.kind, "by": s.by, "reporter": reporter}))
     return out

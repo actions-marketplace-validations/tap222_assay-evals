@@ -88,7 +88,9 @@ def test_a_claim_contract_over_the_api_and_in_production(tmp_path):
                                       "state": {"name": "order:*", "field": "status", "is": "refunded"}})
     assert r.status_code == 201, r.json()
     assert r.json()["label"].startswith("Claiming “refunded” needs a successful refund")
-    ev = lambda i, **k: {"v": 1, "id": f"p1-{i}", "ts": "2026-09-26T10:00:00Z", "run_id": "p1", **k}
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")  # within the last 7 days
+    ev = lambda i, **k: {"v": 1, "id": f"p1-{i}", "ts": ts, "run_id": "p1", **k}
     c.post("/v1/ingest", json=[ev(0, type="run.start", task="support", input="refund O-17"),
                                ev(1, type="step", seq=0, kind="tool", name="refund", args={"order_id": "O-17"},
                                   status="error", error="402"),

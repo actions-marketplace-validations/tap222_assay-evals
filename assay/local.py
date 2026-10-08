@@ -1459,14 +1459,17 @@ def failing(rows: list) -> Dict[Tuple[str, str], dict]:
 
 def classify(result: dict, has_baseline: bool) -> dict:
     """Sort each failing check: a problem (a regression, a new case that fails, or with no baseline
-    any failure), flaky (passes some attempts, no worse than chance; doesn't block), unsure (plausibly
+    any failure), flaky (passes some attempts, no worse than chance; doesn't block), judge unstable
+    (varies, and the judge gave the same answer another verdict: inconclusive when it could be
+    worse, else not blocking), unsure (plausibly
     worse, too few attempts to tell: inconclusive, not a regression), or still failing (failed in the
     baseline too; not this change's doing)."""
     cur, base = result["attempts"], result["base_attempts"]
     st = result["stability"]
     flaky_keys = {(i["case_id"], i["field"] or "result") for i in st["flaky"]}
     unsure_keys = {(i["case_id"], i["field"] or "result") for i in st["reruns"]}
-    out = {"problems": [], "flaky": [], "unsure": [], "still": [], "acked": []}
+    unsteady = {(i["case_id"], i["field"] or "result"): i for i in st.get("judge_unstable") or []}
+    out = {"problems": [], "flaky": [], "unsure": [], "still": [], "acked": [], "judge_unstable": []}
     decided = result.get("acks") or {}
     quiet, woke = decided.get("quiet") or {}, decided.get("woke") or {}
     changed = result.get("judge_changed") or {}
@@ -1494,6 +1497,11 @@ def classify(result: dict, has_baseline: bool) -> dict:
             # Fails on exactly the model it was routed to: a cause, not chance, however few the attempts.
             if item["rate"] < item["base_rate"] and routed((result.get("routing") or {}).get(key) or {"now": {}}):
                 item["unsure"] = False
+            elif key in unsteady:  # the judge gave the same answer another verdict: the judge varies, not only the AI
+                u = unsteady[key]
+                out["judge_unstable"].append({**item, "worse": bool(u["worse"]), "judge_split": u["judge_split"],
+                                              "rejudged": u["rejudged"]})
+                continue
             elif key in flaky_keys:  # no worse than chance: said as such, acknowledged or not
                 out["flaky"].append(item)
                 continue
@@ -1512,6 +1520,9 @@ def verdict(result: dict, has_baseline: bool) -> Tuple[bool, dict]:
     a pass rate that dropped beyond chance across flaky checks still does."""
     c = classify(result, has_baseline)
     result["_judge_changed"] = c["judge_changed"]
+    result["_judge_unstable"] = c["judge_unstable"]
+    unsteady = {(p["case_id"], p["field"]) for p in c["judge_unstable"]}  # the judge splits, not the system
+    result["coin_flips"] = [x for x in result.get("coin_flips") or [] if (x["case_id"], x["field"]) not in unsteady]
     dropped = has_baseline and result["stability"]["outcome"] == "rollback" and not result.get("judge_changed")
     worse = (result.get("behavior") or result.get("behavior_suite")) if result.get("behavior_fails", True) else []
     return not c["problems"] and not dropped and not worse and not result.get("score_regressions") \
@@ -1654,6 +1665,10 @@ def write_junit(path: str, run_id: str, result: dict, c: dict) -> None:
     for p in c.get("unsure") or []:  # not settled: JUnit's "couldn't run", like a result that couldn't be judged
         unjudged[p["case_id"]].append(f"{_label(p['field'])}: passed {p['base_rate']:.0%} of attempts before, "
                                       f"{p['rate']:.0%} now: could be chance, too few attempts to tell")
+    for p in unsteady_worse(c):  # not settled either, and more attempts won't settle it
+        unjudged[p["case_id"]].append(f"{_label(p['field'])}: passed {p['base_rate']:.0%} of attempts before, "
+                                      f"{p['rate']:.0%} now, and the judge gave the same answer another verdict on "
+                                      f"{p['judge_split']} of {p['rejudged']}: the judge varies")
     acked = {}
     for p in c.get("acked") or []:
         acked.setdefault(p["case_id"], p["ack"])
@@ -1706,7 +1721,7 @@ CATEGORIES = [  # (name, which checks): the first that matches a check's field t
     ("Output quality", lambda f: True),  # the answer, the end state, your asserts, your own fields
 ]
 BUCKETS = [("regressed", "✗", "red"), ("new failure", "✗", "red"), ("couldn't be judged", "?", "yellow"),
-           ("needs reruns", "?", "yellow"), ("judge changed", "?", "yellow"),
+           ("needs reruns", "?", "yellow"), ("judge unstable", "?", "yellow"), ("judge changed", "?", "yellow"),
            ("flaky", "⚠", "yellow"), ("known failure", "·", "dim"), ("acknowledged", "·", "dim"),
            ("passed", "✓", "green")]
 
@@ -1728,12 +1743,14 @@ def summarize(result: dict, c: dict, baseline: Optional[str]) -> dict:
     new = {p["case_id"] for p in c["problems"] if p["kind"] not in ("regression", "worse than acknowledged")} - regressed
     unjudged = {x["case_id"] for x in result["not_judged"]} - regressed - new
     unsure = {p["case_id"] for p in c.get("unsure") or []} - regressed - new - unjudged
-    rejudged = {p["case_id"] for p in c.get("judge_changed") or []} - regressed - new - unjudged - unsure
-    flaky = {p["case_id"] for p in c["flaky"]} - regressed - new - unjudged - unsure - rejudged
-    known = {p["case_id"] for p in c["still"]} - regressed - new - unjudged - unsure - rejudged - flaky
-    acked = {p["case_id"] for p in c.get("acked") or []} - regressed - new - unjudged - unsure - rejudged - flaky - known
+    unsteady = {p["case_id"] for p in c.get("judge_unstable") or []} - regressed - new - unjudged - unsure
+    rejudged = {p["case_id"] for p in c.get("judge_changed") or []} - regressed - new - unjudged - unsure - unsteady
+    flaky = {p["case_id"] for p in c["flaky"]} - regressed - new - unjudged - unsure - unsteady - rejudged
+    known = {p["case_id"] for p in c["still"]} - regressed - new - unjudged - unsure - unsteady - rejudged - flaky
+    acked = {p["case_id"] for p in c.get("acked") or []} - regressed - new - unjudged - unsure - unsteady - rejudged \
+        - flaky - known
     buckets = {"regressed": regressed, "new failure": new, "couldn't be judged": unjudged, "needs reruns": unsure,
-               "judge changed": rejudged,
+               "judge unstable": unsteady, "judge changed": rejudged,
                "flaky": flaky, "known failure": known, "acknowledged": acked}
     buckets["passed"] = cases - set().union(*buckets.values())
     by_case = defaultdict(dict)
@@ -1760,7 +1777,7 @@ def summary_block(s: dict) -> List[str]:
         n = len(s["buckets"][name])
         if n or name == "passed":
             label = name if n == 1 or name in ("passed", "flaky", "regressed", "couldn't be judged", "acknowledged",
-                                               "judge changed", "needs reruns") \
+                                               "judge changed", "judge unstable", "needs reruns") \
                 else name + "s"
             out.append(_paint(mark, color) + f" {n} {label}")
     if s["improved"]:
@@ -1777,7 +1794,7 @@ def summary_block(s: dict) -> List[str]:
 
 MARKER = "<!-- assay-regression -->"  # finds the PR comment to update (assay/github.py)
 HEADLINES = {0: "No AI regression", 1: "AI regression detected",
-             3: "Inconclusive: some results couldn't be judged, or need more attempts"}
+             3: "Inconclusive: some results couldn't be judged, need more attempts, or have an unstable judge"}
 
 
 def _short(case: str) -> str:
@@ -1862,6 +1879,26 @@ def score_lines(result: dict) -> List[str]:
     return out + ([""] if (within or none_) and not flips else [""] if flips else [])
 
 
+def unsteady_worse(c: dict) -> List[dict]:
+    """Judge-unstable checks that could be worse: inconclusive, since the judge can't say."""
+    return [p for p in c.get("judge_unstable") or [] if p["worse"]]
+
+
+def judge_unstable_lines(items: List[dict]) -> List[str]:
+    """Checks whose judge gave the same answer another verdict: the judge varies, not only the AI."""
+    out = [_paint(f"? {_n(len(items), 'check')} with an unstable judge: the same answer, judged again, got another "
+                  "verdict", "yellow")]
+    for p in items[:10]:
+        out.append(_paint(f"  {p['case_id']}  {_label(p['field'])}  {p['base_rate']:.0%} → {p['rate']:.0%}, "
+                          f"verdict flipped on {p['judge_split']} of {p['rejudged']} answers judged again"
+                          + (" (could be worse)" if p["worse"] else ""), "dim"))
+    if len(items) > 10:
+        out.append(_paint(f"  … and {len(items) - 10} more", "dim"))
+    out.append(_paint("  More attempts of the AI won't settle these. Tighten the rubric, check it deterministically, "
+                      "or `assay calibrate` the judge.", "dim"))
+    return out + [""]
+
+
 def judge_changed_lines(items: List[dict]) -> List[str]:
     """Checks judged by another model or prompt than their baseline: not compared, and why."""
     by: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
@@ -1918,8 +1955,8 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     s = result["summary"]
     b = s["buckets"]
     counts = [f"**{_n(s['cases'], 'case')}**", f"{len(b['passed'])} passed"]
-    for name in ("regressed", "new failure", "needs reruns", "flaky", "couldn't be judged", "known failure",
-                 "acknowledged"):
+    for name in ("regressed", "new failure", "needs reruns", "judge unstable", "flaky", "couldn't be judged",
+                 "known failure", "acknowledged"):
         if b.get(name):
             counts.append(f"{len(b[name])} {name}")
     jc = result.get("_judge_changed") or []
@@ -2023,6 +2060,14 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     if models:
         out += ["| Model | Cases passing |", "|---|---|"] + [f"| {_md(m)} | {ok}/{n} |" for m, (ok, n) in models.items()]
         out.append("")
+    unsteady = result.get("_judge_unstable") or []
+    if unsteady:
+        out += [f"<details><summary>{_n(len(unsteady), 'check')} with an unstable judge: the same answer, judged "
+                f"again, got another verdict</summary>", ""]
+        out += [f"- {_code(_short(p['case_id']))} {_md(_label(p['field']))}: passed {p['base_rate']:.0%} of attempts "
+                f"before, {p['rate']:.0%} now; verdict flipped on {p['judge_split']} of {p['rejudged']} answers judged "
+                f"again{' (could be worse)' if p['worse'] else ''}" for p in unsteady[:20]]
+        out += ["", "More attempts of the AI won't settle these: make the judge steadier.", "", "</details>", ""]
     unsure = result.get("_unsure") or []
     if unsure:
         out += [f"<details><summary>{_n(len(unsure), 'check')} could be worse, or chance: too few attempts to "
@@ -2153,6 +2198,8 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
             if why:
                 out.append(_paint(f"    {why}", "yellow"))
         out.append("")
+    if c.get("judge_unstable"):
+        out += judge_unstable_lines(c["judge_unstable"])
     if c.get("judge_changed"):
         out += judge_changed_lines(c["judge_changed"])
     out += score_lines(result)
@@ -2190,6 +2237,11 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     elif passed and c["unsure"]:
         out.append(_paint(f"Inconclusive: nothing is proven worse, but {_n(len(c['unsure']), 'check')} could be. "
                           "Rerun with more attempts; the baseline stays as it was.", "yellow"))
+    elif passed and unsteady_worse(c):
+        n = len(unsteady_worse(c))
+        out.append(_paint(f"Inconclusive: nothing is proven worse, but {_n(n, 'check')} could be, and "
+                          f"{'its' if n == 1 else 'their'} judge varies on the same answer. Make the judge steadier; "
+                          "the baseline stays as it was.", "yellow"))
     else:
         kept = len(dropped(result)) if passed and baseline else 0
         out.append(_paint("Passed." if passed else "Failed.", "green" if passed else "red") +
@@ -2339,7 +2391,8 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
                               f"baseline: the same commit ({same['commit']}), no uncommitted changes, the same "
                               f"{CONFIG} and the same prompt versions. The model underneath changed, or a service a "
                               f"tool calls did.", "yellow")
-    inconclusive = passed and bool(result["not_judged"] or result["summary"]["buckets"]["needs reruns"])
+    inconclusive = passed and bool(result["not_judged"] or result["summary"]["buckets"]["needs reruns"]
+                                   or any(p["worse"] for p in result.get("_judge_unstable") or []))
     baseline_before = dict(state.get("baseline_cases") or {})
     if passed and not inconclusive:
         # A pass rate that dropped within chance passes, but isn't the new bar: otherwise a few such runs
