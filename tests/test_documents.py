@@ -543,6 +543,77 @@ def test_spot_checks_of_published_output_give_the_escape_rate(project, monkeypat
     assert by_path == {"auto-approved": 2 / 3, "reviewed": 0.0}  # auto-approval lets more through
 
 
+
+JOB = "Senior Data Engineer, Munich. Salary 70,000 to 90,000 EUR. Start 1 December 2026. Work with Python and AWS."
+
+
+def test_an_edit_is_sorted_into_the_users_choice_or_the_models_error():
+    from assay_sdk.documents import sort_edit
+    kind = lambda *a, **k: sort_edit(*a, **k).kind
+    assert kind("title", "Senior Data Engineer", "Senior Data Engineer", JOB) == "kept"
+    assert kind("salary_min", "70000", "70,000", JOB) == "reformatted"  # the same number
+    assert kind("tags", ["python", "aws"], ["AWS", "Python"], JOB) == "reformatted"
+    assert kind("location", "Berlin", "Munich", JOB) == "model_error"  # the document says Munich
+    assert kind("start", None, "1 December 2026", JOB) == "model_error"  # missed: the document has it
+    assert kind("title", "Senior Data Engineer", "Staff Engineer", JOB) == "preference"  # the document backs the prefill
+    assert kind("location", "Munich", "Remote", JOB) == "preference"
+    # "IT" isn't in "with": whole words only.
+    assert kind("category", "IT", "Engineering", "Work with our team.") == "unsure"
+    # Neither value in the document, or no document: unsure without a judge.
+    s = sort_edit("category", "Engineering", "Analytics", JOB)
+    assert s.kind == "unsure" and s.model_wrong is None and "no judge" in s.reason
+    assert kind("location", "Berlin", "Munich") == "unsure"
+
+
+def test_a_judge_sorts_what_the_document_cant():
+    from assay_sdk.documents import sort_edit
+    asked = []
+
+    def judge(field, prefilled, submitted, text):
+        asked.append(field)
+        return {"passed": field != "category", "reason": f"{field}: judged"}
+    assert sort_edit("category", "Engineering", "Analytics", JOB, judge=judge).kind == "model_error"
+    s = sort_edit("seniority", "Senior", "Lead", "no such words", judge=judge)
+    assert (s.kind, s.by, s.reason) == ("preference", "judge", "seniority: judged")
+    # The document decides first: the judge isn't asked, and isn't paid for.
+    assert sort_edit("location", "Berlin", "Munich", JOB, judge=judge).by == "rule"
+    assert asked == ["category", "seniority"]
+    s = sort_edit("category", "a", "b", JOB, judge=lambda *a: "not a verdict")
+    assert s.kind == "unsure" and "couldn't answer" in s.reason
+
+
+def test_user_edits_give_corrections_only_for_model_errors_and_the_prefill_error_rate(project, monkeypatch):
+    import json as json_
+    import assay_sdk as assay
+    from assay import local, store
+    from assay.measures.ground_truth import PrefillErrors
+    from assay.models import Window
+    from assay.sources.events import EventsSource
+    from assay_sdk.documents import user_edits
+    path = project / "edits.jsonl"
+    monkeypatch.setenv("ASSAY_PATH", str(path))
+    assay.init()
+    out = user_edits("job-1", {"title": "Senior Data Engineer", "location": "Berlin", "salary_min": "70000",
+                               "category": "Engineering"},
+                     {"title": "Staff Engineer", "location": "Munich", "salary_min": "70,000", "category": "Analytics"},
+                     text=JOB, reporter="recruiter-7")
+    assert {k: v.kind for k, v in out.items()} == {"title": "preference", "location": "model_error",
+                                                   "salary_min": "reformatted", "category": "unsure"}
+    assay.shutdown()
+    events = [json_.loads(x) for x in path.read_text().splitlines()]
+    fixes = [e for e in events if e["type"] == "correction"]
+    assert [(e["field"], e["expected"], e["observed"], e["kind"]) for e in fixes] == \
+        [("location", "Munich", "Berlin", "wrong")]  # the user's choice of title is never a label
+    engine = store.make_engine("sqlite://")
+    store.metadata.create_all(engine)
+    assert local.load_file(engine, str(path), "t")[1] == []
+    now = datetime.utcnow()
+    m = PrefillErrors().compute(EventsSource(engine, "t"), Window(now - timedelta(days=1), now + timedelta(days=1)))
+    # Of the three fields that could be sorted, one was the model's error; 3 of 4 were edited.
+    assert m.status == "measured" and round(m.overall.value, 3) == 0.333
+    assert {r.slice_value: r.value for r in m.results if r.dimension == "field"}["location"] == 1.0
+
+
 DASH = '''
 import os
 from assay_sdk.documents import score_ocr, score_locations, score_table

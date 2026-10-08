@@ -47,7 +47,7 @@ different ones, never near-duplicates. Each expectation says where it came from:
 
 | From | Reliable? | What |
 |---|---|---|
-| a correction | yes | a person reported the right value |
+| a correction | yes | a person reported the right value. A user's edit to a prefilled form is one only when it was the model's error ([user edits](documents.md#user-edits-the-models-error-or-the-users-choice)) |
 | what broke | yes | the contract this trace broke, or "at most 2 identical calls" after a loop. These hold whatever the right answer is |
 | normal traces | a guess | the tool sequence and step budget that normal traces of the task use |
 | the request | a guess | an argument (e.g. `order_id`) found in the input because it looks like what normal traces pass |
