@@ -75,7 +75,8 @@ nothing is invented, and nothing extracted where it says 0 is missing.
 
 Without a schema, `score_document(run, expected, extracted)` scores every field either side has,
 each by the type its correct value looks like (`infer_schema`): "1250" and "1,250.00" are the same
-number, "2026-03-04" and "4 March 2026" the same date, "$5" an amount; nested objects become
+number, "2026-03-04" and "4 March 2026" the same date, "$5" an amount, "https://www.acme.com/" and
+"acme.com" the same web address; nested objects become
 dotted fields (`vendor.name`), lists of objects line items. A field only the extractor gave is
 **invented**, not ignored. Digits with a leading zero ("02139") are an identifier, compared as
 text. Declare a schema for anything the guess can't know: weights, `day_first`, tolerances, the
@@ -95,6 +96,25 @@ po_number (2 documents)".
   `currency=True` makes the currency count too, when both values give one.
 - **Date:** 2026-03-04, 04.03.2026, 4 March 2026, 4th March 2026, March 4, 2026, and 03/04/2026:
   `day_first` says which is the day, unless one part is over 12 and decides it.
+- **Url:** a web address, by where it points: `https://www.Acme.com/` and `acme.com` are one.
+  The scheme, `www.`, the host's case, a default port, a trailing slash, the `#fragment`,
+  tracking parameters (`utm_*`, `gclid`, `fbclid`, ...) and the order of the other parameters
+  don't count; the path's case does. `site_only=True` compares only the site (`acme.com/about` is
+  `acme.com`), for a company's website. `unwrap=True` reads a tracking or redirect link
+  (`r.example.com/redirect?u=https%3A%2F%2Facme.com`) as the address it carries. It's off by
+  default: a directory's redirect link extracted as a company's website is an error, and it's
+  named one ("a tracking or redirect link around the right address"). Found in a document's text
+  by the same rules, so "acme.co" isn't in "acme.company". Recognised without a schema when it
+  starts with `http://`, `https://` or `www.`, or is a domain (`acme.co.uk/team`), but not a file
+  name (`report.pdf`).
+
+Line items keyed by a website match whichever way each chunk or source wrote it, so an extraction
+that dropped a listing, or extracted it twice, says so ("1 row(s) missing, 1 row(s) duplicated")
+instead of hiding it behind a count that looks plausible:
+
+```python
+SCHEMA = {"companies": LineItems({"name": Text(), "website": Url(site_only=True)}, key="name")}
+```
 
 ## Line items
 

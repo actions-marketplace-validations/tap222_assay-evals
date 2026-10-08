@@ -131,8 +131,10 @@ field fails the PR even when the average looks fine. Full guide: [docs/documents
 
 ### Fields
 
-- **Typed matching with no schema needed.** Dates, amounts and numbers are compared by the type
-  their values look like, so `"1,250.00"` matches `1250` and `"1.234,56 €"` is read correctly.
+- **Typed matching with no schema needed.** Dates, amounts, numbers and web addresses are compared
+  by the type their values look like, so `"1,250.00"` matches `1250`, `"1.234,56 €"` is read
+  correctly, and `https://www.acme.com/` is `acme.com` (tracking parameters ignored, redirect links
+  named or read through).
 - **Wrong, missing or invented.** A value only the extractor gave counts as invented.
 - **Made-up values counted apart:** fabricated (nowhere in the document), inferred (in it, but not
   as this field) and format errors (the right value in the wrong shape).

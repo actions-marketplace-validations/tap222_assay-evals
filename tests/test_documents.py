@@ -1638,3 +1638,53 @@ def test_slices_worse_beyond_chance_are_corrected_for_how_many_there_are():
     gained = slice_changes({"a": {"zero_errors": 1.0, "cases": {"c0": True}}},
                            {"a": {"zero_errors": 0.0, "cases": {"c0": False}}})
     assert gained["a"]["p"] == 1.0 and not gained["a"]["worse"]
+
+
+# ---------- web addresses ----------
+
+from assay_sdk.documents import Url, appears_in, infer_schema  # noqa: E402
+
+
+def test_a_web_address_is_compared_by_where_it_points():
+    same = lambda spec, a, b: score_document(None, {"u": a}, {"u": b}, {"u": spec}).fields["u"].passed
+    u = Url()
+    assert same(u, "https://www.Acme.com/", "acme.com")  # scheme, www, case, trailing slash
+    assert same(u, "http://acme.com:80/team/", "https://acme.com/team#people")  # default port, fragment
+    assert same(u, "acme.com/jobs?utm_source=clutch&b=2&a=1&gclid=x", "acme.com/jobs?a=1&b=2")  # tracking, order
+    assert not same(u, "acme.com/Team", "acme.com/team")  # a path keeps its case
+    assert not same(u, "acme.com/about", "acme.com") and same(Url(site_only=True), "acme.com/about", "www.acme.com")
+    assert not same(u, "acme.com", "acme.co")
+    f = score_document(None, {"u": "acme.com"}, {"u": "acme.com/about"}, {"u": u}).fields["u"]
+    assert f.kind == "wrong" and "the same site, another page" in f.note
+    assert score_document(None, {"u": "acme.com"}, {"u": "not a url at all"}, {"u": u}).fields["u"].kind == "wrong"
+
+
+def test_a_redirect_link_is_caught_or_read_through():
+    wrapped = "https://r.clutch.co/redirect?provider=1&u=https%3A%2F%2Fwww.acme.com%2F%3Futm_source%3Dclutch"
+    f = score_document(None, {"u": "acme.com"}, {"u": wrapped}, {"u": Url()}).fields["u"]
+    assert not f.passed and "a tracking or redirect link around the right address" in f.note  # the directory's link
+    assert score_document(None, {"u": "acme.com"}, {"u": wrapped}, {"u": Url(unwrap=True)}).fields["u"].passed
+
+
+def test_addresses_are_recognised_without_a_schema_and_found_in_text():
+    assert {k: type(v).__name__ for k, v in infer_schema(
+        {"a": "https://x.io", "b": "www.x.io", "c": "acme.co.uk/team", "d": "report.pdf", "e": "Jane Doe"}).items()} \
+        == {"a": "Url", "b": "Url", "c": "Url", "d": "Text", "e": "Text"}
+    assert score_document(None, {"site": "https://acme.com"}, {"site": "www.acme.com/"}).all_correct  # no schema needed
+    text = "Acme builds data tools. Visit https://www.acme.com/ or email us. Partner: acme.company"
+    ok, _ = appears_in(text, {"site": Url()}).fn({"site": "acme.com"})
+    gone, why = appears_in(text, {"site": Url()}).fn({"site": "acme.co"})
+    assert ok and not gone and "acme.co" in why  # "acme.co" isn't in "acme.company"
+
+
+def test_listings_split_across_chunks_are_matched_by_website():
+    # The chunk-overlap bug: www and trailing slashes differ between chunks, one listing has no website,
+    # one is extracted twice by the overlap, and one fell between chunks.
+    spec = {"companies": LineItems({"name": Text(), "website": Url()}, key="name")}
+    truth = [{"name": "Acme", "website": "https://acme.com"}, {"name": "Bolt Labs", "website": "boltlabs.io"},
+             {"name": "Cora", "website": None}, {"name": "Delta", "website": "delta.dev"}]
+    got = [{"name": "Acme", "website": "www.acme.com/"}, {"name": "Bolt Labs", "website": "https://boltlabs.io/"},
+           {"name": "Bolt Labs", "website": "boltlabs.io"}, {"name": "Cora", "website": ""}]
+    f = score_document(None, {"companies": truth}, {"companies": got}, spec).fields["companies"]
+    assert f.counts["rows_duplicated"] == 1 and "1 row(s) missing" in f.note and "duplicated" in f.note
+    assert f.counts["tp"] == 3  # Acme, Bolt Labs and Cora right, whatever their addresses looked like

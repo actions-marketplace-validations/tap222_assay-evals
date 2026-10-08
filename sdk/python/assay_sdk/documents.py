@@ -43,7 +43,8 @@ Zero is a value, not an empty one: 0 extracted where the document has nothing is
 nothing extracted where it says 0 is missing, so the two errors stay apart.
 
 "Matches" is per type: Text ignores case and spacing; Number and Money compare numbers with a
-tolerance ("1.234,56 €" is 1234.56); Date reads the usual formats, with day_first for 03/04/2026.
+tolerance ("1.234,56 €" is 1234.56); Date reads the usual formats, with day_first for 03/04/2026;
+Url compares where a web address points (https://www.acme.com/ is acme.com).
 A correct value that can't be read (a date that isn't one) is the label's problem: the check
 couldn't be judged, and never counts against the extractor.
 
@@ -68,7 +69,7 @@ from dataclasses import dataclass, field as dc_field
 from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-__all__ = ["Text", "Number", "Money", "Date", "LineItems", "score_document", "infer_schema", "check_rules", "total_of",
+__all__ = ["Text", "Number", "Money", "Date", "Url", "LineItems", "score_document", "infer_schema", "check_rules", "total_of",
            "before", "required", "rule", "DocumentScore", "FieldScore", "EVALUATOR", "classify_document",
            "score_split", "SplitScore", "score_ocr", "OcrScore", "score_locations", "appears_in", "score_table",
            "TableScore", "teds", "Group", "FACETS", "canonical", "anls", "correct_ocr", "rank_ocr", "OcrRanking",
@@ -287,6 +288,90 @@ class Date(_Field):
     def reshaped(self, expected, actual):  # 03/04 for 04/03
         return expected.year == actual.year and expected.day == actual.month and expected.month == actual.day \
             and expected != actual
+
+
+_TRACKING = re.compile(r"^(utm_.+|gclid|fbclid|msclkid|mc_eid|mc_cid|_hsenc|_hsmi)$", re.I)
+_FILES = {"pdf", "doc", "docx", "txt", "csv", "xls", "xlsx", "png", "jpg", "jpeg", "gif", "json", "xml", "html", "htm",
+          "zip", "md", "py", "js"}
+_BARE_HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.([a-z]{2,24})", re.I)
+
+
+def _wrapped(s: str) -> Optional[str]:
+    """The URL a tracking or redirect link carries in its query (?u=, ?url=, ?redirect=...), if any."""
+    from urllib.parse import parse_qsl, urlsplit
+    for _, val in parse_qsl(urlsplit(s if "://" in s else "http://" + s).query):
+        if re.match(r"(https?://|www\.)", val, re.I):
+            return val
+    return None
+
+
+class Url(_Field):
+    """A web address, compared by where it points: https://www.Acme.com/ and acme.com are one
+    address. The scheme, "www.", the host's case, a default port, a trailing slash and the #fragment
+    are ignored, as are tracking parameters (utm_*, gclid, fbclid, ...) and the order of the rest.
+    The path keeps its case. site_only=True: only the site counts (acme.com/about is acme.com), for
+    a company's website. unwrap=True: a tracking or redirect link (a directory's
+    r.example.com/redirect?u=https://acme.com) is read as the address it carries. Off by default,
+    since a redirect link given as a company's website is itself worth catching."""
+
+    def __init__(self, site_only: bool = False, unwrap: bool = False, weight: float = 1.0):
+        self.site_only, self.unwrap, self.weight = site_only, unwrap, weight
+
+    def read(self, v):
+        from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
+        s = str(v).strip()
+        for _ in range(3 if self.unwrap else 0):
+            inner = _wrapped(s)
+            if not inner:
+                break
+            s = inner
+        if not re.match(r"[a-z][a-z0-9+.-]*://", s, re.I):
+            s = "http://" + s.lstrip("/")
+        try:
+            p = urlsplit(s)
+            port = p.port
+        except ValueError:
+            raise Unreadable(f"{v!r} isn't a web address")
+        host = (p.hostname or "").lower().rstrip(".")
+        if not host or not re.fullmatch(r"[a-z0-9.-]+", host) or ("." not in host and host != "localhost"):
+            raise Unreadable(f"{v!r} isn't a web address")
+        host = host[4:] if host.startswith("www.") else host
+        if port and not (port == 80 and p.scheme in ("http", "")) and not (port == 443 and p.scheme == "https"):
+            host += f":{port}"
+        if self.site_only:
+            return host
+        path = unquote(p.path).rstrip("/")
+        query = sorted((k, x) for k, x in parse_qsl(p.query, keep_blank_values=True) if not _TRACKING.match(k))
+        return host + path + (f"?{urlencode(query)}" if query else "")
+
+    def show(self, v):
+        return v
+
+    def why(self, expected, actual):
+        if expected.split("/")[0] == actual.split("/")[0] and expected != actual:
+            return "the same site, another page"
+        if expected in unquote_all(actual):
+            return "a tracking or redirect link around the right address (Url(unwrap=True) reads through it)"
+        return None
+
+    def reshaped(self, expected, actual):  # the right address, inside a redirect link
+        return expected != actual and expected in unquote_all(actual)
+
+
+def unquote_all(s: str) -> str:
+    from urllib.parse import unquote
+    for _ in range(3):
+        s, before = unquote(s), s
+        if s == before:
+            break
+    return re.sub(r"https?://(www\.)?", "", s.lower())
+
+
+def _looks_like_url(s: str) -> bool:
+    if re.match(r"(https?://|www\.)\S+$", s, re.I):
+        return True
+    m = re.fullmatch(_BARE_HOST.pattern + r"(?:[/?#]\S*)?", s, re.I)
+    return bool(m) and m.group(1).lower() not in _FILES
 
 
 def _year(s: str) -> int:
@@ -861,6 +946,8 @@ def _guess(v: Any) -> _Field:
     if isinstance(v, (date, datetime)):
         return Date()
     s = str(v).strip()
+    if _looks_like_url(s):
+        return Url()
     try:
         Date().read(s)
         return Date()
@@ -1488,7 +1575,19 @@ _DATEISH = re.compile(r"\b\d{1,4}[./-]\d{1,2}[./-]\d{1,4}\b|\b\d{1,2}(?:st|nd|rd
                       r"\b[A-Za-z]{3,9}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4}\b")
 
 
+_URLISH = re.compile(r"(?:https?://|www\.)[^\s<>()\[\]\"']+|" + _BARE_HOST.pattern + r"(?:/[^\s<>()\[\]\"']*)?", re.I)
+
+
 def _found(spec: _Field, value: Any, text: str) -> bool:
+    if isinstance(spec, Url):
+        want = spec.read(value)
+        for m in _URLISH.finditer(text):
+            try:
+                if spec.read(m.group(0).rstrip(".,;:!?")) == want:
+                    return True
+            except Unreadable:
+                pass
+        return False
     if isinstance(spec, Date):
         want = spec.read(value)
         for m in _DATEISH.finditer(text):
