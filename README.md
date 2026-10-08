@@ -236,6 +236,12 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
 assay demo && assay serve
 ```
 
+Or with Docker, nothing to install but Docker:
+
+```bash
+docker run -p 8400:8400 -e ASSAY_AUTO_DEMO=1 ghcr.io/tap222/assay-server   # http://localhost:8400
+```
+
 This loads synthetic data and opens the dashboard on the Tests overview: a support agent's new
 prompt version, compared with the one before it, with every case that regressed and how its tool
 calls changed. A document pipeline's seven weeks are under Documents, in which a release breaks

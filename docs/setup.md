@@ -13,7 +13,7 @@ Setting up Assay has two stages. Installing it is done once by someone technical
 
 | Option | Steps | Good for |
 |---|---|---|
-| **Docker** (recommended) | `git clone https://github.com/tap222/assay-evals && cd assay-evals`<br>`docker build -t assay .`<br>`docker run -d -p 8400:8400 -v assay-data:/data assay` | a company server or VM |
+| **Docker** (recommended) | `docker run -d -p 8400:8400 -v assay-data:/data ghcr.io/tap222/assay-server` | a company server or VM |
 | **Vercel** | Import the repo at vercel.com/new (no build settings). Add a Postgres database, e.g. Neon from the Vercel marketplace: its `DATABASE_URL` is used as the store | a quick hosted setup |
 | **Laptop trial** | `pip install assay-server`<br>`assay demo`<br>`assay serve` → http://127.0.0.1:8400 | trying it with demo data |
 
@@ -289,7 +289,10 @@ Other ways in:
 
 ## Deploy
 
-**Docker:** `docker build -t assay . && docker run -p 8400:8400 -v assay-data:/data assay`
+**Docker:** `docker run -d -p 8400:8400 -v assay-data:/data ghcr.io/tap222/assay-server`. The image is
+published on every server release (`latest`, or a version such as `:0.2.1`); add
+`-e ASSAY_AUTO_DEMO=1` to load the demo into an empty store. To build it yourself from this
+repository: `docker build -t assay . && docker run -p 8400:8400 -v assay-data:/data assay`.
 
 **Vercel:** import the repo at vercel.com/new. There are no build settings to change,
 because Vercel detects the FastAPI `app` in the root `app.py`.
