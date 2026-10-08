@@ -221,6 +221,10 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
 
 - **DeepEval and RAGAS.** Their metrics run as Assay checks, and an existing DeepEval suite changes
   one import. See [DeepEval and RAGAS](docs/frameworks.md).
+- **OpenTelemetry.** Already tracing? Add one exporter to your collector and change no code.
+  Assay reads `gen_ai.*` spans and OpenInference spans (Arize Phoenix and other instrumentors),
+  and becomes the regression gate on top of the tracing you already have. See
+  [Sending data](docs/api.md#sending-data).
 - **Existing apps.** `assay connect` attaches Assay to an app you already have, through its
   database, a few lines of code, or a proposed test per model call. See [Setup](docs/setup.md).
 - **Any model provider.**
