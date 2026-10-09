@@ -33,6 +33,12 @@ export interface LlmCall {
    * input_schema, OpenAI's function.parameters, or an MCP tools/list entry's inputSchema). With
    * definitions, a changed description or schema shows in `assay diff`. */
   tools?: Array<string | ToolDefinition>;
+  /** The tool calls the model asked for. */
+  toolCalls?: Array<{ name: string; arguments: Record<string, unknown>; id?: string }>;
+  tokensCached?: number;
+  tokensReasoning?: number;
+  /** When the call started (defaults to when it's recorded). */
+  started?: Date;
   error?: string;
 }
 
@@ -97,3 +103,18 @@ export function caseIdOf(fullId: string): string;
 
 /** {name: input schema} from tool definitions, each with its description under "x-assay-description". */
 export function toolSchemas(tools?: Array<string | ToolDefinition>): Record<string, Record<string, unknown>>;
+
+/**
+ * Records the model calls an Anthropic or OpenAI client makes (messages.create, chat.completions.create,
+ * responses.create) on the current assayCase's run. Returns the same client. Outside a case, and
+ * for streams, nothing is recorded.
+ */
+export function instrument<T>(client: T): T;
+
+/** Vercel AI SDK middleware: wrapLanguageModel({ model, middleware: assayMiddleware() }). */
+export function assayMiddleware(): {
+  wrapGenerate: (options: { doGenerate: () => Promise<any>; params: any; model: any }) => Promise<any>;
+};
+
+/** The run of the assayCase() the calling code runs inside, or undefined. */
+export function currentRun(): Run | undefined;
