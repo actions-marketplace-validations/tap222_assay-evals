@@ -234,7 +234,8 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
   agent, it runs your tests, reads `assay diff`, and tells you what regressed before you commit.
   It never accepts a new baseline on its own. `--global` installs it for every project, and with
   `ASSAY_URL` and `ASSAY_UPLOAD=1` set every run lands in one dashboard, filed by repository,
-  with an **All projects** view. See [Getting started](docs/getting-started.md#all-your-repositories-in-one-dashboard-optional).
+  with an **All projects** view. The dashboard is one `assay serve` process with SQLite, no
+  Docker needed, and it shows each case's tool calls and the test's own checks. See [Getting started](docs/getting-started.md#all-your-repositories-in-one-dashboard-optional).
 - **Existing apps.** `assay connect` attaches Assay to an app you already have, through its
   database, a few lines of code, or a proposed test per model call. See [Setup](docs/setup.md).
 - **Any model provider.**

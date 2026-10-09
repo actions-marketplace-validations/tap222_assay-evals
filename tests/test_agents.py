@@ -150,6 +150,37 @@ def test_agent_run_end_to_end(client):
     assert client.get("/v1/trace/r2.c0", params={"source": src}).status_code == 200
 
 
+
+def test_a_check_the_test_failed_fails_the_run_on_the_dashboard(client):
+    """expect(...) failing in the test is a failure there too, though every check the server
+    works out itself passes."""
+    ts = datetime.utcnow().isoformat() + "Z"
+    test = {"case": "tests/test_support.py::test_refund", "run": "t-1"}
+    ev = lambda i, **kw: {"v": 1, "id": f"e{i}", "ts": ts, "run_id": "tr1", **kw}
+    events = [ev(0, type="run.start", kind="agent", task="test_refund", test=test),
+              ev(1, type="step", seq=0, kind="tool", name="get_order", args={"order_id": "1"}, result={"ok": True}),
+              ev(2, type="step", seq=1, kind="tool", name="refund", args={"order_id": "1"}, result={"ok": True}),
+              ev(3, type="step", seq=2, kind="answer", text="Refunded."),
+              ev(4, type="check", test=test, status="pass", field="expect.must_call(get_order)",
+                 evaluator="assay.expect@1"),
+              ev(5, type="check", test=test, status="fail", field="expect.must_get_approval_before(refund)",
+                 evaluator="assay.expect@1", reason="refund ran at step 2 without an approval"),
+              ev(6, type="run.end", status="completed", outcome="resolved")]
+    assert client.post("/v1/ingest", json={"events": events}, headers={"X-Tenant": "a"}).status_code == 200
+    assert client.post("/v1/agents/runs/t-1/evaluate", params={"source": "events:a"}).status_code == 200
+
+    s = client.get("/v1/agents/runs/t-1", params={"source": "events:a"}).json()["current"]
+    (row,) = s["trajectories_list"]
+    assert row["checks"]["efficiency"] == "pass" and row["checks"]["recorded"] == "fail"
+    assert row["failing_recorded"] == ["expect.must_get_approval_before(refund)"]
+    assert s["checks"]["recorded"] == {"passed": 0, "total": 1, "rate": 0.0}
+
+    t = client.get("/v1/agents/trajectories/tr1", params={"source": "events:a"}).json()
+    assert t["failed"] == ["recorded"]
+    bad = [c for c in t["recorded"] if c["status"] == "fail"]
+    assert [c["reason"] for c in bad] == ["refund ran at step 2 without an approval"]
+    assert all(c["evaluator"] != agents.EVALUATOR for c in t["recorded"])  # the server's own aren't repeated
+
 def test_opentelemetry_agent_spans_become_a_trajectory():
     from assay.ingest import from_otlp
     ns = lambda s: str(int((T0 + timedelta(seconds=s)).timestamp() * 1e9))

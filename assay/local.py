@@ -3074,7 +3074,8 @@ def upload(root: Path, run_id: Optional[str], url: Optional[str], key: Optional[
                 print(f"{url} refused the upload ({code}): {body}", file=sys.stderr)
                 return 2
     except OSError as exc:
-        print(f"Couldn't reach {url}: {exc}", file=sys.stderr)
+        print(f"Couldn't reach {url}: {exc}\nIs the server running? Start it with `assay serve` (no Docker "
+              f"needed). The run is kept in {HOME}/: send it then with `assay upload`.", file=sys.stderr)
         return 2
     tenant = tenant or "default"
     source = f"events:{tenant}"

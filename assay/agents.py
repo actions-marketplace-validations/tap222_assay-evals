@@ -791,13 +791,17 @@ def detail(engine: Engine, source, tenant: str, trajectory_id: str) -> Optional[
               or (c == "safety" and any(b["severity"] == "critical" for b in ev["safety"]))
               or (c == "efficiency" and not ev["efficiency"]["passed"])]
     first_bad = credit(traj, ref, rules, None, ev) if failed else None
+    recorded = recorded_checks(engine, tenant, [trajectory_id]).get(trajectory_id, [])
+    if recorded_status(recorded) == "fail":
+        failed.append("recorded")
     ser = lambda v: v.isoformat() if isinstance(v, datetime) else v
     return {**{k: ser(v) for k, v in traj.items() if k != "steps"},
             "steps": [{k: ser(v) for k, v in s.items()} for s in traj["steps"]],
             "reference": {k: ser(v) for k, v in ref.items()} if ref else None,
             "answer_ok": ev["answer"], "end_state": ev["end_state"], "world": {
                 k: v for k, v in end_state(traj).items()}, "tool_calls": ev["tool_calls"],
-            "safety": ev["safety"], "efficiency": ev["efficiency"], "failed": failed, "first_bad": first_bad}
+            "safety": ev["safety"], "efficiency": ev["efficiency"], "failed": failed, "first_bad": first_bad,
+            "recorded": recorded}
 
 
 def features(traj: dict) -> set:
@@ -829,6 +833,7 @@ def summary(engine: Engine, source, tenant: str, run_id: str, baseline: Optional
         hs = run_trajectories(engine, tenant, rid)
         trajs = source.trajectories([h["trajectory_id"] for h in hs])
         refs = references(engine, tenant, {h["case_id"] for h in hs if h["case_id"]})
+        recorded = recorded_checks(engine, tenant, [h["trajectory_id"] for h in hs])
         per, mech, by_case = [], Counter(), defaultdict(list)
         checks = defaultdict(lambda: [0, 0])
         for h in hs:
@@ -843,13 +848,19 @@ def summary(engine: Engine, source, tenant: str, run_id: str, baseline: Optional
                 checks[c["field"]][1] += 1
             if any(c["status"] == "fail" for c in res):
                 mech[credit(t, ref, rules, None, ev)["mechanism"]] += 1
+            rec = recorded.get(h["trajectory_id"], [])
+            if recorded_status(rec):
+                res = res + [{"field": "recorded", "status": recorded_status(rec)}]
+                checks["recorded"][0] += recorded_status(rec) == "pass"
+                checks["recorded"][1] += 1
             e = ev["efficiency"]
             row = {"trajectory_id": h["trajectory_id"], "case_id": h["case_id"], "attempt": h["attempt"],
                    "task": h["task"], **{k: e[k] for k in ("steps", "tool_calls", "repeated_calls", "tool_errors",
                                                            "recovered", "tokens", "cost_usd", "seconds")},
                    "precision": (ev["tool_calls"] or {}).get("precision"),
                    "recall": (ev["tool_calls"] or {}).get("recall"),
-                   "checks": {c["field"]: c["status"] for c in res}}
+                   "checks": {c["field"]: c["status"] for c in res},
+                   "failing_recorded": [c["field"] for c in rec if c["status"] == "fail"]}
             per.append(row)
             by_case[h["case_id"]].append(row)
         agg = lambda k, f=mean: f([r[k] for r in per if r[k] is not None]) if any(r[k] is not None for r in per) else None
@@ -880,6 +891,29 @@ def summary(engine: Engine, source, tenant: str, run_id: str, baseline: Optional
             "evaluated": _evaluated(engine, tenant, run_id), "current": {k: v for k, v in cur.items() if k != "per_case"},
             "previous": {k: v for k, v in base.items() if k not in ("per_case", "trajectories_list")} if base else None,
             "costlier": costlier[:50]}
+
+
+def recorded_checks(engine: Engine, tenant: str, trajectory_ids: List[str]) -> Dict[str, List[dict]]:
+    """Checks stored for each trajectory besides the five worked out here: the test's own
+    expect(...) and pytest results, judges, PII. A run that failed one of them failed."""
+    t = store.eval_results
+    out = defaultdict(list)
+    if not trajectory_ids:
+        return out
+    with engine.connect() as conn:
+        for r in conn.execute(select(t.c.document_id, t.c.field, t.c.status, t.c.evaluator, t.c.reason)
+                              .where(and_(t.c.tenant == tenant, t.c.document_id.in_(list(trajectory_ids)),
+                                          t.c.evaluator.is_distinct_from(EVALUATOR)))
+                              .order_by(t.c.ts)):
+            out[r.document_id].append({"field": r.field or r.evaluator or "check", "status": r.status,
+                                       "evaluator": r.evaluator, "reason": r.reason})
+    return out
+
+
+def recorded_status(checks: List[dict]) -> Optional[str]:
+    """One verdict for a trajectory's recorded checks: fail if any failed."""
+    judged = [c["status"] for c in checks if c["status"] in ("pass", "fail")]
+    return None if not judged else "fail" if "fail" in judged else "pass"
 
 
 def _evaluated(engine: Engine, tenant: str, run_id: str) -> bool:
