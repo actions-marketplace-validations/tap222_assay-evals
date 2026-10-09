@@ -29,9 +29,20 @@ export interface LlmCall {
   prompt?: string;
   text?: string;
   finishReason?: string;
-  /** Names of the tools the model was offered. */
-  tools?: string[];
+  /** The tools the model was offered: names, or their definitions as you passed them (Anthropic's
+   * input_schema, OpenAI's function.parameters, or an MCP tools/list entry's inputSchema). With
+   * definitions, a changed description or schema shows in `assay diff`. */
+  tools?: Array<string | ToolDefinition>;
   error?: string;
+}
+
+export interface ToolDefinition {
+  name?: string;
+  description?: string;
+  input_schema?: Record<string, unknown>;
+  inputSchema?: Record<string, unknown>;
+  parameters?: Record<string, unknown>;
+  function?: { name: string; description?: string; parameters?: Record<string, unknown> };
 }
 
 export class Expectations {
@@ -83,3 +94,6 @@ export function prompt(id: string, version: string | number, template?: string):
 
 /** A case id the server takes (at most 128 characters): a long one keeps its start and a hash of the whole. */
 export function caseIdOf(fullId: string): string;
+
+/** {name: input schema} from tool definitions, each with its description under "x-assay-description". */
+export function toolSchemas(tools?: Array<string | ToolDefinition>): Record<string, Record<string, unknown>>;

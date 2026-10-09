@@ -6,7 +6,7 @@ branding:
 
 inputs:
   command:
-    description: The test command. `pytest --assay` compares each test with its baseline.
+    description: The test command. `pytest --assay` compares each test with its baseline; `assay test` runs the command in assay.toml (any language, e.g. `npx jest`).
     default: pytest --assay
   install:
     description: Installs what the tests need, Assay included (skip it if an earlier step does).

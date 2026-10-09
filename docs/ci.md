@@ -23,6 +23,26 @@ The action compares each test with its last passing run *on the default branch*:
 branch's latest. It then posts one comment on the PR, and edits that comment on later pushes:
 
 ```
+## TypeScript and JavaScript
+
+Install the project's packages as well as Assay, and run `assay test`, which runs the command in
+`assay.toml` (for example `npx jest test/ai`):
+
+```yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: tap222/assay-evals@v1
+        with:
+          install: pip install assay-server && npm ci
+          command: assay test
+```
+
+Baselines, the PR comment and the checks a PR can't loosen work as they do for pytest.
+
 ## AI regression detected
 **48 cases** · 45 passed · 2 regressed · 1 flaky · 3 improved
 
