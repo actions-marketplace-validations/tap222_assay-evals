@@ -306,6 +306,34 @@ def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_p
     assert local.upload(project, None, None, None, None, http=http) == 2  # nowhere to send it
 
 
+
+def test_an_uploaded_run_says_which_repository_and_folder_it_came_from(project, capsys, tmp_path_factory,
+                                                                      monkeypatch):
+    from fastapi.testclient import TestClient
+    from assay.api import create_app
+    from assay.config import Settings
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://bot:s3cret@github.com/acme/shop.git"], cwd=project,
+                   check=True)
+    monkeypatch.setenv("HOME", str(project.parent))
+    init_pytest_example(project)
+    main(["test"])
+    capsys.readouterr()
+    server = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path_factory.mktemp('srv') / 's.db'}")))
+
+    def http(method, url, body, headers):
+        r = server.request(method, url.replace("http://assay.test", ""), json=body, headers=headers)
+        return r.status_code, r.json()
+    assert local.upload(project, None, "http://assay.test", None, None, http=http) == 0
+    where = {"repo": "https://github.com/acme/shop.git", "folder": f"~/{project.name}"}  # no token in it
+    (run,) = server.get("/v1/evals/runs", params={"source": "events:shop"}).json()
+    assert run["origin"] == where
+    (only,) = server.get("/v1/projects").json()
+    assert only["latest"]["origin"] == where
+    assert "s3cret" not in (project / ".assay" / "runs").joinpath(f"{run['run_id']}.jsonl").read_text() + \
+        json.dumps(server.get("/v1/projects").json())
+
 def test_a_run_the_command_left_open_is_reported_not_skipped(project, capsys):
     (project / "agent.py").write_text('''
 import os
