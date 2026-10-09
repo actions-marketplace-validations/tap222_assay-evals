@@ -173,6 +173,10 @@ removed) and its folder, with your home folder as `~`. The dashboard shows them 
 test run** and in **All projects**, so a project name can always be traced back to its
 repository.
 
+Only `pytest --assay` sends runs. A plain `pytest` run, even with `ASSAY_URL` set, records
+locally to `.assay/events.jsonl` and sends nothing, so day-to-day test runs don't fill the
+dashboard.
+
 If the server isn't running, the tests still run and their result stands; the run is kept in
 `.assay/` and the output says so. Send it once the server is up with `assay upload`.
 

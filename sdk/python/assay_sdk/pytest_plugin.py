@@ -391,7 +391,11 @@ def _case(node):
     """One test as an Assay case: opens its run, yields it for the test, and when resumed after the
     test, records pytest's pass or fail as a check of its own."""
     if assay._client is None:
-        assay.init()
+        if _session(node.config) or os.environ.get("ASSAY_TEST_RUN"):
+            assay.init()
+        else:  # plain pytest: recorded as with no server, though ASSAY_URL is set (it's there for --assay)
+            assay.init(transport=assay._file_transport(os.environ.get("ASSAY_PATH")
+                                                       or os.path.join(".assay", "events.jsonl")))
     node.user_properties.append(("assay_case", case_id(node.nodeid)))
     with assay.run(node.originalname or node.name, test=case_id(node.nodeid),
                    tags={"pytest": node.nodeid[:200], **_rewording_tags(node)}) as run:
