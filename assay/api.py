@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, ValidationError
@@ -206,6 +207,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "**Connecting:** send events to `POST /v1/events` (all record types in one request, up to "
             f"{ingest.MAX_BATCH} records), or point an OpenTelemetry collector at `/v1/otlp` "
             "(OTLP/HTTP, JSON encoding). Writes are upserts by id, so retrying a batch is always safe."))
+
+    app.add_middleware(GZipMiddleware, minimum_size=2000)  # the dashboard page and big results: a quarter the size
 
     if settings.cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["*"],

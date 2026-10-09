@@ -931,7 +931,8 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     skip = {(c["case_id"], c["field"] or "", c["evaluator"] or "") for c in not_judged}
     # Listed apart, and out of every count: judged on the wrong data, or not judged at all.
     rows = [r for r in rows if r.result_id not in found and flaky.check_key(r) not in skip]
-    base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, tenant, base_rows)]
+    base_found = audit.audit_rows(engine, tenant, base_rows)  # once: per row, it was n² on a big run
+    base_rows = [r for r in base_rows if r.result_id not in base_found]
     out = {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
            "attempts": attempts(rows), "base_attempts": attempts(base_rows),
            "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg, tenant),

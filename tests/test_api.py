@@ -289,3 +289,8 @@ def test_an_open_server_keeps_the_demo_views_as_they_are(client):
     r = client.put("/v1/views", json={"source": "events:demo-agent", "config": {"views": {}}})
     assert r.status_code == 403 and "open demo" in r.json()["detail"]
     assert client.put("/v1/views", json={"source": "events:mine", "config": {"views": {}}}).status_code == 200
+
+
+def test_the_dashboard_is_sent_compressed(client):
+    r = client.get("/", headers={"Accept-Encoding": "gzip"})
+    assert r.status_code == 200 and r.headers["content-encoding"] == "gzip" and "<title>Assay</title>" in r.text
