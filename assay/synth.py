@@ -130,12 +130,12 @@ def fingerprint(dims: List[Dimension]) -> str:
 def read(path: Path) -> List[dict]:
     if not path.exists():
         return []
-    return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
 def write(path: Path, rows: List[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
 
 
 def tuple_id(values: Dict[str, str], dims: List[Dimension]) -> str:
@@ -214,7 +214,7 @@ def prompt_text(root: Path, cfg: Config) -> Optional[str]:
     for p in cfg.prompts:
         f = root / p
         if f.is_file():
-            parts.append(f.read_text(errors="replace"))
+            parts.append(f.read_text(errors="replace", encoding="utf-8"))
     if not cfg.prompts:
         from assay import scaffold
         try:
@@ -493,7 +493,7 @@ def compare(engine, tenant: str, judge, dims: List[Dimension], days: float = 30,
 def local_toml(root: Path) -> dict:
     from assay import local
     path = root / local.CONFIG
-    return local.tomllib.loads(path.read_text()) if path.exists() else {}
+    return local.tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 def _asker(jcfg: dict):

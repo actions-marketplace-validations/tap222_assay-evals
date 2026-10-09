@@ -318,7 +318,7 @@ def ensure_home(root: Path) -> Path:
     """.assay/ holds recordings, the local store and the baseline: none of it belongs in git."""
     home = root / HOME
     home.mkdir(exist_ok=True)
-    (home / ".gitignore").write_text("*\n")
+    (home / ".gitignore").write_text("*\n", encoding="utf-8")
     return home
 
 
@@ -329,7 +329,7 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
     if not path.exists():
         raise SetupError(f"No {CONFIG} here. Run `assay init` first.")
     try:
-        cfg = tomllib.loads(path.read_text())
+        cfg = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
         raise SetupError(f"{CONFIG} isn't valid TOML: {exc}")
     test = cfg.get("test") or {}
@@ -727,7 +727,7 @@ def install_claude_skill(home: Path) -> Optional[str]:
     if path.exists():
         return None
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(CLAUDE_SKILL_TEMPLATE)
+    path.write_text(CLAUDE_SKILL_TEMPLATE, encoding="utf-8")
     return str(path)
 
 
@@ -740,7 +740,7 @@ def js_project(root: Path, lang: Optional[str] = None) -> Optional[dict]:
     if lang == "python" or (lang is None and (not pkg_file.exists() or python)):
         return None
     try:
-        pkg = json.loads(pkg_file.read_text()) if pkg_file.exists() else {}
+        pkg = json.loads(pkg_file.read_text(encoding="utf-8")) if pkg_file.exists() else {}
     except ValueError:
         pkg = {}
     deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
@@ -784,13 +784,13 @@ def init(root: Path, claude_code: bool = False, lang: Optional[str] = None) -> L
     made = []
     if claude_code and not (root / CLAUDE_SKILL).exists():
         (root / CLAUDE_SKILL).parent.mkdir(parents=True, exist_ok=True)
-        (root / CLAUDE_SKILL).write_text(CLAUDE_SKILL_TEMPLATE)
+        (root / CLAUDE_SKILL).write_text(CLAUDE_SKILL_TEMPLATE, encoding="utf-8")
         made.append(CLAUDE_SKILL)
     js = js_project(root, lang)
     example, text = (js["example"], js_example(js["runner"], js["lang"] == "ts")) if js else (EXAMPLE, EXAMPLE_TEMPLATE)
     if not (root / example).exists():
         (root / example).parent.mkdir(parents=True, exist_ok=True)
-        (root / example).write_text(text)
+        (root / example).write_text(text, encoding="utf-8")
         made.append(example)
     if not (root / CONFIG).exists():
         config = CONFIG_TEMPLATE.format()
@@ -798,20 +798,20 @@ def init(root: Path, claude_code: bool = False, lang: Optional[str] = None) -> L
             config = config.replace(CONFIG_HEAD, JS_CONFIG_HEAD).replace(
                 'command = "pytest -q tests/ai"   # what `assay test` runs',
                 f'command = "{js["command"]}"   # what `assay test` runs: your test runner, on the Assay tests')
-        (root / CONFIG).write_text(config)
+        (root / CONFIG).write_text(config, encoding="utf-8")
         made.append(CONFIG)
     return made
 
 
 def _state(home: Path) -> dict:
     try:
-        return json.loads((home / "state.json").read_text())
+        return json.loads((home / "state.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
 def _save_state(home: Path, state: dict) -> None:
-    (home / "state.json").write_text(json.dumps(state, indent=1))
+    (home / "state.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
 
 
 # ---------- loading a recording ----------
@@ -2685,7 +2685,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     state["rerun"] = sorted(set().union(*(v for k, v in result["summary"]["buckets"].items() if k != "passed")))
     _save_state(home, state)
     md = summary_markdown(run_id, result, code, against)
-    (home / "summary.md").write_text(md)
+    (home / "summary.md").write_text(md, encoding="utf-8")
     if os.environ.get("GITHUB_STEP_SUMMARY"):  # GitHub Actions: the job's summary page
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
             f.write(md + "\n")
@@ -2696,7 +2696,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
 
 def _git(root: Path, *args: str) -> Optional[str]:
     try:
-        r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -2711,7 +2711,7 @@ def revision(root: Path, engine, run_id: str) -> dict:
     keep = ["--", ".", ":(exclude).assay", f":(exclude){CONFIG[:-5]}.acks.toml"]  # acknowledgements change no code
     changes = (_git(root, "diff", "HEAD", *keep) or "") + (_git(root, "status", "--porcelain", *keep) or "") \
         if commit else ""
-    cfg = (root / CONFIG).read_text() if (root / CONFIG).exists() else ""
+    cfg = (root / CONFIG).read_text(encoding="utf-8") if (root / CONFIG).exists() else ""
     rows = _rows(engine, run_id)
     lineage = {json.dumps(r.lineage, sort_keys=True) for r in rows if r.lineage}
     for s in _setups(engine, TENANT, [r.document_id for r in rows]).values():  # prompt@version and model per call
@@ -3192,7 +3192,7 @@ def report_cmd(root: Path, days: float = 7, fmt: str = "markdown", out: Optional
     text = json.dumps(report.as_json(r), indent=1, default=str) if fmt == "json" else report.markdown(r)
     print(text)
     if out:
-        Path(out).write_text(text)
+        Path(out).write_text(text, encoding="utf-8")
     return 0
 
 
@@ -3240,7 +3240,7 @@ def upload(root: Path, run_id: Optional[str], url: Optional[str], key: Optional[
     if not path.exists():
         print(f"No recording for run {run_id} in {home / 'runs'}.", file=sys.stderr)
         return 2
-    events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     where = run_origin(root)
     for e in events:  # so the dashboard can say which repository and folder a run came from
         if e.get("type") == "run.start" and e.get("test"):

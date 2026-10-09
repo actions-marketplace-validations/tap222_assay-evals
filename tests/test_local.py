@@ -836,8 +836,8 @@ def test_init_picks_the_language_and_runner_a_js_project_uses(tmp_path):
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
 def test_init_in_a_node_project_writes_a_setup_assay_test_runs(project, capsys):
     (project / "package.json").write_text('{"name": "shop"}')
-    (project / "node_modules").mkdir()
-    (project / "node_modules" / "assay-evals").symlink_to(JS_SDK, target_is_directory=True)
+    (project / "node_modules").mkdir()  # the SDK from this commit; copied: Windows needs rights to symlink
+    shutil.copytree(JS_SDK, project / "node_modules" / "assay-evals", ignore=shutil.ignore_patterns("test", "node_modules"))
     assert main(["init"]) == 0
     out = capsys.readouterr().out
     assert "Created test/ai/support.assay.test.js, assay.toml." in out and "`assay test`" in out

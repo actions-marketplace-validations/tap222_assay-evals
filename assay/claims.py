@@ -33,7 +33,7 @@ def reviews(engine: Engine, tenant: str, since: Optional[datetime] = None,
     if until is not None:
         cond.append(c.c.ts < until)
     with engine.connect() as conn:
-        return [dict(r._mapping) for r in conn.execute(select(c).where(and_(*cond)).order_by(c.c.ts))]
+        return [dict(r._mapping) for r in conn.execute(select(c).where(and_(*cond)).order_by(c.c.ts, c.c.review_id))]
 
 
 def golden(engine: Engine, tenant: str, since: Optional[datetime] = None) -> List[dict]:
@@ -82,7 +82,7 @@ def pull(root, url: str, source: str, days, golden_path: str = "golden.jsonl") -
     path = Path(root) / golden_path
     have = set()
     if path.exists():
-        have = {json.loads(x).get("id") for x in path.read_text().splitlines() if x.strip()}
+        have = {json.loads(x).get("id") for x in path.read_text(encoding="utf-8").splitlines() if x.strip()}
     new = [x for x in body["items"] if x["id"] not in have]
     if new:
         with path.open("a") as f:

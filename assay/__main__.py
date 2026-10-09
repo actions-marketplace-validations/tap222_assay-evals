@@ -12,7 +12,20 @@ from assay import runner, store
 from assay.config import Settings
 
 
+def utf8_output() -> None:
+    """Reports use → ✓ ✗: on a stream in another encoding (a Windows pipe, a CI log), write UTF-8
+    rather than fail on the first arrow."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):  # a stream that can't change: leave it
+                pass
+
+
 def main(argv=None) -> int:
+    utf8_output()
     p = argparse.ArgumentParser(prog="assay", description="Regression testing for AI apps and agents: what changed, and whether it's real.")
     sub = p.add_subparsers(dest="cmd", required=True)
 

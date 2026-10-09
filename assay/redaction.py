@@ -107,7 +107,7 @@ def store_events(engine, tenant: str, since: datetime, until: datetime) -> List[
 def read_file(path) -> List[dict]:
     from pathlib import Path
     p = Path(path)
-    return [json.loads(x) for x in p.read_text().splitlines() if x.strip()] if p.exists() else []
+    return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()] if p.exists() else []
 
 
 def text(r: dict, path: str) -> str:

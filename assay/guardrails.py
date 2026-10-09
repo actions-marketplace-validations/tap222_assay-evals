@@ -217,6 +217,6 @@ def cli(root: Path, days: float, fmt: str, export: Optional[str]) -> int:
                                    "false_negative", "labeled_good", "labeled_bad", "example_case")}
                 for x in r["evaluators"] if x["verdict"] == "candidate"]
         Path(export).write_text(json.dumps({"generated": datetime.utcnow().isoformat(), "settings": cfg,
-                                            "candidates": keep}, indent=1, default=str) + "\n")
+                                            "candidates": keep}, indent=1, default=str) + "\n", encoding="utf-8")
         print(f"\n{len(keep)} candidate{'s' * (len(keep) != 1)} written to {export}.")
     return 0

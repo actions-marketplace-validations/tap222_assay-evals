@@ -96,7 +96,7 @@ def duration(text: str) -> timedelta:
 
 def who() -> str:
     try:
-        name = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True, timeout=5).stdout.strip()
+        name = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True, timeout=5, encoding="utf-8", errors="replace").stdout.strip()
     except (OSError, subprocess.SubprocessError):
         name = ""
     return name or os.environ.get("GITHUB_ACTOR") or getpass.getuser()
@@ -109,7 +109,7 @@ def load(config: Path) -> List[dict]:
     if not path.exists():
         return []
     try:
-        data = tomllib.loads(path.read_text())
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
         raise AckError(f"{path.name} isn't valid TOML: {exc}")
     out = []
@@ -164,7 +164,7 @@ def save(config: Path, acks: List[dict]) -> Path:
             if a.get(k):
                 out.append(f"{k} = {_inline(a[k])}")
         out.append("")
-    path.write_text("\n".join(out))
+    path.write_text("\n".join(out), encoding="utf-8")
     return path
 
 

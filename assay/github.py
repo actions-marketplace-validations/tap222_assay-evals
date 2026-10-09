@@ -36,7 +36,7 @@ def pr_number(env=os.environ) -> Optional[int]:
     """The pull request this job runs for: from the event payload, else refs/pull/<n>/merge."""
     path = env.get("GITHUB_EVENT_PATH")
     if path and os.path.exists(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             event = json.load(f)
         n = (event.get("pull_request") or {}).get("number") or \
             ((event.get("issue") or {}).get("pull_request") and event["issue"].get("number"))

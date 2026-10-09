@@ -53,7 +53,7 @@ class PasswordCommand:
 
     def _run(self) -> str:
         try:
-            r = subprocess.run(self.command, shell=True, capture_output=True, text=True, timeout=self.timeout)
+            r = subprocess.run(self.command, shell=True, capture_output=True, text=True, timeout=self.timeout, encoding="utf-8", errors="replace")
         except subprocess.TimeoutExpired:
             raise CredentialError(f"The password command took longer than {self.timeout:g}s: {self.command}")
         if r.returncode != 0:

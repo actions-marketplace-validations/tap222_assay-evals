@@ -35,7 +35,7 @@ import urllib.error
 import urllib.request
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 __all__ = ["init", "run", "tagged", "claim_review", "feedback", "check", "correction", "expect", "prompt", "flush", "shutdown", "Run"]
@@ -45,8 +45,19 @@ log = logging.getLogger("assay_sdk")
 SCHEMA = 1
 
 
+_last_now = [datetime.min.replace(tzinfo=timezone.utc)]
+_now_lock = threading.Lock()
+
+
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    """Now, always later than the last one this process gave: on a coarse clock (Windows), two
+    events recorded back to back still keep their order."""
+    with _now_lock:
+        t = datetime.now(timezone.utc)
+        if t <= _last_now[0]:
+            t = _last_now[0] + timedelta(microseconds=1)
+        _last_now[0] = t
+    return t.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _ts(t: Optional[datetime]) -> Optional[str]:
@@ -193,15 +204,38 @@ def _file_transport(path: str) -> Callable[[List[dict]], None]:
             folder = os.path.dirname(path)
             if not os.path.isdir(folder):
                 os.makedirs(folder, exist_ok=True)
-                with open(os.path.join(folder, ".gitignore"), "w") as f:  # recorded inputs stay out of git
+                with open(os.path.join(folder, ".gitignore"), "w", encoding="utf-8") as f:  # recorded inputs stay out of git
                     f.write("*\n")
-            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
             try:
-                while data:
-                    data = data[os.write(fd, data):]
+                if os.name == "nt":  # Windows emulates O_APPEND (seek, then write): hold a lock across processes
+                    _locked_append(fd, data)
+                else:
+                    while data:
+                        data = data[os.write(fd, data):]
             finally:
                 os.close(fd)
     return write
+
+
+def _locked_append(fd: int, data: bytes) -> None:
+    """Windows: lock the file's first byte (other writers wait, up to 10 s per try), append, unlock."""
+    import msvcrt
+    for attempt in range(30):
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            break
+        except OSError:
+            if attempt == 29:
+                raise
+    try:
+        os.lseek(fd, 0, os.SEEK_END)
+        while data:
+            data = data[os.write(fd, data):]
+    finally:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
 
 def _tool_names(tools: Optional[List[Any]]) -> Optional[List[str]]:
