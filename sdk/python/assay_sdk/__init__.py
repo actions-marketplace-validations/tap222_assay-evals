@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 __all__ = ["init", "run", "tagged", "claim_review", "feedback", "check", "correction", "expect", "prompt", "flush", "shutdown", "Run"]
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 log = logging.getLogger("assay_sdk")
 SCHEMA = 1
@@ -644,4 +644,4 @@ from assay_sdk.faithfulness import faithfulness  # noqa: E402
 from assay_sdk.simulate import Persona, Simulation, load_personas, simulate  # noqa: E402
 from assay_sdk.golden import golden_examples  # noqa: E402
 # Breaking tools on purpose, to test error handling (assay_sdk/faults.py).
-from assay_sdk.faults import ToolFault, faults  # noqa: E402
+from assay_sdk.faults import REAL, ToolFault, faults  # noqa: E402

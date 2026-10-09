@@ -106,6 +106,60 @@ def test_faults_and_handling_them(sent):
             pass
 
 
+
+# ---------- the world changing while the agent works ----------
+
+@assay.tool
+def get_invoice(invoice_id):
+    return {"id": invoice_id, "status": "approved", "amount": 1240.0}
+
+
+@assay.tool
+def get_supplier(supplier_id):
+    return {"id": supplier_id, "status": "active"}
+
+
+@assay.tool
+def pay(invoice_id, amount):
+    return {"paid": True}
+
+
+def payer(recheck: bool):
+    """Plans the payment on the first reads; a careful one reads the supplier again just before paying."""
+    run = assay.current()
+    invoice, supplier = get_invoice("INV-17"), get_supplier("S-3")
+    run.approval("pay", "approved", by="ap-clerk")
+    if supplier["status"] != "active" or (recheck and get_supplier("S-3")["status"] != "active"):
+        return "I couldn't pay INV-17: the supplier is on hold now. Sent back for review."
+    pay("INV-17", invoice["amount"])
+    return "Paid INV-17."
+
+
+def test_a_state_that_changes_between_reading_and_acting():
+    from assay_sdk.testing import assert_not_called
+    # 9:00 the supplier is active; 9:07 it goes on hold; 9:10 the agent is about to pay.
+    held = {"get_supplier": {"returns": [assay.REAL, {"id": "S-3", "status": "on_hold"}]}}
+    with assay.run("ap", input="pay INV-17") as careful:
+        with assay.faults(**held):
+            careful.answer(payer(recheck=True))
+    assert_not_called(careful, "pay")
+    assert [s.get("fault") for s in careful.steps if s["kind"] == "tool"] == [None, None, "return"]
+    assert expect(careful).handles_failure().failures() == []  # it said it didn't pay, and why
+    with assay.run("ap", input="pay INV-17") as stale:
+        with assay.faults(**held):
+            stale.answer(payer(recheck=False))
+    with pytest.raises(AssertionError, match="pay shouldn't have been called"):  # paid on a 9:00 read
+        assert_not_called(stale, "pay")
+    # The last value holds from then on; and an empty list is a mistake, not "no fault".
+    with assay.run("ap") as r:
+        with assay.faults(get_supplier={"returns": [{"status": "a"}, {"status": "b"}]}):
+            got = [get_supplier("S-3")["status"] for _ in range(4)]
+    assert got == ["a", "b", "b", "b"]
+    with pytest.raises(ValueError, match="returns"):
+        with assay.faults(get_supplier={"returns": []}):
+            pass
+
+
 def test_schema_and_checkpoint_expectations(sent):
     with assay.run("support", input="cancel O-17") as r:
         r.llm(model="m", tools=[CANCEL])
