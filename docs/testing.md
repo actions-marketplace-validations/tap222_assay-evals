@@ -2,6 +2,9 @@
 
 # Test your AI app locally: it's pytest (no server, no account)
 
+> TypeScript or JavaScript? The same checks, baselines and diff work for Jest and Vitest tests:
+> wrap the test body in `assayCase()` and run `assay test`. See [sdk/js](../sdk/js/README.md).
+
 Your AI tests are pytest tests: `tests/ai/test_support.py`, `test_tool_selection.py`,
 `test_security.py`, `test_document_extraction.py`. Each test records what the agent did, fails
 when the run breaks a rule or misses what the test expects, and, with `--assay`, is compared

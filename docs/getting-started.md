@@ -5,6 +5,10 @@
 Add Assay to the AI app you already have in four steps. You need Python 3.10 or newer. You don't
 need an API key, a server or an account.
 
+The steps below are for a Python app. For TypeScript or JavaScript (Jest or Vitest), see
+[sdk/js](../sdk/js/README.md): `npm install --save-dev assay-evals`, `assayCase()` in a test, and
+`assay test`. Everything from step 4 on (baselines, `assay diff`, CI, the dashboard) is the same.
+
 Assay remembers what each test did the last time it passed. When a prompt, model or code change
 makes your app behave differently, the test fails and tells you what changed.
 
