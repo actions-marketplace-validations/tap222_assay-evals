@@ -15,9 +15,16 @@ _TYPES = {"string": (str,), "integer": (int,), "number": (int, float), "boolean"
           "object": (dict,), "null": (type(None),)}
 
 
+# The tool's description, kept in its schema under a keyword JSON Schema ignores: the model reads it
+# to choose a tool, so a reworded description is a change to the tool. Servers that predate it store
+# it like any other keyword.
+DESCRIPTION = "x-assay-description"
+
+
 def tool_schemas(tools: Optional[List[Any]]) -> Dict[str, dict]:
     """{name: input schema} from tool definitions as providers take them: Anthropic's input_schema,
-    OpenAI's function parameters (or a flat {"name", "parameters"}), MCP's inputSchema."""
+    OpenAI's function parameters (or a flat {"name", "parameters"}), MCP's inputSchema. The tool's
+    description, when it has one, goes in as DESCRIPTION."""
     out = {}
     for t in tools or []:
         if not isinstance(t, dict):
@@ -25,7 +32,10 @@ def tool_schemas(tools: Optional[List[Any]]) -> Dict[str, dict]:
         fn = t.get("function") if isinstance(t.get("function"), dict) else t
         name = fn.get("name")
         schema = fn.get("input_schema") or fn.get("parameters") or fn.get("inputSchema")
+        text = fn.get("description")
         if name and isinstance(schema, dict):
+            if isinstance(text, str) and text:
+                schema = {**schema, DESCRIPTION: text[:4096]}
             out[str(name)[:128]] = schema
     return out
 

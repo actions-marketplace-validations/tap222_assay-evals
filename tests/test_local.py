@@ -709,3 +709,74 @@ def test_a_node_project_is_tested_and_a_regression_caught(project, capsys, monke
     out = capsys.readouterr().out
     assert "2 regressed" in out and "No longer: approval" in out
     assert "expect.must_call_before(approval, refund)" in out
+
+
+# --- a tool's definition changed: what the model reads to choose it ---------------------------
+
+MCP_AGENT = '''
+import os
+import assay_sdk as assay
+assay.init()
+# An MCP server's tools/list, offered to the model as it is.
+TOOLS = [{"name": "get_order", "description": "Look up an order by its id.",
+          "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]}},
+         {"name": "refund", "description": os.environ.get("REFUND_DOC", "Refund an order. Needs approval first."),
+          "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"},
+                                                          "amount": {"type": "number"}},
+                          "required": ["order_id", "amount"]}}]
+for case in ("refund_a", "refund_b"):
+    with assay.run("refund", test=case) as run:
+        run.llm(model="m", tokens_in=500, tokens_out=40, tools=TOOLS)
+        run.call("get_order", lambda order_id: {"price": 10}, order_id="O-1")
+        if "approval" in TOOLS[1]["description"]:  # the stand-in model follows the description
+            run.approval("refund", "approved")
+        run.call("refund", lambda order_id, amount: {"ok": True}, order_id="O-1", amount=10)
+        run.answer("Refunded.")
+with assay.run("lookup", test="lookup") as run:  # a case that isn't offered refund
+    run.llm(model="m", tokens_in=300, tokens_out=20, tools=TOOLS[:1])
+    run.call("get_order", lambda order_id: {"price": 10}, order_id="O-2")
+    run.answer("It's on its way.")
+'''
+
+
+def test_a_reworded_tool_description_shows_next_to_the_regression_it_caused(project, capsys, monkeypatch):
+    (project / "agent.py").write_text(MCP_AGENT)
+    config(project, f"{sys.executable} agent.py",
+           contracts='[[contracts]]\nkind = "requires_approval"\nstep = "refund"\n')
+    assert main(["test"]) == 0
+    capsys.readouterr()
+
+    monkeypatch.setenv("REFUND_DOC", "Refund an order right away.")
+    assert main(["test"]) == 1
+    capsys.readouterr()
+    assert main(["diff"]) == 1
+    out = capsys.readouterr().out
+    assert "2 regressed" in out
+    assert "tool    refund: description “Refund an order. Needs approval first.” → “Refund an order right away.”" in out
+    assert "2 regressions, all in cases offered refund, whose definition changed; " \
+           "none of the 1 case not offered it regressed" in out
+
+
+def test_tool_definition_changes_say_what_the_model_now_sees():
+    from assay_sdk.checks import DESCRIPTION, tool_schemas
+    before = {"type": "object", DESCRIPTION: "Refund an order.",
+              "properties": {"order_id": {"type": "string"}, "amount": {"type": "number"},
+                             "reason": {"type": "string", "enum": ["damaged", "late"]}, "note": {"type": "string"}},
+              "required": ["order_id"]}
+    after = {"type": "object", DESCRIPTION: "Refund an order.",
+             "properties": {"order_id": {"type": "integer"}, "amount": {"type": "number"},
+                            "reason": {"type": "string", "enum": ["damaged", "lost"]},
+                            "currency": {"type": "string"}},
+             "required": ["order_id", "amount", "currency"]}
+    assert local.tool_definition_changes(before, after) == [
+        "`currency` added (required)", "`note` removed", "`amount` now required", "`order_id` string → integer",
+        "`reason` allowed values +lost −late"]
+    assert local.tool_definition_changes(before, before) == []
+    assert local.tool_definition_changes({**before, DESCRIPTION: "Old."}, {**before, DESCRIPTION: "New."}) == \
+        ["description “Old.” → “New.”"]
+    # Anthropic, OpenAI and MCP definitions all keep their description with the schema.
+    for t in ({"name": "f", "description": "d", "input_schema": {"type": "object"}},
+              {"type": "function", "function": {"name": "f", "description": "d", "parameters": {"type": "object"}}},
+              {"name": "f", "description": "d", "inputSchema": {"type": "object"}}):
+        assert tool_schemas([t]) == {"f": {"type": "object", DESCRIPTION: "d"}}
+    assert tool_schemas([{"name": "f", "description": "no schema"}]) == {}  # as before: no schema, no entry

@@ -132,6 +132,30 @@ class Expectations {
   }
 }
 
+// A tool's description, kept in its schema as the Python SDK keeps it: the model reads it to choose
+// a tool, so a reworded description is a change `assay diff` shows.
+const DESCRIPTION = "x-assay-description";
+
+/** {name: input schema} from tool definitions: Anthropic's input_schema, OpenAI's function
+ * parameters, MCP's inputSchema. A tool's description goes in as DESCRIPTION. */
+function toolSchemas(tools) {
+  const out = {};
+  for (const t of tools || []) {
+    if (!t || typeof t !== "object") continue;
+    const fn = t.function && typeof t.function === "object" ? t.function : t;
+    const schema = fn.input_schema || fn.parameters || fn.inputSchema;
+    if (!fn.name || !schema || typeof schema !== "object") continue;
+    out[String(fn.name).slice(0, 128)] =
+      typeof fn.description === "string" && fn.description ? { ...schema, [DESCRIPTION]: fn.description.slice(0, 4096) } : schema;
+  }
+  return out;
+}
+
+function toolNames(tools) {
+  if (tools === undefined) return undefined;
+  return tools.map((t) => String(typeof t === "string" ? t : (t && (t.name || (t.function && t.function.name))) || "").slice(0, 128));
+}
+
 class Run {
   constructor(task, { caseId, tags, kind = "agent" } = {}) {
     this.id = id();
@@ -141,6 +165,7 @@ class Run {
     this.answerText = undefined;
     this.outcomeValue = undefined;
     this._seq = 0;
+    this._toolSchemas = {};
     this._expectations = [];
     this._ended = false;
     emit({ type: "run.start", run_id: this.id, kind, task, ...(caseId ? { test: testRef(caseId) } : {}),
@@ -173,10 +198,17 @@ class Run {
     }
   }
 
-  /** A model call: { model, tokensIn, tokensOut, costUsd, prompt ("id@version"), text, finishReason, tools, error }. */
+  /** A model call: { model, tokensIn, tokensOut, costUsd, prompt ("id@version"), text, finishReason, tools, error }.
+   * tools: names, or the tool definitions the model was given (Anthropic, OpenAI, or an MCP tools/list). */
   llm({ model, tokensIn, tokensOut, costUsd, prompt: promptRef, text, finishReason, tools, error } = {}) {
+    const fresh = {};
+    for (const [name, schema] of Object.entries(toolSchemas(tools))) {
+      if (JSON.stringify(this._toolSchemas[name]) !== JSON.stringify(schema)) fresh[name] = schema;
+    }
+    Object.assign(this._toolSchemas, fresh); // sent once per run and tool, not with every call
     this._step("llm", { model, tokens_in: tokensIn, tokens_out: tokensOut, cost_usd: costUsd, prompt: promptRef,
-                        text, finish_reason: finishReason, tools, status: error ? "error" : "ok", error });
+                        text, finish_reason: finishReason, tools: toolNames(tools),
+                        tool_schemas: Object.keys(fresh).length ? fresh : undefined, status: error ? "error" : "ok", error });
   }
 
   answer(text) {
@@ -250,4 +282,4 @@ async function assayCase(name, fn, { tags } = {}) {
   return result;
 }
 
-module.exports = { assayCase, startRun, prompt, caseIdOf, Run, Expectations };
+module.exports = { assayCase, startRun, prompt, caseIdOf, toolSchemas, Run, Expectations };
