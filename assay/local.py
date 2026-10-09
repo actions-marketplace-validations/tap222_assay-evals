@@ -748,7 +748,7 @@ def js_project(root: Path, lang: Optional[str] = None) -> Optional[dict]:
     typed = "typescript" in deps and (runner == "vitest" or (runner == "jest" and "ts-jest" in deps))
     ts = lang == "ts" or (lang is None and typed)
     command = {"vitest": "npx vitest run test/ai", "jest": "npx jest --rootDir . test/ai",
-               "node": "node --test test/ai/"}[runner]
+               "node": "node --test test/ai/*.test.js"}[runner]  # Node 21+ globs it; a Unix shell does for older
     jest = pkg.get("jest") if isinstance(pkg.get("jest"), dict) else {}
     pattern = json.dumps([jest.get("testRegex"), jest.get("testMatch")])
     kind = "spec" if runner == "jest" and "spec" in pattern and "test" not in pattern.replace("testRegex", "") else "test"
