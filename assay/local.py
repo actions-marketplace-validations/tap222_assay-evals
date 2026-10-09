@@ -79,10 +79,11 @@ broke something. Skip it for changes that can't reach the AI, such as docs or st
 
 ## How
 
-1. Run the tests with `--assay` added to the command under `[test] command` in `assay.toml`:
-   `pytest -q tests/ai` becomes `pytest -q --assay tests/ai`. Read `assay.toml` first rather than
-   guessing the folder. Without a `[test] command`, run pytest on the tests that take the
-   `assay_case` fixture.
+1. Read `assay.toml` first rather than guessing the folder. When its `[test] command` is pytest,
+   run it with `--assay` added: `pytest -q tests/ai` becomes `pytest -q --assay tests/ai`. Any
+   other command (Jest, Vitest, `node --test`: a JavaScript or TypeScript project), run
+   `assay test`, which runs that command and compares the cases it records. Without a
+   `[test] command`, run pytest on the tests that take the `assay_case` fixture.
 2. Read the exit code:
    - `0`: nothing got worse. Say so in one line.
    - `1`: a case regressed. Go on to step 3.
@@ -101,13 +102,69 @@ broke something. Skip it for changes that can't reach the AI, such as docs or st
 - Never make a test pass by weakening it: don't remove or loosen checks, asserts, `expect(...)`
   or the contracts in `assay.toml`, and don't skip or delete a test.
 - Don't delete `.assay/`: it holds the baselines.
-- If `assay` or `pytest` isn't found, tell the user to run `pip install assay-server pytest`.
-- If the repository has no Assay tests (no `assay.toml`, no test taking the `assay_case` fixture),
+- If `assay` or `pytest` isn't found, tell the user to run `pip install assay-server pytest`. In a
+  JavaScript or TypeScript project, `assay` comes from `pipx install assay-server`, and the tests
+  need `npm install --save-dev assay-evals`.
+- If the repository has no Assay tests (no `assay.toml`, no test taking the `assay_case` fixture or
+  calling `assayCase()`),
   say so once, and offer to set them up with `assay init` and a first test for the code you
   changed. Don't set them up without the user's OK.
 - With `ASSAY_URL` and `ASSAY_UPLOAD=1` set, each run also goes to the Assay dashboard, filed
   under this repository's name. Nothing to do for that.
 """
+
+CONFIG_HEAD = """\
+# Assay: your AI tests are pytest tests. `pytest --assay` runs them, checks every run, and
+# compares each test with its last passing run; `assay test` does the same, with repeats.
+# Docs: https://github.com/tap222/assay-evals/tree/main/sdk/python#readme
+"""
+JS_CONFIG_HEAD = """\
+# Assay: your AI tests are tests that wrap their body in assayCase() (npm install --save-dev
+# assay-evals). `assay test` runs the command below, checks every case it records, and compares
+# each with its last passing run.
+# Docs: https://github.com/tap222/assay-evals/tree/main/sdk/js#readme
+"""
+
+JS_EXAMPLE_TEMPLATE = '''\
+/**
+ * AI tests that wrap their body in assayCase(). This one tests a small support agent that needs no
+ * LLM: replace it with yours. `assay test` runs these, checks every case, and compares each with
+ * its last passing run. With a real client, instrument(client) records its model calls for you.
+ */
+{imports}
+const ORDERS = { "O-17": { price: 27.61, status: "delivered" }, "O-18": { price: 12.0, status: "shipped" } };
+
+async function supportAgent(run, orderId) {
+  // Your agent goes here. Record what it does on `run`: run.llm() for a model call (or
+  // instrument(client)), run.call() for a tool, run.answer() for the reply.
+  run.llm({ model: "your-model", tokensIn: 850, tokensOut: 60, tools: ["get_order", "refund"] });
+  const order = await run.call("get_order", ({ orderId }) => ORDERS[orderId], { orderId });
+  let reply;
+  if (order.status !== "delivered") {
+    reply = `Order ${orderId} hasn't arrived yet, so it can't be refunded.`;
+  } else {
+    run.approval("refund", "approved", { by: "policy:under-50" });
+    await run.call("refund", ({ amount }) => ({ refunded: amount }), { orderId, amount: order.price });
+    reply = `Refunded $${order.price.toFixed(2)}.`;
+  }
+  run.answer(reply);
+  run.outcome("resolved");
+  return reply;
+}
+
+test("refunds a delivered order", () =>
+  assayCase(async (run) => {
+    // What the run must do, checked when the test ends.
+    run.expect().mustCall("get_order").mustGetApprovalBefore("refund").maxSteps(6).mustAnswer("27.61");
+    await supportAgent(run, "O-17");
+  }));
+
+test("no refund before delivery", () =>
+  assayCase(async (run) => {
+    run.expect().mustCall("get_order").mustNotCall("refund").mustAnswer("hasn't arrived");
+    await supportAgent(run, "O-18");
+  }));
+'''
 
 CONFIG_TEMPLATE = '''\
 # Assay: your AI tests are pytest tests. `pytest --assay` runs them, checks every run, and
@@ -674,21 +731,74 @@ def install_claude_skill(home: Path) -> Optional[str]:
     return str(path)
 
 
-def init(root: Path, claude_code: bool = False) -> List[str]:
+def js_project(root: Path, lang: Optional[str] = None) -> Optional[dict]:
+    """How a JavaScript or TypeScript project runs its tests, or None for a Python one:
+    {"lang": "ts" | "js", "runner": "vitest" | "jest" | "node", "command", "example", "installed"}.
+    Without `lang`, a package.json and no Python packaging makes it JavaScript."""
+    pkg_file = root / "package.json"
+    python = any((root / f).exists() for f in ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"))
+    if lang == "python" or (lang is None and (not pkg_file.exists() or python)):
+        return None
+    try:
+        pkg = json.loads(pkg_file.read_text()) if pkg_file.exists() else {}
+    except ValueError:
+        pkg = {}
+    deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+    runner = "vitest" if "vitest" in deps else "jest" if "jest" in deps else "node"
+    typed = "typescript" in deps and (runner == "vitest" or (runner == "jest" and "ts-jest" in deps))
+    ts = lang == "ts" or (lang is None and typed)
+    command = {"vitest": "npx vitest run test/ai", "jest": "npx jest --rootDir . test/ai",
+               "node": "node --test test/ai/*.test.js"}[runner]  # Node 21+ globs it; a Unix shell does for older
+    jest = pkg.get("jest") if isinstance(pkg.get("jest"), dict) else {}
+    pattern = json.dumps([jest.get("testRegex"), jest.get("testMatch")])
+    kind = "spec" if runner == "jest" and "spec" in pattern and "test" not in pattern.replace("testRegex", "") else "test"
+    return {"lang": "ts" if ts else "js", "runner": runner, "command": command,
+            "example": f"test/ai/support.assay.{kind}.{'ts' if ts else 'js'}", "installed": "assay-evals" in deps}
+
+
+def js_example(runner: str, ts: bool) -> str:
+    """The support-agent example for a JavaScript or TypeScript project, for its test runner."""
+    head = {"vitest": 'import { test } from "vitest";\n' if ts else 'const { test } = require("vitest");\n',
+            "jest": "", "node": 'import { test } from "node:test";\n' if ts else 'const { test } = require("node:test");\n'}[runner]
+    sdk = 'import { assayCase, type Run } from "assay-evals";\n' if ts else 'const { assayCase } = require("assay-evals");\n'
+    text = JS_EXAMPLE_TEMPLATE.replace("{imports}", head + sdk)
+    if runner in ("node", "vitest"):  # no global expect.getState() there: the test's context names the case
+        text = text.replace('", () =>\n  assayCase(async (run) => {', '", (t) =>\n  assayCase(t, async (run) => {')
+        assert "assayCase(t, " in text
+    if ts:  # typed, so a type-checking runner (ts-jest, strict) takes it as it is
+        for a, b in (("const ORDERS = {", "const ORDERS: Record<string, { price: number; status: string }> = {"),
+                     ("async function supportAgent(run, orderId) {", "async function supportAgent(run: Run, orderId: string) {"),
+                     ("({ orderId }) => ORDERS[orderId]", "({ orderId }: { orderId: string }) => ORDERS[orderId]"),
+                     ("({ amount }) => ({ refunded: amount })", "({ amount }: { amount: number }) => ({ refunded: amount })"),
+                     ("  let reply;", "  let reply: string;")):
+            assert a in text, a
+            text = text.replace(a, b)
+    return text
+
+
+def init(root: Path, claude_code: bool = False, lang: Optional[str] = None) -> List[str]:
     """Write assay.toml and the example (and the Claude Code skill, if asked), leaving anything that
-    already exists alone."""
+    already exists alone. A JavaScript or TypeScript project (js_project) gets its own example and
+    test command."""
     ensure_home(root)
     made = []
     if claude_code and not (root / CLAUDE_SKILL).exists():
         (root / CLAUDE_SKILL).parent.mkdir(parents=True, exist_ok=True)
         (root / CLAUDE_SKILL).write_text(CLAUDE_SKILL_TEMPLATE)
         made.append(CLAUDE_SKILL)
-    if not (root / EXAMPLE).exists():
-        (root / EXAMPLE).parent.mkdir(parents=True, exist_ok=True)
-        (root / EXAMPLE).write_text(EXAMPLE_TEMPLATE)
-        made.append(EXAMPLE)
+    js = js_project(root, lang)
+    example, text = (js["example"], js_example(js["runner"], js["lang"] == "ts")) if js else (EXAMPLE, EXAMPLE_TEMPLATE)
+    if not (root / example).exists():
+        (root / example).parent.mkdir(parents=True, exist_ok=True)
+        (root / example).write_text(text)
+        made.append(example)
     if not (root / CONFIG).exists():
-        (root / CONFIG).write_text(CONFIG_TEMPLATE.format())
+        config = CONFIG_TEMPLATE.format()
+        if js:
+            config = config.replace(CONFIG_HEAD, JS_CONFIG_HEAD).replace(
+                'command = "pytest -q tests/ai"   # what `assay test` runs',
+                f'command = "{js["command"]}"   # what `assay test` runs: your test runner, on the Assay tests')
+        (root / CONFIG).write_text(config)
         made.append(CONFIG)
     return made
 
