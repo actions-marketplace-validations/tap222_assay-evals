@@ -96,7 +96,7 @@ def test_results_are_recorded_so_an_invalid_one_is_never_a_failure(tmp_path, mon
                  evaluator="grounded@1")
     assay_sdk.shutdown()
     client = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path / 'e.db'}")))
-    events = [json.loads(x) for x in path.read_text().splitlines()]
+    events = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
     assert client.post("/v1/ingest", json=events, headers={"X-Tenant": "t"}).status_code == 200
     v = client.get("/v1/evals/runs/nightly/verdicts", params={"source": "events:t"}).json()
     by = {c["field"]: c for c in v["checks"]}

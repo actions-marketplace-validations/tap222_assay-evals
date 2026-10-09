@@ -31,10 +31,10 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     for k in ("ASSAY_URL", "ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "ASSAY_POLICY", "GITHUB_STEP_SUMMARY"):
         monkeypatch.delenv(k, raising=False)
-    (tmp_path / "scored.py").write_text(SCORED)
+    (tmp_path / "scored.py").write_text(SCORED, encoding="utf-8")
 
     def toml(repeat):
-        (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} scored.py"\nrepeat = {repeat}\n')
+        (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} scored.py"\nrepeat = {repeat}\n', encoding="utf-8")
     return toml
 
 

@@ -276,7 +276,7 @@ def test_the_sdk_records_mcp_steps_and_turns(tmp_path, monkeypatch):
         r.answer("Refunded.")
     assay_sdk.shutdown()
     import json
-    events = schema.EVENTS.validate_python([json.loads(x) for x in path.read_text().splitlines()])
+    events = schema.EVENTS.validate_python([json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()])
     start, prompt, resource, tool = events[:4]
     assert (start.conversation_id, start.turn) == ("chat-1", 2)
     assert (prompt.kind, resource.kind, resource.uri, tool.server) == \

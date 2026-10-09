@@ -41,8 +41,8 @@ def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("NO_COLOR", "1")
     (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "__init__.py").write_text("")
-    (tmp_path / "app" / "support.py").write_text(APP)
+    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "support.py").write_text(APP, encoding="utf-8")
     return tmp_path
 
 
@@ -59,16 +59,16 @@ def test_every_model_call_gets_a_proposed_test(project, capsys):
     assert "+ tests/ai/test_support_classify.py" in out and "Nothing is written yet" in out
     assert not Path("tests").exists()
     assert main(["connect", "evals", "app", "--apply"]) == 0
-    written = Path("tests/ai/test_support_classify.py").read_text()
+    written = Path("tests/ai/test_support_classify.py").read_text(encoding="utf-8")
     assert "proposed by assay connect evals" in written and "pytestmark = pytest.mark.skip(" in written
     assert "for key in ['label', 'confidence']:" in written and 'system prompt "You classify support' in written
     assert "Label a support message." in written  # the docstring starts the spec
     assert "expect(assay_case).must_call('get_order').max_tools_exposed(2)" in \
-        Path("tests/ai/test_support_reply.py").read_text()
+        Path("tests/ai/test_support_reply.py").read_text(encoding="utf-8")
     for f in Path("tests/ai").glob("*.py"):
         py_compile.compile(str(f), doraise=True)
     r = subprocess.run([sys.executable, "-m", "pytest", "-q", "tests/ai", "-p", "no:cacheprovider"],
-                       capture_output=True, text=True, cwd=project)
+                       capture_output=True, text=True, cwd=project, encoding="utf-8", errors="replace")
     assert "6 skipped" in r.stdout, r.stdout + r.stderr  # 3 cases each: nothing runs until a person writes the spec
     capsys.readouterr()
     assert main(["connect", "evals", "app"]) == 0
@@ -77,7 +77,7 @@ def test_every_model_call_gets_a_proposed_test(project, capsys):
 
 def test_a_function_that_has_a_test_is_left_alone(project, capsys):
     (project / "tests").mkdir()
-    (project / "tests" / "test_mine.py").write_text("from app.support import classify\n\ndef test_it():\n    classify('x')\n")
+    (project / "tests" / "test_mine.py").write_text("from app.support import classify\n\ndef test_it():\n    classify('x')\n", encoding="utf-8")
     main(["connect", "evals", "app"])
     out = capsys.readouterr().out
     assert "classify (app/support.py:" in out and "has a test already" in out and "+ tests/ai/test_support_reply.py" in out

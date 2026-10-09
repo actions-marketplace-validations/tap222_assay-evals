@@ -47,7 +47,7 @@ class PasswordCommand:
 
     def token(self) -> str:
         with self._lock:
-            if self._token is None or time.monotonic() - self._at > self.ttl:
+            if self._token is None or time.monotonic() - self._at >= self.ttl:  # >=: a coarse clock can read 0
                 self._token, self._at = self._run(), time.monotonic()
             return self._token
 

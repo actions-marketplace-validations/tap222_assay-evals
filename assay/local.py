@@ -3294,9 +3294,9 @@ def run_origin(root: Path) -> dict:
     remote = (_git(root, "remote", "get-url", "origin") or "").strip()
     if remote:
         out["repo"] = re.sub(r"^(\w+://)[^/@]+@", r"\1", remote)[:200]  # https://user:token@host → https://host
-    folder = str(root.resolve())
-    home = str(Path.home())
-    if folder == home or folder.startswith(home + os.sep):
+    folder = root.resolve().as_posix()  # / on every OS, as the dashboard shows it
+    home = Path.home().as_posix()
+    if folder == home or folder.startswith(home + "/"):
         folder = "~" + folder[len(home):]
     out["folder"] = folder[-200:]
     return out

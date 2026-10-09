@@ -16,14 +16,14 @@ def cli(tmp_path):
     count = tmp_path / "count"
     script = tmp_path / "token.py"
     script.write_text(f"import pathlib\np = pathlib.Path({str(count)!r})\nn = int(p.read_text()) + 1 if p.exists() else 1\n"
-                      "p.write_text(str(n))\nprint(f's3cr3t-token-{n}')\n")
+                      "p.write_text(str(n))\nprint(f's3cr3t-token-{n}')\n", encoding="utf-8")
     return f"{sys.executable} {script}", count
 
 
 def test_the_token_is_fetched_when_needed_and_again_once_it_expires(cli):
     cmd, count = cli
     pc = PasswordCommand(cmd, ttl=3600)
-    assert pc.token() == pc.token() == "s3cr3t-token-1" and count.read_text() == "1"  # kept while fresh
+    assert pc.token() == pc.token() == "s3cr3t-token-1" and count.read_text(encoding="utf-8") == "1"  # kept while fresh
     pc.ttl = 0
     assert pc.token() == "s3cr3t-token-2"  # expired: asked again
 
@@ -108,8 +108,8 @@ def test_connect_db_with_a_login_never_shows_the_token(cli, tmp_path, monkeypatc
     assert main(["connect", "db", f"sqlite:///{db}", "--password-command", cmd]) == 0
     out = capsys.readouterr().out
     assert f"Getting a short-lived password with: {cmd}" in out and "export ASSAY_SOURCE_PASSWORD_COMMAND=" in out
-    assert "s3cr3t" not in out and "s3cr3t" not in (tmp_path / "mappings" / "p.json").read_text()
-    assert int(count.read_text()) >= 1  # the login was used
+    assert "s3cr3t" not in out and "s3cr3t" not in (tmp_path / "mappings" / "p.json").read_text(encoding="utf-8")
+    assert int(count.read_text(encoding="utf-8")) >= 1  # the login was used
     monkeypatch.setenv("ASSAY_SOURCE_PASSWORD_COMMAND", f"{sys.executable} -c \"import sys; sys.exit(1)\"")
     assert main(["connect", "db", f"sqlite:///{db}", "--out", "other.json"]) == 2
     assert "Are you logged in" in capsys.readouterr().err

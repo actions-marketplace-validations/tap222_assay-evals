@@ -49,8 +49,8 @@ def project(tmp_path, monkeypatch):
 
 
 def test_a_new_judge_isnt_compared_with_the_old_ones_baseline(project, monkeypatch, capsys):
-    (project / "judged.py").write_text(JUDGED)
-    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} judged.py"\n')
+    (project / "judged.py").write_text(JUDGED, encoding="utf-8")
+    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} judged.py"\n', encoding="utf-8")
     monkeypatch.setenv("JUDGE", "claude-opus-5")
     assert main(["test"]) == 0
     capsys.readouterr()
@@ -68,8 +68,8 @@ def test_a_new_judge_isnt_compared_with_the_old_ones_baseline(project, monkeypat
 
 
 def test_a_failure_that_follows_the_routed_model(project, monkeypatch, capsys):
-    (project / "routed.py").write_text(ROUTED)
-    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} routed.py"\nrepeat = 4\n')
+    (project / "routed.py").write_text(ROUTED, encoding="utf-8")
+    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} routed.py"\nrepeat = 4\n', encoding="utf-8")
     monkeypatch.setenv("MODE", "before")  # every attempt on claude-opus-5
     assert main(["test"]) == 0
     capsys.readouterr()
@@ -85,8 +85,8 @@ def test_a_failure_that_follows_the_routed_model(project, monkeypatch, capsys):
 
 
 def test_routing_explains_a_flaky_case(project, monkeypatch, capsys):
-    (project / "routed.py").write_text(ROUTED)
-    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} routed.py"\nrepeat = 4\n')
+    (project / "routed.py").write_text(ROUTED, encoding="utf-8")
+    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} routed.py"\nrepeat = 4\n', encoding="utf-8")
     monkeypatch.setenv("MODE", "routed")
     main(["test"])
     main(["accept"])

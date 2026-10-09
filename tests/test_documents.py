@@ -162,7 +162,7 @@ def test_inv_3(assay_case):
 
 def test_a_pr_that_breaks_a_field_fails_and_says_which(project):
     (project / "tests").mkdir()
-    (project / "tests" / "test_invoices.py").write_text(SUITE)
+    (project / "tests" / "test_invoices.py").write_text(SUITE, encoding="utf-8")
     first = run(project)
     assert first.returncode == 0, first.stdout
     assert "Documents    3 · all fields correct 3/3 (100%) · weighted field accuracy 100%" in first.stdout
@@ -179,7 +179,7 @@ def test_a_pr_that_breaks_a_field_fails_and_says_which(project):
     assert "tests/test_invoices.py::test_inv_1  All fields correct, invoice_date" in out.stdout
     assert "Judges" not in out.stdout  # comparisons, not judges: nothing to calibrate
     assert "wrong: 2026-04-03, not 2026-03-04: day and month swapped" in out.stdout
-    md = (project / ".assay" / "summary.md").read_text()
+    md = (project / ".assay" / "summary.md").read_text(encoding="utf-8")
     assert "**Documents:** all fields correct 2/3 (66.7%, was 100%)" in md and "invoice\\_date 66.7%" in md
 
     # The dashboard's field accuracy is measured from the same checks.
@@ -289,8 +289,8 @@ def test_split_quality_and_its_cost_in_the_report_and_on_the_dashboard(project):
     from assay.models import Window
     from assay.sources.events import EventsSource
     (project / "tests").mkdir()
-    (project / "tests" / "test_split.py").write_text(SPLITS)
-    (project / "assay.toml").write_text("[documents]\nseconds_per_drag = 20\nrework_per_hour = 36\n")
+    (project / "tests" / "test_split.py").write_text(SPLITS, encoding="utf-8")
+    (project / "assay.toml").write_text("[documents]\nseconds_per_drag = 20\nrework_per_hour = 36\n", encoding="utf-8")
     assert run(project).returncode == 0
     out = run(project, env={"MODE": "after"})
     # file 1: 2 matches, IoU 2/3 and 1, page 3 unmatched; 1 page to move.
@@ -306,7 +306,7 @@ def test_split_quality_and_its_cost_in_the_report_and_on_the_dashboard(project):
     assert pq.status == "measured" and 0 < pq.overall.value < 1
     live = {m["id"]: m["status"] for m in coverage.compute(src, w)["measures"]}
     assert live["split_pq"] == live["split_drag_rate"] == "live"
-    (project / "assay.toml").write_text("[documents]\nseconds_per_drag = 0\n")
+    (project / "assay.toml").write_text("[documents]\nseconds_per_drag = 0\n", encoding="utf-8")
     from assay.local import load_config, SetupError
     with pytest.raises(SetupError, match="a positive number"):
         load_config(project)
@@ -352,8 +352,8 @@ def test_f3(assay_case): run_file(assay_case, "f3")
 
 def test_types_splitting_and_confidence_in_the_report(project):
     (project / "tests").mkdir()
-    (project / "tests" / "test_files.py").write_text(PHASE2)
-    (project / "assay.toml").write_text('[test]\ncommand = "pytest -q tests"\n\n[documents]\nauto_approve = 0.9\n')
+    (project / "tests" / "test_files.py").write_text(PHASE2, encoding="utf-8")
+    (project / "assay.toml").write_text('[test]\ncommand = "pytest -q tests"\n\n[documents]\nauto_approve = 0.9\n', encoding="utf-8")
     first = run(project)
     assert first.returncode == 1 and "f2" in first.stdout  # no baseline yet: f2's wrong total fails
     from assay.__main__ import main
@@ -367,7 +367,7 @@ def test_types_splitting_and_confidence_in_the_report(project):
     assert "Confidence   9 values" in out.stdout and "overconfident" in out.stdout  # fields and types
     assert "at your auto_approve 0.9: 100% approved, 2 wrong values among them (was 1), of 2 wrong in all: " \
         "they'd skip review" in out.stdout  # the confident misclassification is the second
-    md = (project / ".assay" / "summary.md").read_text()
+    md = (project / ".assay" / "summary.md").read_text(encoding="utf-8")
     assert "types right 2/3 (66.7%, was 100%)" in md and "files split right 2/3" in md
 
     from assay import store
@@ -382,10 +382,10 @@ def test_types_splitting_and_confidence_in_the_report(project):
 
 def test_documents_config_is_checked(project):
     from assay import local
-    (project / "assay.toml").write_text('[test]\ncommand = "true"\n\n[documents]\nauto_approve = 90\n')
+    (project / "assay.toml").write_text('[test]\ncommand = "true"\n\n[documents]\nauto_approve = 90\n', encoding="utf-8")
     with pytest.raises(local.SetupError, match="a share from 0 to 1"):
         local.load_config(project)
-    (project / "assay.toml").write_text('[test]\ncommand = "true"\n\n[documents]\nthreshold = 0.9\n')
+    (project / "assay.toml").write_text('[test]\ncommand = "true"\n\n[documents]\nthreshold = 0.9\n', encoding="utf-8")
     with pytest.raises(local.SetupError, match="Use auto_approve, target"):
         local.load_config(project)
 
@@ -464,7 +464,7 @@ def test_page(assay_case):
 
 def test_ocr_and_grounding_in_the_report(project):
     (project / "tests").mkdir()
-    (project / "tests" / "test_pages.py").write_text(PHASE3)
+    (project / "tests" / "test_pages.py").write_text(PHASE3, encoding="utf-8")
     assert run(project).returncode == 0
     out = run(project, env={"MODE": "after"})
     assert out.returncode == 1
@@ -472,11 +472,11 @@ def test_ocr_and_grounding_in_the_report(project):
            "(was 0%) · letters wrong 0% · 1 over the limit" in out.stdout  # 1 of the page's 12 digits
     assert "read as: '3' as '8' 1" in out.stdout and "since the baseline: new '3' as '8' 1" in out.stdout
     assert "words read as: '1,234.56' as '1,284.56' 1" in out.stdout
-    assert "new OCR confusions: '3' as '8' 1" in (project / ".assay" / "summary.md").read_text()
+    assert "new OCR confusions: '3' as '8' 1" in (project / ".assay" / "summary.md").read_text(encoding="utf-8")
     assert "'Total: 1,284.56 EUR' for 'Total: 1,234.56 EUR'" in out.stdout
     assert "Locations    1 field · right page and box 1/1 (100%) · mean overlap 1.00" in out.stdout
     assert "not in the document's text: total '1284.56'" in out.stdout  # no labels needed to catch it
-    assert "OCR characters wrong 2.2%, was 0%" in (project / ".assay" / "summary.md").read_text()
+    assert "OCR characters wrong 2.2%, was 0%" in (project / ".assay" / "summary.md").read_text(encoding="utf-8")
 
 
 # ---------- reading order, tables, spot checks, and the dashboard ----------
@@ -600,7 +600,7 @@ def test_user_edits_give_corrections_only_for_model_errors_and_the_prefill_error
     assert {k: v.kind for k, v in out.items()} == {"title": "preference", "location": "model_error",
                                                    "salary_min": "reformatted", "category": "unsure"}
     assay.shutdown()
-    events = [json_.loads(x) for x in path.read_text().splitlines()]
+    events = [json_.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
     fixes = [e for e in events if e["type"] == "correction"]
     assert [(e["field"], e["expected"], e["observed"], e["kind"]) for e in fixes] == \
         [("location", "Munich", "Berlin", "wrong")]  # the user's choice of title is never a label
@@ -638,7 +638,7 @@ def test_dashboard_measures_and_the_report(project):
     from assay.models import Window
     from assay.sources.events import EventsSource
     (project / "tests").mkdir()
-    (project / "tests" / "test_page.py").write_text(DASH)
+    (project / "tests" / "test_page.py").write_text(DASH, encoding="utf-8")
     assert run(project).returncode == 0
     out = run(project, env={"MODE": "after"})
     assert out.returncode == 1
@@ -717,7 +717,7 @@ def test_doc(assay_case):
     score_ocr(assay_case, "a page", "a page")
     score_table(assay_case, [["A"], ["x"]], [["A"], ["x"]])
     score_locations(assay_case, {"number": {"bbox": [0, 0, 1, 1]}}, {"number": {"bbox": [0, 0, 1, 1]}})
-''')
+''', encoding="utf-8")
     assert run(project).returncode == 0
     from assay import store
     from assay.measures.ground_truth import FieldAccuracy
@@ -792,7 +792,7 @@ def test_made_up_values_in_the_report_and_on_the_dashboard(project):
     from assay.models import Window
     from assay.sources.events import EventsSource
     (project / "tests").mkdir()
-    (project / "tests" / "test_deeds.py").write_text(DEEDS)
+    (project / "tests" / "test_deeds.py").write_text(DEEDS, encoding="utf-8")
     out = run(project)
     # 6 values extracted in deed 1, 5 in deed 2 (no parcel)
     assert "made up, of 11 values extracted: 2 format, 2 inferred, 2 fabricated" in out.stdout
@@ -816,7 +816,7 @@ def test_inferred_and_fabricated_wait_for_the_text(project):
     from assay.models import Window
     from assay.sources.events import EventsSource
     (project / "tests").mkdir()
-    (project / "tests" / "test_deeds.py").write_text(DEEDS.replace(", text=TEXT", ""))
+    (project / "tests" / "test_deeds.py").write_text(DEEDS.replace(", text=TEXT", ""), encoding="utf-8")
     out = run(project)
     assert "made up, of 11 values extracted: 2 format (inferred and fabricated need the text" in out.stdout
     engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
@@ -880,7 +880,7 @@ def test_a(assay_case):
     score_document(assay_case, {"n": "1"}, {"n": "1", "po_number": "PO-9"}, {"n": Text()})
 def test_b(assay_case):
     score_document(assay_case, {"n": "2"}, {"n": "2", "po_number": "PO-3", "notes": "x"}, {"n": Text()})
-''')
+''', encoding="utf-8")
     out = run(project)
     assert "extracted but not in the schema, so not scored: po_number (2 documents), notes (1 document)" in out.stdout
 
@@ -972,7 +972,7 @@ def test_groups_completeness_and_teds_in_the_report_and_on_the_dashboard(project
     from assay.models import Window
     from assay.sources.events import EventsSource
     (project / "tests").mkdir()
-    (project / "tests" / "test_deed.py").write_text(GROUPED)
+    (project / "tests" / "test_deed.py").write_text(GROUPED, encoding="utf-8")
     out = run(project)
     assert "line items complete 0/1: 1 row missing, 1 row duplicated" in out.stdout
     assert "TEDS 70.0%" in out.stdout  # 10 nodes with the header, a row and its 2 cells gone
@@ -1017,7 +1017,7 @@ def test_inv_4(assay_case): score_document(assay_case, TRUTH["inv-4"], extract("
 
 def test_line_items_collapsing_fails_the_run_though_the_check_was_already_failing(project):
     (project / "tests").mkdir()
-    (project / "tests" / "test_inv.py").write_text(COLLAPSE)
+    (project / "tests" / "test_inv.py").write_text(COLLAPSE, encoding="utf-8")
     from assay.__main__ import main
     assert run(project).returncode == 1  # one row wrong in every document, and no baseline yet
     assert main(["accept"]) == 0  # the team accepts it: a known, small line-item error
@@ -1028,18 +1028,18 @@ def test_line_items_collapsing_fails_the_run_though_the_check_was_already_failin
     assert "failed: line_items: F1 20.0%, was 90.0%; per document down 70.0 points (95% interval 70.0 to 70.0, " \
            "4 documents), surely more than the 2 allowed" in out.stdout
     assert "1 document gate failed: line_items: F1 20.0%" in out.stdout
-    md = (project / ".assay" / "summary.md").read_text()
+    md = (project / ".assay" / "summary.md").read_text(encoding="utf-8")
     assert "weighted field accuracy 80.0%" in md  # the average still looks fine
     assert "gates failed: line\\_items: F1 20.0%, was 90.0%" in md
     # a small drop stays within the default
-    (project / "tests" / "test_inv.py").write_text(COLLAPSE.replace("[1:8]", "[1:1]"))
+    (project / "tests" / "test_inv.py").write_text(COLLAPSE.replace("[1:8]", "[1:1]"), encoding="utf-8")
     assert run(project).returncode == 0
 
 
 def test_one_wrong_tax_number_fails_the_run(project):
     (project / "tests").mkdir()
-    (project / "tests" / "test_inv.py").write_text(COLLAPSE)
-    (project / "assay.toml").write_text("[documents.gates]\ntax_number = { max_errors = 0 }\nline_items = {}\n")
+    (project / "tests" / "test_inv.py").write_text(COLLAPSE, encoding="utf-8")
+    (project / "assay.toml").write_text("[documents.gates]\ntax_number = { max_errors = 0 }\nline_items = {}\n", encoding="utf-8")
     from assay.__main__ import main
     run(project)
     assert main(["accept"]) == 0
@@ -1055,7 +1055,7 @@ def test_gates_are_checked_when_read(project):
     for bad, says in [("tax_number = 0", "a table of rules"), ("total = { max_wrong = 0 }", "unknown max_wrong"),
                       ("total = { min_recall = 95 }", "a share from 0 to 1"),
                       ("total = { max_errors = 0.5 }", "a whole number")]:
-        (project / "assay.toml").write_text(f"[documents.gates]\n{bad}\n")
+        (project / "assay.toml").write_text(f"[documents.gates]\n{bad}\n", encoding="utf-8")
         with pytest.raises(SetupError, match=says):
             load_config(project)
 
@@ -1117,9 +1117,9 @@ def test_document_accuracy_and_critical_fields_in_the_report_gates_and_dashboard
     from assay.models import Window
     from assay.sources.events import EventsSource
     (project / "tests").mkdir()
-    (project / "tests" / "test_stp.py").write_text(STP)
+    (project / "tests" / "test_stp.py").write_text(STP, encoding="utf-8")
     (project / "assay.toml").write_text("[documents.gates]\ncritical = { min_accuracy = 0.999 }\n"
-                                        "document = { min_accuracy = 0.4 }\n")
+                                        "document = { min_accuracy = 0.4 }\n", encoding="utf-8")
     first = run(project)
     assert "critical fields (tax_number, total): 8 of 8 right (100%, 95% interval 67.56% to 100%) · " \
            "documents with all of them right 4/4" in first.stdout
@@ -1149,7 +1149,7 @@ def test_critical_measures_wait_for_critical_fields(project):
     from assay.models import Window
     from assay.sources.events import EventsSource
     (project / "tests").mkdir()
-    (project / "tests" / "test_stp.py").write_text(STP.replace(', critical=["tax_number", "total"]', ""))
+    (project / "tests" / "test_stp.py").write_text(STP.replace(', critical=["tax_number", "total"]', ""), encoding="utf-8")
     run(project)
     engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
     src, now = EventsSource(engine, "local"), datetime.utcnow()
@@ -1204,7 +1204,7 @@ def test_split_rework_cost_on_the_dashboard(project):
     from assay.models import Window
     from assay.sources.events import EventsSource
     (project / "tests").mkdir()
-    (project / "tests" / "test_split.py").write_text(SPLITS)
+    (project / "tests" / "test_split.py").write_text(SPLITS, encoding="utf-8")
     run(project, env={"MODE": "after"})  # 4 pages to drag over 2 files
     engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
     src, now = EventsSource(engine, "local"), datetime.utcnow()
@@ -1249,8 +1249,8 @@ def case(i, run):
 
 def test_the_report_gives_the_band_check_and_the_risk_coverage_table(project):
     (project / "tests").mkdir()
-    (project / "tests" / "test_conf.py").write_text(CONFIDENT)
-    (project / "assay.toml").write_text("[documents]\nauto_approve = 0.9\n")
+    (project / "tests" / "test_conf.py").write_text(CONFIDENT, encoding="utf-8")
+    (project / "assay.toml").write_text("[documents]\nauto_approve = 0.9\n", encoding="utf-8")
     out = run(project)
     # 20 at 0.97, 4 of them wrong; 20 at 0.6, all right
     assert "stated 0.9 or more: 20 values, says 97.0% on average, right 80.0% (95% interval 58.4% to 91.9%): " \
@@ -1268,7 +1268,7 @@ def test_confidence_on_the_dashboard(project):
     from assay.models import Window
     from assay.sources.events import EventsSource
     (project / "tests").mkdir()
-    (project / "tests" / "test_conf.py").write_text(CONFIDENT)
+    (project / "tests" / "test_conf.py").write_text(CONFIDENT, encoding="utf-8")
     run(project)
     engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
     src, now = EventsSource(engine, "local"), datetime.utcnow()
@@ -1281,7 +1281,7 @@ def test_confidence_on_the_dashboard(project):
     assert got["confidence_aurc"].overall.value == pytest.approx(risk_coverage(pairs)["aurc"])
     live = {m["id"]: m["status"] for m in coverage.compute(src, w)["measures"]}
     assert live["confidence_aurc"] == "live"
-    (project / "tests" / "test_conf.py").write_text(CONFIDENT.replace(', confidence={"v": conf}', ""))
+    (project / "tests" / "test_conf.py").write_text(CONFIDENT.replace(', confidence={"v": conf}', ""), encoding="utf-8")
     other = store.make_engine("sqlite://")
     store.metadata.create_all(other)
     assert REGISTRY["confidence_aurc"].compute(EventsSource(other, "t"), w).status == "unmeasured"
@@ -1388,7 +1388,7 @@ def test_rank(assay_case):
 
 def test_the_ranking_in_the_report_apart_from_ocr_scored_against_labels(project):
     (project / "tests").mkdir()
-    (project / "tests" / "test_rank.py").write_text(RANKED)
+    (project / "tests" / "test_rank.py").write_text(RANKED, encoding="utf-8")
     out = run(project)
     assert out.returncode == 0, out.stdout
     assert "OCR ranking  3 engines · 2 pages · against text corrected by claude (no labels): good 100%, " \
@@ -1432,9 +1432,9 @@ def sliced(n):
 def test_a_slice_that_got_worse_is_named_though_the_average_held(project):
     from assay.__main__ import main
     (project / "tests").mkdir()
-    (project / "tests" / "test_sliced.py").write_text(sliced(40))
+    (project / "tests" / "test_sliced.py").write_text(sliced(40), encoding="utf-8")
     (project / "assay.toml").write_text('[documents.gates]\n'
-                                        '"document[template_seen=unseen]" = { min_accuracy = 0.9 }\n')
+                                        '"document[template_seen=unseen]" = { min_accuracy = 0.9 }\n', encoding="utf-8")
     first = run(project)
     assert first.returncode == 0, first.stdout
     assert "Gates        1 of 1 held" in first.stdout
@@ -1451,14 +1451,14 @@ def test_a_slice_that_got_worse_is_named_though_the_average_held(project):
     assert "down 20.0 points, within chance" in digital
     assert "weighted field accuracy 93.3%" in out.stdout  # the average, hiding it
     assert "failed: document[template_seen=unseen]: accuracy 0%, at least 90.0% required" in out.stdout
-    md = (project / ".assay" / "summary.md").read_text()
+    md = (project / ".assay" / "summary.md").read_text(encoding="utf-8")
     assert "slices worse beyond chance: template\\_seen=unseen" in md and "source=" not in md.split("beyond chance:")[1]
 
 
 def test_a_small_slice_is_not_called_worse_on_noise(project):
     from assay.__main__ import main
     (project / "tests").mkdir()
-    (project / "tests" / "test_sliced.py").write_text(sliced(20))
+    (project / "tests" / "test_sliced.py").write_text(sliced(20), encoding="utf-8")
     run(project)
     assert main(["accept"]) == 0
     out = run(project, env={"MODE": "after"})
@@ -1570,10 +1570,10 @@ def case(i, run):
 def test_the_report_says_how_repeatable_extraction_is(project):
     from assay.__main__ import main
     (project / "tests").mkdir()
-    (project / "tests" / "test_rep.py").write_text(REPEATED)
+    (project / "tests" / "test_rep.py").write_text(REPEATED, encoding="utf-8")
     (project / "assay.toml").write_text(
         '[test]\ncommand = "' + sys.executable + ' -m pytest -q -p no:cacheprovider tests"\n'
-        "repeat = 4\n\n[documents.gates]\nstability = { min_accuracy = 0.99 }\n")
+        "repeat = 4\n\n[documents.gates]\nstability = { min_accuracy = 0.99 }\n", encoding="utf-8")
     import contextlib
     import io
     buf = io.StringIO()

@@ -43,9 +43,9 @@ def project(tmp_path, monkeypatch):
     for k in ("ASSAY_URL", "ASSAY_POLICY", "MODE"):
         monkeypatch.delenv(k, raising=False)
     (tmp_path / "evals").mkdir()
-    (tmp_path / "evals" / "judges.py").write_text(JUDGE)
+    (tmp_path / "evals" / "judges.py").write_text(JUDGE, encoding="utf-8")
     (tmp_path / "assay.toml").write_text('[test]\ncommand = "true"\n\n[calibrate]\njudge = "evals/judges.py:grade"\n'
-                                         'repeat = 3\nscore_range = [1, 5]\nthreshold = 3\n')
+                                         'repeat = 3\nscore_range = [1, 5]\nthreshold = 3\n', encoding="utf-8")
     items = []
     for i in range(30):
         kind = "behavioral" if i % 2 else "product"
@@ -56,7 +56,7 @@ def project(tmp_path, monkeypatch):
         q = x.pop("score")
         x.pop("by")
         x["labels"] = [{"by": "sam", "score": q}, {"by": "ana", "score": q if i % 3 else max(1, q - 1)}]
-    (tmp_path / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in items) + "\n")
+    (tmp_path / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in items) + "\n", encoding="utf-8")
     return tmp_path
 
 
@@ -125,7 +125,7 @@ def test_the_statistics():
 
 
 def test_setup_problems(project, capsys):
-    (project / "golden.jsonl").write_text('{"id": "a", "output": "x"}\n')
+    (project / "golden.jsonl").write_text('{"id": "a", "output": "x"}\n', encoding="utf-8")
     assert main(["calibrate"]) == 2 and "no score" in capsys.readouterr().err
     assert main(["calibrate", "--judge", "nope"]) == 2
     (project / "golden.jsonl").unlink()
@@ -139,9 +139,9 @@ assay.init()
 for i in range(20):
     s = i / 19
     assay.check(None, f"case-{i}", "pass" if s >= 0.5 else "fail", field="helpful", score=s)
-''')
+''', encoding="utf-8")
     monkeypatch.setenv("PYTHONPATH", SDK)
-    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} record.py"\n')
+    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} record.py"\n', encoding="utf-8")
     main(["test"])
     capsys.readouterr()
     assert main(["golden", "suggest", "-n", "5", "--field", "helpful"]) == 0
@@ -171,8 +171,8 @@ def test_variants_a_second_judge_and_a_judge_that_cant_tell_broken_from_good(pro
 
 
 def test_every_judged_number_says_whether_it_can_be_trusted(project, monkeypatch, capsys):
-    (project / "assay.toml").write_text((project / "assay.toml").read_text().replace('command = "true"',
-                                        f'command = "{sys.executable} record.py"') + 'field = "helpful"\n')
+    (project / "assay.toml").write_text((project / "assay.toml").read_text(encoding="utf-8").replace('command = "true"',
+                                        f'command = "{sys.executable} record.py"') + 'field = "helpful"\n', encoding="utf-8")
     (project / "record.py").write_text("""
 import os
 import assay_sdk as assay
@@ -181,7 +181,7 @@ with assay.run("support", test="q1") as r:
     r.answer("ok")
     r.check("helpful", "pass", score=4, judge_model=os.environ.get("JUDGE_MODEL"))
     r.check("tone", "pass", score=5)
-""")
+""", encoding="utf-8")
     monkeypatch.setenv("PYTHONPATH", SDK)
     monkeypatch.setenv("AS_MODEL", "claude-opus-5")
     assert main(["calibrate", "--repeat", "1"]) == 0

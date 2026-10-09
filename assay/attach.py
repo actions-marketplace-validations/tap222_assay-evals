@@ -225,7 +225,8 @@ def diff(found: Found, changes: Dict[str, str]) -> str:
     parts = []
     for rel in sorted(changes):
         a, b = found.sources[rel].splitlines(keepends=True), changes[rel].splitlines(keepends=True)
-        parts.append("".join(difflib.unified_diff(a, b, f"a/{rel}", f"b/{rel}")))
+        name = Path(rel).as_posix()  # a patch names files with /, on every OS
+        parts.append("".join(difflib.unified_diff(a, b, f"a/{name}", f"b/{name}")))
     return "".join(parts)
 
 

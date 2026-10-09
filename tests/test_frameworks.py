@@ -130,9 +130,9 @@ def test_return_window():
 
 def suite(project):
     (project / "tests").mkdir()
-    src = open(__file__).read()
-    (project / "tests" / "metrics.py").write_text(src[src.index("class Exact:"):src.index("class Presence:")])
-    (project / "tests" / "test_existing.py").write_text(SUITE)
+    src = open(__file__, encoding="utf-8").read()
+    (project / "tests" / "metrics.py").write_text(src[src.index("class Exact:"):src.index("class Presence:")], encoding="utf-8")
+    (project / "tests" / "test_existing.py").write_text(SUITE, encoding="utf-8")
 
 
 def test_an_existing_suite_changes_one_import(project):
@@ -150,7 +150,7 @@ def test_an_existing_suite_changes_one_import(project):
     assert run(project, env={"MODE": "after"}).returncode == 0
     # And plain pytest still fails the test, as DeepEval's assert_test does.
     plain = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"],
-                           capture_output=True, text=True, cwd=project, env={**os.environ, "MODE": "after"})
+                           capture_output=True, text=True, cwd=project, env={**os.environ, "MODE": "after"}, encoding="utf-8", errors="replace")
     assert plain.returncode == 1 and "Metrics failed: Exact Match" in plain.stdout
 
 
@@ -159,7 +159,7 @@ def test_a_metric_one_test_doesnt_use_isnt_missing(project):
     (project / "tests" / "test_existing.py").write_text(SUITE + '''
 def test_greeting():
     assert_test(Case("hi", expected="hi"), [])
-''')
+''', encoding="utf-8")
     out = run(project)
     assert out.returncode == 0 and "Missing" not in out.stdout
 
