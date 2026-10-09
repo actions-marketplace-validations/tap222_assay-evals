@@ -1,6 +1,6 @@
 [project]
 name = "assay-evals"
-version = "0.3.2"
+version = "0.3.3"
 description = "Record what your AI system does, and how it went, in Assay: runs, agent steps, feedback and test results"
 readme = "README.md"
 license = "MIT"
