@@ -858,19 +858,29 @@ def run_command(command: str, events: Path, run_id: str, repeat: int, timeout: O
     if rerun_failed:
         env["ASSAY_RERUN"] = "failed"  # the pytest plugin runs only what didn't pass last time
     codes = []
+    posix = os.name == "posix"
     for attempt in range(repeat):
         env["ASSAY_TEST_ATTEMPT"] = str(attempt)
-        proc = subprocess.Popen(command, shell=True, env=env, start_new_session=True)
+        # Its own process group (Unix) or console group (Windows): a timeout stops it and all it started.
+        group = {"start_new_session": True} if posix else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        proc = subprocess.Popen(command, shell=True, env=env, **group)
         try:
             codes.append(proc.wait(timeout=timeout or None))
         except subprocess.TimeoutExpired:
-            for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):  # the shell and all it started
+            if posix:
+                for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):  # the shell and all it started
+                    try:
+                        os.killpg(proc.pid, sig)
+                        proc.wait(timeout=wait)
+                        break
+                    except (ProcessLookupError, subprocess.TimeoutExpired):
+                        continue
+            else:  # taskkill /T ends the whole tree under the shell; then make sure of the shell itself
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
                 try:
-                    os.killpg(proc.pid, sig)
-                    proc.wait(timeout=wait)
-                    break
-                except (ProcessLookupError, subprocess.TimeoutExpired):
-                    continue
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
             codes.append(TIMED_OUT)
     return codes
 
