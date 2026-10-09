@@ -46,7 +46,7 @@ assay.expect("case-17", calls=[{"tool": "get_order", "args": {"order_id": "O-17"
 |---|---|
 | `assay.run(task, kind="agent"\|"pipeline", input=, version=, test="case-17")` | one run; an exception ends it as failed. `test` can also be `{"run", "case", "attempt"}`: under `assay test` the run and attempt are filled in |
 | `run.llm(...)`, `run.tool(name, args, result)`, `run.call(name, fn, **args)`, `run.state(obj, op, value)`, `run.answer(text)`, `with run.stage(name) as s` | its steps, in order |
-| `run.llm(..., tools=[...])`, `run.approval(action, decision, by=)`, `run.outcome("resolved")` | what the model was offered, decisions to allow an action, and whether the request was resolved |
+| `run.llm(..., tools=[...])`, `run.approval(action, decision, by=)`, `run.outcome("resolved")` | what the model was offered (names, or the tool definitions themselves, so a changed description or schema shows in `assay diff`), decisions to allow an action, and whether the request was resolved |
 | `assay.feedback`, `assay.check`, `assay.correction`, `assay.expect` | outcomes, sent whenever they're known |
 | `run.expect(...)`, `run.check(field, status, expected=, actual=)` | the same, for a test-case run's own case |
 | `assay.flush()` | send now (short-lived scripts); also happens every second and at exit |

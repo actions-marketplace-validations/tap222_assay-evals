@@ -360,6 +360,18 @@ run.mcp_prompt("refund_policy_check", {"order": "O-17"}, messages, server="docs"
 A resource's contents count as what the agent retrieved, so a judge given that policy as its
 context passes the context check.
 
+An MCP server's tools change under the agent: a description reworded, an argument made required.
+Offer the model the server's `tools/list` as it is, and record it with the call:
+
+```python
+tools = (await session.list_tools()).model_dump()["tools"]   # [{"name", "description", "inputSchema"}]
+run.llm(model=..., tools=tools)
+```
+
+Each tool's definition is kept once per run, and `assay diff` compares it with the baseline's. A
+change is shown next to the regressions it may have caused, for example *refund: description
+reworded; `reason` now required* ([Behavior diff](diff.md)).
+
 ## Beyond the final answer: how the agent behaved
 
 "Agent score: 0.87" doesn't say what changed. Assay checks what the agent did, and compares how it

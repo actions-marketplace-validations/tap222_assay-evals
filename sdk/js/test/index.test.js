@@ -90,3 +90,21 @@ test("a long case id keeps its start and a hash of the whole, as the Python plug
   assert.ok(id.startsWith("src/a/b.spec.ts::xxx") && /~[0-9a-f]{8}$/.test(id));
   assert.equal(assay.caseIdOf("short"), "short");
 });
+
+test("tool definitions are recorded once per run, each with its description", async () => {
+  const tools = [
+    { name: "refund", description: "Refund an order. Needs approval first.",
+      inputSchema: { type: "object", properties: { order_id: { type: "string" } }, required: ["order_id"] } },
+    { type: "function", function: { name: "lookup", description: "Look up.", parameters: { type: "object" } } },
+    "plain_name",
+  ];
+  await assay.assayCase("defs", async (run) => {
+    run.llm({ model: "m", tools });
+    run.llm({ model: "m", tools });
+  });
+  const llm = events().filter((e) => e.kind === "llm");
+  assert.deepEqual(llm[0].tools, ["refund", "lookup", "plain_name"]);
+  assert.equal(llm[0].tool_schemas.refund["x-assay-description"], "Refund an order. Needs approval first.");
+  assert.deepEqual(llm[0].tool_schemas.lookup, { type: "object", "x-assay-description": "Look up." });
+  assert.equal(llm[1].tool_schemas, undefined); // unchanged: not sent again
+});

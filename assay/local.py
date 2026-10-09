@@ -1053,12 +1053,13 @@ def _floor(f: dict) -> str:
 def _setups(engine, tenant: str, docs: List[str]) -> Dict[str, dict]:
     """Per run: the prompt versions its model calls used, the models, and the tools they were offered."""
     st = store.agent_steps
-    out: Dict[str, dict] = defaultdict(lambda: {"prompts": set(), "models": set(), "tools": set(), "calls": []})
+    out: Dict[str, dict] = defaultdict(lambda: {"prompts": set(), "models": set(), "tools": set(), "calls": [],
+                                                "defs": {}})
     ids = sorted({d for d in docs if d})
     with engine.connect() as conn:
         for i in range(0, len(ids), 500):
             for r in conn.execute(select(st.c.trajectory_id, st.c.prompt, st.c.model, st.c.tools, st.c.context,
-                                         st.c.media, st.c.settings).where(
+                                         st.c.media, st.c.settings, st.c.tool_schemas).where(
                     (st.c.tenant == tenant) & st.c.trajectory_id.in_(ids[i:i + 500]) & (st.c.kind == "reason"))):
                 s = out[r.trajectory_id]
                 if r.prompt:
@@ -1066,7 +1067,52 @@ def _setups(engine, tenant: str, docs: List[str]) -> Dict[str, dict]:
                 if r.model:
                     s["models"].add(r.model)
                 s["tools"] |= set(r.tools or [])
+                s["defs"].update(r.tool_schemas or {})  # each tool's definition, sent once per run
                 s["calls"].append({"context": r.context or {}, "media": r.media or {}, "settings": r.settings or {}})
+    return out
+
+
+def _cut(text: str, n: int = 60) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+TOOL_DESCRIPTION = "x-assay-description"  # where the SDKs keep a tool's description in its schema
+
+
+def tool_definition_changes(a: dict, b: dict) -> List[str]:
+    """What changed in one tool's definition, the way the model sees it: its description, and its
+    input schema's arguments (added, removed, required, type, allowed values, their descriptions)."""
+    DESCRIPTION = TOOL_DESCRIPTION
+    out = []
+    da, db = a.get(DESCRIPTION), b.get(DESCRIPTION)
+    if da != db:
+        out.append(f"description “{_cut(da)}” → “{_cut(db)}”" if da and db else
+                   "description added" if db else "description removed")
+    pa, pb = a.get("properties") or {}, b.get("properties") or {}
+    ra, rb = set(a.get("required") or []), set(b.get("required") or [])
+    for k in sorted(pb.keys() - pa.keys()):
+        out.append(f"`{k}` added" + (" (required)" if k in rb else ""))
+    for k in sorted(pa.keys() - pb.keys()):
+        out.append(f"`{k}` removed")
+    for k in sorted(pa.keys() & pb.keys()):
+        x, y = pa[k] if isinstance(pa[k], dict) else {}, pb[k] if isinstance(pb[k], dict) else {}
+        if k in rb - ra:
+            out.append(f"`{k}` now required")
+        if k in ra - rb:
+            out.append(f"`{k}` no longer required")
+        if x.get("type") != y.get("type"):
+            out.append(f"`{k}` {x.get('type') or 'any'} → {y.get('type') or 'any'}")
+        if x.get("enum") != y.get("enum"):
+            ea, eb = list(x.get("enum") or []), list(y.get("enum") or [])
+            moved = [f"+{v}" for v in eb if v not in ea] + [f"−{v}" for v in ea if v not in eb]
+            out.append(f"`{k}` allowed values {' '.join(map(str, moved)) or 'reordered'}")
+        if x.get("description") != y.get("description"):
+            out.append(f"`{k}` description changed")
+    if not out:
+        rest = lambda s: {k: v for k, v in s.items() if k != DESCRIPTION}
+        if rest(a) != rest(b):
+            out.append("input schema changed")
     return out
 
 
@@ -1146,12 +1192,13 @@ def setup_changes(engine, tenant: str, rows: list, base_rows: list) -> dict:
 
     def union(ds):
         u = {"prompts": set(), "models": set(), "tools": set()}
-        calls = []
+        calls, defs = [], {}
         for d in ds:
             for k in u:
                 u[k] |= setups[d][k] if d in setups else set()
             calls += setups[d]["calls"] if d in setups else []
-        return {**u, "inputs": _inputs_of(calls)}
+            defs.update(setups[d]["defs"] if d in setups else {})
+        return {**u, "inputs": _inputs_of(calls), "defs": defs}
     now = {c: union(ds) for c, ds in docs_now.items()}
     before = {c: union(ds) for c, ds in docs_before.items()}
     cases: Dict[str, List[dict]] = {}
@@ -1168,6 +1215,10 @@ def setup_changes(engine, tenant: str, rows: list, base_rows: list) -> dict:
             ch.append({"what": "model", "before": sorted(a["models"]), "now": sorted(b["models"])})
         if a["tools"] != b["tools"]:
             ch.append({"what": "tools", "added": sorted(b["tools"] - a["tools"]), "removed": sorted(a["tools"] - b["tools"])})
+        for name in sorted(a["defs"].keys() & b["defs"].keys()):  # a tool offered before and now, defined anew
+            what = tool_definition_changes(a["defs"][name], b["defs"][name])
+            if what:
+                ch.append({"what": "tool_definition", "tool": name, "changes": what})
         ch += _input_changes(a["inputs"], b["inputs"])
         if ch:
             cases[c] = ch
@@ -1181,7 +1232,7 @@ def setup_changes(engine, tenant: str, rows: list, base_rows: list) -> dict:
         if x["what"] == "prompt" and len(x["before"]) == 1 and len(x["now"]) == 1 and "diff" not in x:
             x["diff"] = _prompt_diff(engine, tenant, x["id"], x["before"][0], x["now"][0])
     return {"cases": {c: chs for c, chs in cases.items() if chs}, "everywhere": everywhere,
-            "now": {c: {k: sorted(v) for k, v in s.items() if k != "inputs"} for c, s in now.items()}}
+            "now": {c: {k: sorted(v) for k, v in s.items() if k not in ("inputs", "defs")} for c, s in now.items()}}
 
 
 def _prompt_diff(engine, tenant: str, pid: str, a: str, b: str) -> Optional[dict]:
@@ -1224,6 +1275,8 @@ def change_text(x: dict) -> str:
             return f"{v['per_call']} per call" + (f" at {v['size']}" if v.get("size") else "") + \
                 (f", detail {v['detail']}" if v.get("detail") else "")
         return f"media   {m(x['before'])} → {m(x['now'])}"
+    if x["what"] == "tool_definition":
+        return f"tool    {x['tool']}: {'; '.join(x['changes'])}"
     parts = ([f"+{t}" for t in x["added"]] + [f"−{t}" for t in x["removed"]])
     return f"tools   offered {' '.join(parts)}"
 
@@ -1245,6 +1298,13 @@ def blame(setup: dict, regressed: List[str]) -> List[str]:
             rest = f"; the {_n(len(off), 'case')} still on another version {'all pass' if not (bad & off) else 'pass'}" \
                 if off else ""
             out.append(f"{len(hit)} of {len(bad & (on | off))} regressions use {pid}@{ver}{rest}")
+    tools = sorted({x["tool"] for chs in [setup.get("everywhere") or [], *(setup.get("cases") or {}).values()]
+                    for x in chs if x["what"] == "tool_definition"})
+    for name in tools:
+        offered = {c for c, s in now.items() if name in s.get("tools", [])}
+        if bad and bad <= offered and offered != set(now):  # only the cases offered it went wrong
+            out.append(f"{_n(len(bad), 'regression')}, all in cases offered {name}, whose definition changed; "
+                       f"none of the {_n(len(set(now) - offered), 'case')} not offered it regressed")
     return out
 
 

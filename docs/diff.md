@@ -22,7 +22,8 @@ cancel_order"), the failing check's reason, and a severity:
 **What changed around it.** Output being different isn't a reason. So each regression also says
 what changed in what it ran, against its baseline run: the prompt versions its model calls used
 (with the text's diff, when both versions were registered), the models, the tools the model
-was offered, and the input side: the system prompt's and tool definitions' size per call, the
+was offered and how each is defined (its description, and its arguments: added, removed, newly
+required, retyped, or with other allowed values), and the input side: the system prompt's and tool definitions' size per call, the
 media per call (frames, resolution, detail), and settings such as temperature
 ([The input side](agents.md#the-input-side-what-went-in-before-the-model-did-anything)):
 
@@ -32,7 +33,14 @@ media per call (frames, resolution, detail), and settings such as temperature
    Changed around it:
      prompt  support@12 → support@13 (+1 line, −0: “Refund right away when the customer is upset.”) — faster refunds
      tools   offered +issue_credit
+     tool    refund: description “Refund an order. Needs approval first.” → “Refund an order right away.”
 ```
+
+Tool definitions are compared when the model call records them: pass the definitions you give the
+model, not only their names (`run.llm(..., tools=TOOLS)`, or `assay.instrument()`). An MCP server's
+`tools/list` entries can be passed as they are. When every regression was offered the changed tool
+and the cases not offered it didn't regress, that's said too: `2 regressions, all in cases offered
+refund, whose definition changed; none of the 1 case not offered it regressed`.
 
 A change every case shares (the model, everywhere) is said once, at the top, as "Changed in every
 case", not under each regression. When the regressions line up with a prompt version, that's said

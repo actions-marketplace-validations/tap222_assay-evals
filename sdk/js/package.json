@@ -1,6 +1,6 @@
 {
   "name": "assay-evals",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Assay for JavaScript and TypeScript: record what your AI does in a test, so assay test compares each test with its last passing run",
   "main": "index.js",
   "types": "index.d.ts",

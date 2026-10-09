@@ -161,7 +161,7 @@ worse with a judge that disagrees with itself).
 | **Document extraction** | Field, line-item, table, OCR, splitting and confidence metrics, with per-field gates. See [below](#document-extraction). | [Documents](docs/documents.md) |
 | **Agents and workflows** | Trajectories, path and claim contracts, plan adherence, multi-turn conversations, simulated users, tools that fail or whose state changes mid-run (an approval that's stale by the time the agent acts), and [rewordings](docs/testing.md#rewordings-the-same-request-in-other-words): the same request in other words must get the same behavior. | [Agents](docs/agents.md) |
 | **Judges you can check** | Calibration against labels a person gave, bias probes, drift, whether a judge ranks answers or only recognizes the topic, and a trust label on every judged score. | [Calibration](docs/calibration.md) |
-| **What caused it** | The prompt, model, tools, input and settings that changed next to each regression, or "nothing on your side changed". | [Failures](docs/failures.md) |
+| **What caused it** | The prompt, model, tools, input and settings that changed next to each regression, or "nothing on your side changed". That includes a tool's definition: a reworded description or a changed argument, from your own tools or an MCP server's `tools/list`. | [Failures](docs/failures.md) |
 | **Production back to tests** | Flagged traces and reviewed conversations become candidate test cases. Before there's traffic, `assay synth` generates queries from dimensions you define, kept apart from production. | [Learning](docs/learning.md), [Synthetic](docs/synthetic.md) |
 
 ## Document extraction

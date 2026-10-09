@@ -72,7 +72,7 @@ nothing recorded: events are written only to `ASSAY_PATH`, which `assay test` se
 | `assayCase([name], fn)` | One test as an Assay case; `fn(run)` records it |
 | `run.call(name, fn, args)` | Calls `fn(args)`, records it as a tool call (result or error), returns the result |
 | `run.tool(name, args, result, { error })` | A tool call already made |
-| `run.llm({ model, tokensIn, tokensOut, costUsd, prompt, text, finishReason, tools })` | A model call |
+| `run.llm({ model, tokensIn, tokensOut, costUsd, prompt, text, finishReason, tools })` | A model call. `tools`: names, or the definitions you gave the model (Anthropic, OpenAI, or an MCP `tools/list`), so a changed description or schema shows in `assay diff` |
 | `run.answer(text)`, `run.outcome("resolved")` | The reply, and whether it resolved the request |
 | `run.check(field, passed, reason)` | A check of your own |
 | `run.expect()` | `.mustCall(t)`, `.mustNotCall(t)`, `.mustCallBefore(a, b)`, `.maxSteps(n)`, `.mustAnswer(text)` |
