@@ -1439,7 +1439,7 @@ async function renderStepDetail(g,stage,days){
 const MECH={unsafe_action:["Unsafe action","var(--bad)"],tool_error:["Tool error","var(--c-fb)"],looped:["Looped","var(--warn)"],
   wrong_tool:["Wrong tool","var(--c-ai)"],bad_arguments:["Wrong arguments","var(--c-est)"],gave_up:["Stopped early","var(--c-plat)"],
   ignored_result:["Ignored a tool result","var(--c-rew)"],wrong_state:["Wrong end state","var(--c-rev)"],wrong_answer:["Wrong answer","var(--line-strong)"]};
-const CHECK_LABEL={answer:"Answer",end_state:"End state",tool_calls:"Tool calls",safety:"Safety",efficiency:"Efficiency"};
+const CHECK_LABEL={answer:"Answer",end_state:"End state",tool_calls:"Tool calls",safety:"Safety",efficiency:"Efficiency",recorded:"Recorded checks"};
 const jtxt=v=>v==null?"":typeof v==="string"?v:JSON.stringify(v);
 const callTxt=(n,a)=>`${n}(${Object.entries(a||{}).map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(", ")})`;
 function delta(now,before,{pp=true,lowerBetter=false}={}){if(now==null||before==null)return"";const d=now-before;if(Math.abs(d)<1e-9)return`<span class="ref">no change</span>`;
@@ -1519,7 +1519,7 @@ async function renderAgents(){
   <div class="panel"><div class="panel-head"><div><h2>Trajectories</h2><p class="sub">${list.length} shown. Open one to see it step by step against its reference.</p></div>
     <label class="picker"><input type="checkbox" id="agent-bad" ${onlyBad?"checked":""}> failing only</label></div>
     <div class="scroll"><table><tr><th>Case</th><th>Attempt</th><th>Task</th>${Object.keys(CHECK_LABEL).map(k=>`<th>${CHECK_LABEL[k]}</th>`).join("")}<th class="num">Steps</th><th class="num">Cost</th></tr>
-    ${list.slice(0,200).map(t=>`<tr class="click" data-traj="${esc(t.trajectory_id)}"><td class="mono">${esc(t.case_id||t.trajectory_id)}</td><td class="num">${t.attempt??""}</td><td class="ref">${esc(t.task||"")}</td>
+    ${list.slice(0,200).map(t=>`<tr class="click" data-traj="${esc(t.trajectory_id)}"><td class="mono">${esc(t.case_id||t.trajectory_id)}</td><td class="num">${t.attempt??""}</td><td class="ref">${esc(t.task||"")}${(t.failing_recorded||[]).length?`<div class="ref" style="color:var(--bad)">${esc(t.failing_recorded.join(", "))}</div>`:""}</td>
       ${Object.keys(CHECK_LABEL).map(k=>`<td>${t.checks[k]==null?"":`<span class="okx ${t.checks[k]==="pass"?"y":"n"}">${t.checks[k]==="pass"?"✓":"✗"}</span>`}</td>`).join("")}
       <td class="num">${t.steps}</td><td class="num">${money(t.cost_usd)}</td></tr>`).join("")}</table></div></div>`;
   $("#agent-run").onchange=e=>{store.set("assay-agent-run",e.target.value);renderAgents()};
@@ -1567,6 +1567,8 @@ function renderTrajectory(t){
     ${t.status==="running"?`<p class="flag"><span class="chip neutral">running</span>Still going: it's checked when it ends.</p>`:""}
     ${t.evaluation?`<div><h3 style="margin-bottom:6px">Checked when it ended ${lifeStatus(t.evaluation.status)} <span class="ref">${esc(t.evaluation.evaluated_at.slice(0,16).replace("T"," "))}</span></h3>
       ${t.evaluation.checks.map(c=>`<div><span class="okx ${c.status==="pass"?"y":"n"}">${c.status==="pass"?"✓":"✗"}</span> ${esc(LIFE_CHECK[c.check]||c.check)}${c.reason?` <span class="ref">${esc(c.reason)}</span>`:""}</div>`).join("")}</div>`:""}
+    ${(t.recorded||[]).length?`<div><h3 style="margin-bottom:6px">Recorded checks <span class="ref">sent with the run: the test's own checks, judges</span></h3>
+      ${t.recorded.map(c=>`<div><span class="okx ${c.status==="pass"?"y":"n"}">${c.status==="pass"?"✓":c.status==="fail"?"✗":"?"}</span> <span class="mono" style="font-size:12.5px">${esc(c.field)}</span>${c.reason?` <span class="ref">${esc(c.reason)}</span>`:""}</div>`).join("")}</div>`:""}
     ${fb?`<p class="flag"><span class="chip bad">first bad step</span><span><b>${esc(MECH[fb.mechanism][0])}</b>${fb.seq!=null?` at step ${fb.seq+1}`:""}: ${esc(fb.detail)}</span></p>`:""}
     <div class="traj"><div class="steps">${t.steps.map(stepHtml).join("")}</div>
       <div class="stack" style="align-content:start">

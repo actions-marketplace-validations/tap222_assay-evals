@@ -102,10 +102,58 @@ If you work across several repositories, set this up once and every repository's
 one dashboard, each under its own name:
 
 ```bash
-docker run -d --restart unless-stopped -p 127.0.0.1:8400:8400 -v assay-data:/data \
-  --name assay ghcr.io/tap222/assay-server      # the dashboard, at http://localhost:8400
+pipx install assay-server                       # the `assay` command, in its own environment
 assay init --claude-code --global               # the Claude Code skill, for every project
+mkdir -p ~/.assay-server
+ASSAY_STORE_URL=sqlite:///$HOME/.assay-server/assay.db assay serve   # the dashboard, at http://localhost:8400
 ```
+
+`assay serve` is one Python process with a SQLite file, so it needs no Docker and little memory.
+Give it a fixed `ASSAY_STORE_URL`: by default it keeps its data in `./assay.db`, wherever it was
+started. Each project still needs the pytest plugin in its own environment
+(`pip install assay-evals pytest`), since `pytest --assay` runs there.
+
+To keep the server running across restarts, start it as a user service.
+
+On macOS, save this as `~/Library/LaunchAgents/dev.assay.server.plist` (with your home folder
+in place of `/Users/you`, and the path `which assay` prints), then run
+`launchctl load ~/Library/LaunchAgents/dev.assay.server.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.assay.server</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/you/.local/bin/assay</string><string>serve</string><string>--port</string><string>8400</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>ASSAY_STORE_URL</key><string>sqlite:////Users/you/.assay-server/assay.db</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/Users/you/.assay-server/server.log</string>
+</dict></plist>
+```
+
+On Linux, save this as `~/.config/systemd/user/assay.service`, then run
+`systemctl --user enable --now assay`:
+
+```ini
+[Unit]
+Description=Assay dashboard
+
+[Service]
+Environment=ASSAY_STORE_URL=sqlite:///%h/.assay-server/assay.db
+ExecStart=%h/.local/bin/assay serve --port 8400
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+Or with Docker, if you already run it:
+`docker run -d --restart unless-stopped -p 127.0.0.1:8400:8400 -v assay-data:/data --name assay ghcr.io/tap222/assay-server`.
 
 Then send every run there. Set these in your shell profile, or for Claude Code in
 `~/.claude/settings.json` under `"env"`:
@@ -119,6 +167,14 @@ Every `pytest --assay` run, yours or Claude's, then goes to the dashboard, filed
 repository's name from its git remote (`ASSAY_PROJECT` overrides it). **All projects** shows
 each repository's latest run against the one before it, with what regressed first. A repository
 needs Assay tests to show up; in one without them, Claude offers to set them up.
+
+If the server isn't running, the tests still run and their result stands; the run is kept in
+`.assay/` and the output says so. Send it once the server is up with `assay upload`.
+
+Each run's page lists every case with the checks the server works out from the trajectory
+(answer, end state, tool calls, safety, efficiency) and **Recorded checks**: the ones sent with
+the run, such as the test's own `expect(...)` checks and judges. A case that failed one of those
+shows as failing, with the check's name and reason.
 
 ## Run it on every pull request (optional)
 
