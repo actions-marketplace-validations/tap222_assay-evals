@@ -2,12 +2,13 @@
 
 <p align="center">
   <strong>Your prompt change broke 3 cases. Assay tells you which ones, what changed, and whether it's real or noise.</strong><br>
-  Behavioral regression testing for AI apps and agents, as a pytest plugin and a PR check.
+  Behavioral regression testing for AI apps and agents in Python and TypeScript: a pytest plugin, a Jest and Vitest helper, and a PR check.
 </p>
 
 <p align="center">
   <a href="https://pypi.org/project/assay-server/"><img src="https://img.shields.io/pypi/v/assay-server?label=pypi&color=blue" alt="assay-server on PyPI"></a>
   <a href="https://pypi.org/project/assay-server/"><img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python versions"></a>
+  <a href="https://www.npmjs.com/package/assay-evals"><img src="https://img.shields.io/npm/v/assay-evals?label=npm&color=blue" alt="assay-evals on npm"></a>
   <a href="https://pepy.tech/project/assay-server"><img src="https://img.shields.io/pepy/dt/assay-server?label=downloads" alt="Downloads"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/tap222/assay-evals" alt="License: MIT"></a>
   <a href="https://github.com/tap222/assay-evals/stargazers"><img src="https://img.shields.io/github/stars/tap222/assay-evals?style=flat" alt="GitHub stars"></a>
@@ -83,7 +84,7 @@ pytest --assay tests/ai    # each case against its last passing run; exit 1 on a
 assay diff                 # what behavior changed, case by case
 ```
 
-A test is a pytest test that takes the `assay_case` fixture:
+In Python, a test is a pytest test that takes the `assay_case` fixture:
 
 ```python
 from assay_sdk.testing import assert_called, assert_not_called, assert_max_steps
@@ -94,6 +95,36 @@ def test_refund(assay_case):
     assert_not_called(assay_case, "delete_order")
     assert_max_steps(assay_case, 6)
     assert "27.61" in reply
+```
+
+In TypeScript or JavaScript, a Jest or Vitest test wraps its body in `assayCase()`
+([sdk/js](sdk/js/README.md)), and `assay test` runs the command in `assay.toml`:
+
+```bash
+npm install --save-dev assay-evals
+pip install assay-server   # the `assay` command
+```
+
+```ts
+import { assayCase } from "assay-evals";
+
+test("refunds a delivered order", () =>
+  assayCase(async (run) => {
+    run.expect().mustCall("get_order").mustNotCall("delete_order").maxSteps(6);
+    const reply = await myAgent("Refund O-17", run);
+    expect(reply).toContain("27.61");
+  }));
+```
+
+```toml
+# assay.toml
+[test]
+command = "npx jest test/ai"
+```
+
+```bash
+assay test    # each case against its last passing run; exit 1 on a regression
+assay diff
 ```
 
 `assay diff` shows what changed and what changed around it:
@@ -114,7 +145,7 @@ REGRESSIONS
    Severity: HIGH
 ```
 
-Exit codes for `pytest --assay`: `0` nothing got worse, `1` a regression, `6` inconclusive
+Exit codes for `pytest --assay` and `assay test`: `0` nothing got worse, `1` a regression, `6` inconclusive
 (nothing got worse, but some results couldn't be judged, need more attempts to tell, or could be
 worse with a judge that disagrees with itself).
 
@@ -122,7 +153,7 @@ worse with a judge that disagrees with itself).
 
 | Area | What you get | Docs |
 |---|---|---|
-| **Regression tests** | Tests are pytest tests. Each case is compared with its own last passing run: checks, tool calls in order, cost and context. | [Testing](docs/testing.md) |
+| **Regression tests** | Tests are pytest tests, or Jest and Vitest tests in TypeScript and JavaScript. Each case is compared with its own last passing run: checks, tool calls in order, cost and context. | [Testing](docs/testing.md) |
 | **Behavior diff** | What changed between two versions, with the flow before and after and a severity. | [Diff](docs/diff.md) |
 | **Real change or noise** | Run each case several times and Assay separates chance (8/8 → 7/8, passes) from too few attempts to tell (inconclusive) from a regression (8/8 → 0/8, fails), corrected for the number of checks. A result that couldn't be judged is kept apart, never scored as 0. | [Repeated attempts](docs/repeats.md) |
 | **The AI or the judge** | Ask the judge again about the same answer (`evaluate(..., rejudge=3)`). A case that varies because the judge splits on it is reported as judge unstable, not flaky: more attempts won't settle it, a steadier judge will. | [AI or judge](docs/repeats.md#is-it-the-ai-or-the-judge) |
@@ -220,6 +251,19 @@ jobs:
           command: pytest --assay tests/ai
 ```
 
+For a TypeScript or JavaScript project, install its packages too and run `assay test`:
+
+```yaml
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: tap222/assay-evals@v1
+        with:
+          install: pip install assay-server && npm ci
+          command: assay test
+```
+
 Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](docs/ci.md).
 
 ## Integrations
@@ -296,6 +340,7 @@ Run `assay --help` for every command and option.
 |---|---|
 | [Getting started](docs/getting-started.md) | Add Assay to your app in four steps: install, two lines in your app, one test, run |
 | [Testing](docs/testing.md) | `pytest --assay`, the `assay_case` fixture, assertions, baselines, flakiness |
+| [TypeScript and JavaScript](sdk/js/README.md) | `assayCase()` in Jest or Vitest, `run.expect()`, `assay test` |
 | [Behavior diff](docs/diff.md) | What changed between two versions, with a severity |
 | [Repeated attempts](docs/repeats.md) | Chance, too few attempts, or a regression |
 | [CI](docs/ci.md) | The GitHub Action, PR comments, reruns, timeouts |
@@ -312,6 +357,7 @@ The full list is in [docs/README.md](docs/README.md). What's not built yet: [doc
 ```bash
 pip install -e ".[dev]"
 pytest
+cd sdk/js && npm test    # the TypeScript and JavaScript SDK
 ```
 
 Where things live in this repository: [docs/layout.md](docs/layout.md).
@@ -319,7 +365,7 @@ Where things live in this repository: [docs/layout.md](docs/layout.md).
 ## Contributing
 
 Issues and pull requests are welcome at [github.com/tap222/assay-evals](https://github.com/tap222/assay-evals/issues).
-Run `pytest` before opening a PR, and update this README in the same PR as any feature change.
+Run `pytest` (and `npm test` in `sdk/js` for a change there) before opening a PR, and update this README in the same PR as any feature change.
 
 ## License
 
