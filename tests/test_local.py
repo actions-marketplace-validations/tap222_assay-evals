@@ -318,6 +318,7 @@ def test_an_uploaded_run_says_which_repository_and_folder_it_came_from(project, 
     subprocess.run(["git", "remote", "add", "origin", "https://bot:s3cret@github.com/acme/shop.git"], cwd=project,
                    check=True)
     monkeypatch.setenv("HOME", str(project.parent))
+    monkeypatch.setenv("USERPROFILE", str(project.parent))  # Windows' home
     init_pytest_example(project)
     main(["test"])
     capsys.readouterr()

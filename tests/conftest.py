@@ -8,6 +8,7 @@ from pathlib import Path
 # would be TOML escapes. Windows takes forward slashes in a path just as well.
 if os.name == "nt":
     sys.executable = sys.executable.replace("\\", "/")
+    os.environ.setdefault("PYTHONUTF8", "1")  # child Pythons (pytest runs in tests) write UTF-8, as they're read
 
 SDK = str(Path(__file__).resolve().parents[1] / "sdk" / "python")
 if SDK not in sys.path:

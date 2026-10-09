@@ -1,4 +1,5 @@
 """`assay connect` (assay/attach.py): attach Assay to a pipeline with the least work."""
+import os
 import json
 import sqlite3
 import subprocess
@@ -119,7 +120,8 @@ def test_code_is_a_diff_until_applied_and_then_the_pipeline_shows_up(project, ca
     assert main_py.index("import assay_sdk as assay") < main_py.index("assay.init()") < main_py.index('@assay.pipeline("run")')
     assert main(["connect", "code"]) == 0 and "Nothing to add: Assay is already attached." in capsys.readouterr().out
 
-    env = {"PYTHONPATH": ":".join([str(project / "stubs"), str(project), SDK]), "PATH": "/usr/bin:/bin"}
+    env = {"PYTHONPATH": os.pathsep.join([str(project / "stubs"), str(project), SDK]), "PATH": os.defpath,
+           **{k: os.environ[k] for k in ("SYSTEMROOT",) if k in os.environ}}  # Windows' Python needs SYSTEMROOT
     for i in range(2):  # the app runs as before, and records
         r = subprocess.run([sys.executable, "-m", "app.main", f"Invoice {i}"], cwd=project, env=env,
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
