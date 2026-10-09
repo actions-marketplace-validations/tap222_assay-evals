@@ -254,7 +254,7 @@ def test_instrument_records_gemini_ollama_and_litellm_the_same_way(tmp_path, mon
         sys.modules["ollama"].chat(model="llama3.1", messages=[])
         sys.modules["litellm"].completion(model="claude", messages=[])
     assay.shutdown()
-    llm = [json.loads(x) for x in path.read_text().splitlines() if '"llm"' in x]
+    llm = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if '"llm"' in x]
     assert [(e["model"], e["finish_reason"]) for e in llm] == [("gemini-3", "length"), ("llama3.1", "tool_call"),
                                                                ("claude", "stop")]
     assert llm[0]["tokens_reasoning"] == 2 and llm[1]["tool_calls"][0]["arguments"] == {"q": "x"}

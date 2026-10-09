@@ -34,10 +34,10 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     for k in ("ASSAY_URL", "ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "ASSAY_PRICES", "ASSAY_POLICY"):
         monkeypatch.delenv(k, raising=False)
-    (tmp_path / "agent.py").write_text(AGENT)
+    (tmp_path / "agent.py").write_text(AGENT, encoding="utf-8")
 
     def toml(extra=""):
-        (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n{extra}')
+        (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n{extra}', encoding="utf-8")
     toml()
     return toml
 
@@ -88,7 +88,7 @@ def test_limits_hold_without_a_baseline(project, monkeypatch, capsys):
 def test_prices_give_recorded_calls_their_cost(project, monkeypatch, capsys):
     project('[prices]\n"claude-opus-5" = [5, 25]\n')
     run(monkeypatch, capsys, "before")
-    events = [json.loads(x) for f in Path(".assay/runs").glob("*.jsonl") for x in f.read_text().splitlines()]
+    events = [json.loads(x) for f in Path(".assay/runs").glob("*.jsonl") for x in f.read_text(encoding="utf-8").splitlines()]
     llm = [e for e in events if e.get("kind") == "llm"]
     assert llm and all(e["cost_usd"] == pytest.approx((800 * 5 + 50 * 25) / 1e6) for e in llm)
     frags = [e for e in events if e.get("kind") == "retrieval"][0]["fragments"]
@@ -183,7 +183,7 @@ def test_instrument_records_what_a_langchain_retriever_returned(tmp_path, monkey
         KB().invoke("how long do refunds take?")
         Ensemble().invoke("damaged?")
     assay.shutdown()
-    steps = [json.loads(x) for x in path.read_text().splitlines() if '"retrieval"' in x]
+    steps = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if '"retrieval"' in x]
     assert [(s["name"], s["query"], len(s["fragments"])) for s in steps] == [
         ("KB", "how long do refunds take?", 2), ("Ensemble", "damaged?", 1)]
     assert steps[0]["fragments"][0]["id"] == "kb-1" and steps[0]["fragments"][0]["tokens"] == 50

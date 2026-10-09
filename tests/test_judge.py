@@ -161,8 +161,8 @@ with assay.run("support", test="refund") as r:
     r.tool("get_order", {"id": "O-17"}, {"status": "delivered"})
     r.tool("refund", {"id": "O-17"}, {"ok": True})
     r.answer("Refunded O-17.")
-''')
-    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n')
+''', encoding="utf-8")
+    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n', encoding="utf-8")
     fake = Fake(verdict(plan=(5, "Checks the order first."), consistency=(2, "Says refunded; step 2 said delivered only.")))
     monkeypatch.setattr(judge, "_client", lambda: fake)
     assert main(["test", "--judge"]) == 1

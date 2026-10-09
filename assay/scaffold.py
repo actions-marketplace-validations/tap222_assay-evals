@@ -86,9 +86,9 @@ def sites(root: Path) -> List[Site]:
     """Every top-level function that calls a model, with what the call says about itself."""
     out = []
     for path in _py_files(root):
-        rel = os.path.relpath(path, Path.cwd()) if path.is_absolute() else str(path)
+        rel = Path(os.path.relpath(path, Path.cwd()) if path.is_absolute() else path).as_posix()  # / on every OS
         try:
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
             continue
         if Path(rel).name.startswith("test_") or "/tests/" in f"/{rel}":
@@ -134,7 +134,7 @@ def tested(root: Path, s: Site) -> bool:
         name = Path(path).name
         if name.startswith("test_") or name.endswith("_test.py"):
             try:
-                if pattern.search(Path(path).read_text()):
+                if pattern.search(Path(path).read_text(encoding="utf-8")):
                     return True
             except (OSError, UnicodeDecodeError):
                 continue

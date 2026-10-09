@@ -88,7 +88,7 @@ def load_golden(path: Path) -> List[dict]:
         raise CalibrationError(f"No golden set at {path}. `assay golden add CASE --score N` starts one from a "
                                f"recorded run, or write it: one JSON object a line, with input, output and score.")
     items, seen = [], set()
-    for n, line in enumerate(path.read_text().splitlines(), 1):
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
         try:
@@ -139,7 +139,7 @@ def save_golden(path: Path, items: List[dict]) -> None:
         else:
             x["labels"] = labs
         out.append(json.dumps(x, ensure_ascii=False, default=str))
-    path.write_text("\n".join(out) + "\n")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 def assign_splits(items: List[dict], train: float = 0.2, dev: float = 0.4, seed: int = 0,
@@ -214,7 +214,7 @@ def leaks(judge: Callable, items: List[dict], split: Optional[str]) -> List[str]
     if split and split in golden.requested():
         out.append(f"the judge read the {split} split's examples (golden_examples(split={split!r}))")
     try:
-        src = _norm_text(Path(inspect.getsourcefile(judge)).read_text())
+        src = _norm_text(Path(inspect.getsourcefile(judge)).read_text(encoding="utf-8"))
     except (TypeError, OSError):
         return out
     for x in items:

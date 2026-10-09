@@ -41,8 +41,8 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     for k in ("ASSAY_URL", "ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "ASSAY_POLICY", "GITHUB_STEP_SUMMARY"):
         monkeypatch.delenv(k, raising=False)
-    (tmp_path / "agent.py").write_text(AGENT)
-    (tmp_path / "assay.toml").write_text(TOML.format(python=sys.executable))
+    (tmp_path / "agent.py").write_text(AGENT, encoding="utf-8")
+    (tmp_path / "assay.toml").write_text(TOML.format(python=sys.executable), encoding="utf-8")
     return tmp_path
 
 

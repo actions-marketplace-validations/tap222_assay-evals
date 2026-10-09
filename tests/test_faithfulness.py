@@ -85,8 +85,8 @@ assay.init()
 with assay.run("support", test="refund", input="How long do refunds take?") as r:
     r.retrieve("How long do refunds take?", {json.dumps(FRAGS)})
     r.answer({json.dumps(ANSWER)})
-''')
-    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n')
+''', encoding="utf-8")
+    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n', encoding="utf-8")
     consistency = {"consistency": {"applicable": True, "score": 4, "reason": "fine"},
                    "plan_quality": {"applicable": False, "score": 1, "reason": "no plan"}}
 

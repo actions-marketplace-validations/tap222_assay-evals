@@ -25,16 +25,16 @@ def project(tmp_path, monkeypatch):
 
 
 def config(root, command, repeat=1, contracts=""):
-    (root / "assay.toml").write_text(f'[test]\ncommand = "{command}"\nrepeat = {repeat}\n{contracts}')
+    (root / "assay.toml").write_text(f'[test]\ncommand = "{command}"\nrepeat = {repeat}\n{contracts}', encoding="utf-8")
 
 
 def test_init_writes_a_runnable_setup_once(project, capsys):
     assert main(["init"]) == 0
     assert (project / "assay.toml").exists() and (project / local.EXAMPLE).exists()
-    assert (project / ".assay" / ".gitignore").read_text() == "*\n"  # nothing under .assay goes in git
-    (project / "assay.toml").write_text("# mine\n")
+    assert (project / ".assay" / ".gitignore").read_text(encoding="utf-8") == "*\n"  # nothing under .assay goes in git
+    (project / "assay.toml").write_text("# mine\n", encoding="utf-8")
     assert main(["init"]) == 0 and "nothing changed" in capsys.readouterr().out
-    assert (project / "assay.toml").read_text() == "# mine\n"
+    assert (project / "assay.toml").read_text(encoding="utf-8") == "# mine\n"
 
 
 # In this repo the pytest plugin isn't installed as a package, so name it.
@@ -43,8 +43,8 @@ PYTEST = f"{sys.executable} -m pytest -q -p no:cacheprovider"
 
 def init_pytest_example(project):
     main(["init"])
-    toml = (project / "assay.toml").read_text()
-    (project / "assay.toml").write_text(toml.replace('command = "pytest -q tests/ai"', f'command = "{PYTEST} tests/ai"'))
+    toml = (project / "assay.toml").read_text(encoding="utf-8")
+    (project / "assay.toml").write_text(toml.replace('command = "pytest -q tests/ai"', f'command = "{PYTEST} tests/ai"'), encoding="utf-8")
 
 
 def test_the_example_passes_then_a_bad_change_fails_then_the_fix_passes(project, capsys):
@@ -54,23 +54,23 @@ def test_the_example_passes_then_a_bad_change_fails_then_the_fix_passes(project,
     assert "2 cases · 1 attempt each · no baseline yet" in out
     assert any(line.startswith("✓ Safety") and line.endswith(" 2/2") for line in out.splitlines())
     assert "✓ tests/ai/test_support.py  2/2" in out
-    first = json.loads((project / ".assay" / "state.json").read_text())["last"]
+    first = json.loads((project / ".assay" / "state.json").read_text(encoding="utf-8"))["last"]
 
-    good = (project / local.EXAMPLE).read_text()
+    good = (project / local.EXAMPLE).read_text(encoding="utf-8")
     bad = good.replace('        reply = f"Order {order_id} hasn\'t arrived yet, so it can\'t be refunded."\n',
                        '        run.call("delete_order", lambda order_id: None, order_id=order_id)\n'
                        '        reply = "Done."\n')
     assert bad != good
-    (project / local.EXAMPLE).write_text(bad)
+    (project / local.EXAMPLE).write_text(bad, encoding="utf-8")
     assert main(["test"]) == 1
     out = capsys.readouterr().out
     assert "compared with each case's last passing run (2 of 2 cases have one, from 1 run)" in out
     assert "⚠ 1 case regressed" in out and "test_no_refund_before_delivery" in out
     assert "delete_order never runs" in out and "Failed." in out
-    base = json.loads((project / ".assay" / "state.json").read_text())["baseline_cases"]
+    base = json.loads((project / ".assay" / "state.json").read_text(encoding="utf-8"))["baseline_cases"]
     assert set(base.values()) == {first}  # a failing run doesn't become anyone's baseline
 
-    (project / local.EXAMPLE).write_text(good)
+    (project / local.EXAMPLE).write_text(good, encoding="utf-8")
     assert main(["test"]) == 0 and "Its cases' results are now their baseline." in capsys.readouterr().out
 
 
@@ -91,7 +91,7 @@ for i in range(20):
 
 
 def test_fields_known_failures_accept_and_flakiness(project, capsys, monkeypatch):
-    (project / "extract.py").write_text(EXTRACT)
+    (project / "extract.py").write_text(EXTRACT, encoding="utf-8")
     config(project, f"{sys.executable} extract.py", repeat=4)
     assert main(["test"]) == 1  # inv_19's vendor fails half its attempts, and there's no baseline
     out = capsys.readouterr().out
@@ -121,10 +121,10 @@ for i in range(5):
 
 
 def test_repeated_attempts_tell_chance_from_a_regression(project, capsys, monkeypatch):
-    (project / "agent.py").write_text(AGENT)
+    (project / "agent.py").write_text(AGENT, encoding="utf-8")
     config(project, f"{sys.executable} agent.py", repeat=8)
     assert main(["test"]) == 0
-    first = json.loads((project / ".assay" / "state.json").read_text())["baseline_cases"]
+    first = json.loads((project / ".assay" / "state.json").read_text(encoding="utf-8"))["baseline_cases"]
     capsys.readouterr()
 
     monkeypatch.setenv("FAILS", "1")  # 8/8 → 7/8 on one task of five: what an unchanged agent does
@@ -132,17 +132,17 @@ def test_repeated_attempts_tell_chance_from_a_regression(project, capsys, monkey
     out = capsys.readouterr().out
     assert "1 flaky check" in out and "except 1 case whose pass rate dropped within chance" in out
     # Passing, but not the new bar: the next run is still compared with 8/8.
-    assert json.loads((project / ".assay" / "state.json").read_text())["baseline_cases"]["task_0"] == first["task_0"]
+    assert json.loads((project / ".assay" / "state.json").read_text(encoding="utf-8"))["baseline_cases"]["task_0"] == first["task_0"]
 
     monkeypatch.setenv("FAILS", "4")  # 8/8 → 4/8: could be worse, can't be told yet
     assert main(["test", "--junit", "report.xml"]) == 3
-    xml = (project / "report.xml").read_text()
+    xml = (project / "report.xml").read_text(encoding="utf-8")
     assert 'errors="1"' in xml and 'failures="0"' in xml and "too few attempts to tell" in xml
     out = capsys.readouterr().out
     assert "? 1 needs reruns" in out and "task_0  solved  100% → 50%" in out
     assert "Inconclusive: nothing is proven worse, but 1 check could be" in out and "Failed." not in out
-    assert json.loads((project / ".assay" / "state.json").read_text())["baseline_cases"]["task_0"] == first["task_0"]
-    assert "could be worse, or chance" in (project / ".assay" / "summary.md").read_text()
+    assert json.loads((project / ".assay" / "state.json").read_text(encoding="utf-8"))["baseline_cases"]["task_0"] == first["task_0"]
+    assert "could be worse, or chance" in (project / ".assay" / "summary.md").read_text(encoding="utf-8")
     main(["diff"])
     assert "? 1 could be worse, or chance: needs reruns" in capsys.readouterr().out
 
@@ -166,7 +166,7 @@ for i in range(5):
 
 
 def test_a_judge_that_disagrees_with_itself_is_inconclusive_not_a_regression(project, capsys, monkeypatch):
-    (project / "agent.py").write_text(JUDGED)
+    (project / "agent.py").write_text(JUDGED, encoding="utf-8")
     config(project, f"{sys.executable} agent.py", repeat=8)
     assert main(["test"]) == 0
     capsys.readouterr()
@@ -182,8 +182,8 @@ def test_a_judge_that_disagrees_with_itself_is_inconclusive_not_a_regression(pro
     out = capsys.readouterr().out
     assert "(could be worse)" in out and "needs reruns" not in out
     assert "Inconclusive: nothing is proven worse, but 1 check could be, and its judge varies" in out
-    assert "the judge varies" in (project / "report.xml").read_text()
-    assert "unstable judge" in (project / ".assay" / "summary.md").read_text()
+    assert "the judge varies" in (project / "report.xml").read_text(encoding="utf-8")
+    assert "unstable judge" in (project / ".assay" / "summary.md").read_text(encoding="utf-8")
     main(["diff"])
     out = capsys.readouterr().out
     assert "? 1 judge unstable: same answer, another verdict" in out and "JUDGE UNSTABLE" in out
@@ -208,7 +208,7 @@ def test_an_old_or_missing_sdk_is_named_with_the_fix(project, monkeypatch, capsy
 
 
 def test_command_after_dashes_overrides_the_config(project, capsys):
-    (project / "extract.py").write_text(EXTRACT.replace("i == 19", "False"))
+    (project / "extract.py").write_text(EXTRACT.replace("i == 19", "False"), encoding="utf-8")
     config(project, "false")
     assert main(["test", "--repeat", "2", "--", sys.executable, "extract.py"]) == 0
     assert "20 cases · 2 attempts each" in capsys.readouterr().out
@@ -239,7 +239,7 @@ for case in ("c1", "c2"):
 
 
 def test_pii_in_tool_arguments_fails_unless_the_tool_is_allowed_it(project, capsys):
-    (project / "agent.py").write_text(PII_AGENT)
+    (project / "agent.py").write_text(PII_AGENT, encoding="utf-8")
     config(project, f"{sys.executable} agent.py", contracts='[pii]\nallow = { lookup = ["email"] }\n')
     assert main(["test"]) == 1
     out = capsys.readouterr().out
@@ -268,7 +268,7 @@ def test_without_the_fixture():
 
 
 def test_pytest_plugin_makes_each_test_a_case_and_counts_its_asserts(project, capsys):
-    (project / "test_agent.py").write_text(PYTEST_SUITE)
+    (project / "test_agent.py").write_text(PYTEST_SUITE, encoding="utf-8")
     config(project, f"{sys.executable} -m pytest -q -p no:cacheprovider test_agent.py")
     assert main(["test"]) == 1
     out = capsys.readouterr().out
@@ -318,6 +318,7 @@ def test_an_uploaded_run_says_which_repository_and_folder_it_came_from(project, 
     subprocess.run(["git", "remote", "add", "origin", "https://bot:s3cret@github.com/acme/shop.git"], cwd=project,
                    check=True)
     monkeypatch.setenv("HOME", str(project.parent))
+    monkeypatch.setenv("USERPROFILE", str(project.parent))  # Windows' home
     init_pytest_example(project)
     main(["test"])
     capsys.readouterr()
@@ -332,7 +333,7 @@ def test_an_uploaded_run_says_which_repository_and_folder_it_came_from(project, 
     assert run["origin"] == where
     (only,) = server.get("/v1/projects").json()
     assert only["latest"]["origin"] == where
-    assert "s3cret" not in (project / ".assay" / "runs").joinpath(f"{run['run_id']}.jsonl").read_text() + \
+    assert "s3cret" not in (project / ".assay" / "runs").joinpath(f"{run['run_id']}.jsonl").read_text(encoding="utf-8") + \
         json.dumps(server.get("/v1/projects").json())
 
 def test_a_run_the_command_left_open_is_reported_not_skipped(project, capsys):
@@ -346,7 +347,7 @@ run = assay.run("t", test="killed").__enter__()
 run.tool("lookup", {"id": 1}, {"ok": True})
 assay.flush()
 os._exit(1)  # killed mid-run: run.end never comes
-''')
+''', encoding="utf-8")
     config(project, f"{sys.executable} agent.py")
     assert main(["test"]) == 1
     out = capsys.readouterr().out
@@ -364,7 +365,7 @@ for case, q, reply in (("c1", "Refund O-17 please", "Refunded $27.61."), ("c2", 
     graded = q if case == "c2" else reply   # c2: the judge got the question as the "generation"
     run.check("helpful", "fail" if case == "c2" else "pass", evaluator="helpful@1",
               inputs={"query": q, "generation": graded})
-''')
+''', encoding="utf-8")
     config(project, f"{sys.executable} agent.py")
     assert main(["test"]) == 3  # c2's fail says nothing about the AI: inconclusive, not failed
     out = capsys.readouterr().out
@@ -389,14 +390,14 @@ for case in ("security", "tools", "extraction"):
 
 
 def test_a_subset_run_only_moves_its_own_cases_baseline(project, capsys, monkeypatch):
-    (project / "suite.py").write_text(SUBSET)
+    (project / "suite.py").write_text(SUBSET, encoding="utf-8")
     config(project, f"{sys.executable} suite.py")
     assert main(["test"]) == 0  # all three pass: each case's baseline
-    full = json.loads((project / ".assay" / "state.json").read_text())["last"]
+    full = json.loads((project / ".assay" / "state.json").read_text(encoding="utf-8"))["last"]
     monkeypatch.setenv("ONLY", "security")
     assert main(["test"]) == 0  # just one case
     capsys.readouterr()
-    base = json.loads((project / ".assay" / "state.json").read_text())["baseline_cases"]
+    base = json.loads((project / ".assay" / "state.json").read_text(encoding="utf-8"))["baseline_cases"]
     assert base["tools"] == base["extraction"] == full and base["security"] != full
     monkeypatch.delenv("ONLY")
     monkeypatch.setenv("BROKEN", "1")
@@ -406,16 +407,16 @@ def test_a_subset_run_only_moves_its_own_cases_baseline(project, capsys, monkeyp
 
 
 def test_an_old_whole_run_baseline_becomes_per_case(project, capsys):
-    (project / "suite.py").write_text(SUBSET)
+    (project / "suite.py").write_text(SUBSET, encoding="utf-8")
     config(project, f"{sys.executable} suite.py")
     main(["test"])
     state_file = project / ".assay" / "state.json"
-    state = json.loads(state_file.read_text())
-    state_file.write_text(json.dumps({"last": state["last"], "baseline": state["last"]}))  # the old shape
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state_file.write_text(json.dumps({"last": state["last"], "baseline": state["last"]}), encoding="utf-8")  # the old shape
     capsys.readouterr()
     assert main(["test"]) == 0
     assert "3 of 3 cases have one" in capsys.readouterr().out
-    assert "baseline" not in json.loads(state_file.read_text())
+    assert "baseline" not in json.loads(state_file.read_text(encoding="utf-8"))
 
 
 PYTEST_AGENT = '''
@@ -448,11 +449,11 @@ def test_helper(assay_case):
 
 def test_plain_pytest_fails_a_test_whose_run_fails_assays_checks(project):
     import subprocess
-    (project / "test_agent.py").write_text(PYTEST_AGENT)
-    (project / "assay.toml").write_text('[[contracts]]\nkind = "never"\nstep = "delete_order"\n')
+    (project / "test_agent.py").write_text(PYTEST_AGENT, encoding="utf-8")
+    (project / "assay.toml").write_text('[[contracts]]\nkind = "never"\nstep = "delete_order"\n', encoding="utf-8")
     pytest_cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                   "test_agent.py"]
-    out = subprocess.run(pytest_cmd, capture_output=True, text=True, cwd=project).stdout
+    out = subprocess.run(pytest_cmd, capture_output=True, text=True, cwd=project, encoding="utf-8", errors="replace").stdout
     assert "2 failed, 1 passed" in out
     assert "The run failed Assay's checks:" in out
     assert "Answer, Tool usage, Safety: Unsafe action: Broke “delete_order never runs”" not in out  # no answer ref
@@ -461,16 +462,16 @@ def test_plain_pytest_fails_a_test_whose_run_fails_assays_checks(project):
     assert "testing.py" not in out  # the helper's frames are hidden: the failure points at the test
 
     (project / "assay.toml").write_text('[[contracts]]\nkind = "never"\nstep = "delete_order"\n'
-                                        '[pytest]\nchecks = false\n')
-    out = subprocess.run(pytest_cmd, capture_output=True, text=True, cwd=project).stdout
+                                        '[pytest]\nchecks = false\n', encoding="utf-8")
+    out = subprocess.run(pytest_cmd, capture_output=True, text=True, cwd=project, encoding="utf-8", errors="replace").stdout
     assert "1 failed, 2 passed" in out  # only the test's own assert
 
 
 def test_report_by_test_file_and_junit(project, capsys):
     import xml.etree.ElementTree as ET
     (project / "tests").mkdir()
-    (project / "tests" / "test_agent.py").write_text(PYTEST_AGENT)
-    (project / "tests" / "test_other.py").write_text("def test_ok(assay_case):\n    assay_case.answer('fine')\n")
+    (project / "tests" / "test_agent.py").write_text(PYTEST_AGENT, encoding="utf-8")
+    (project / "tests" / "test_other.py").write_text("def test_ok(assay_case):\n    assay_case.answer('fine')\n", encoding="utf-8")
     config(project, f"{sys.executable} -m pytest -q -p no:cacheprovider tests",
            contracts='[[contracts]]\nkind = "never"\nstep = "delete_order"\n')
     assert main(["test", "--junit", "out.xml"]) == 1
@@ -488,7 +489,7 @@ def test_pytest_assay_compares_the_session_like_assay_test(project, monkeypatch)
     import subprocess
     init_pytest_example(project)
     run = lambda *extra: subprocess.run([*PYTEST.split(), "--assay", "tests/ai", *extra], capture_output=True,
-                                        text=True, cwd=project)
+                                        text=True, cwd=project, encoding="utf-8", errors="replace")
     for k in ("ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION"):
         monkeypatch.delenv(k, raising=False)
     first = run()
@@ -496,10 +497,10 @@ def test_pytest_assay_compares_the_session_like_assay_test(project, monkeypatch)
         in first.stdout
 
     example = project / local.EXAMPLE
-    good = example.read_text()
+    good = example.read_text(encoding="utf-8")
     example.write_text(good.replace('        reply = f"Order {order_id} hasn\'t arrived yet, so it can\'t be refunded."\n',
                                     '        run.call("delete_order", lambda order_id: None, order_id=order_id)\n'
-                                    '        reply = "Done."\n'))
+                                    '        reply = "Done."\n'), encoding="utf-8")
     worse = run()
     assert worse.returncode == 1 and "⚠ 1 case regressed" in worse.stdout
     assert "compared with each case's last passing run" in worse.stdout
@@ -509,26 +510,26 @@ def test_pytest_assay_compares_the_session_like_assay_test(project, monkeypatch)
     assert known.returncode == 0 and "3 checks acknowledged (1 case), quiet until worse" in known.stdout \
         and "1 failed" in known.stdout
 
-    (project / "tests" / "ai" / "test_plain.py").write_text("def test_bug():\n    assert 1 == 2\n")
+    (project / "tests" / "ai" / "test_plain.py").write_text("def test_bug():\n    assert 1 == 2\n", encoding="utf-8")
     plain = run()  # a failing test Assay knows nothing about still fails the session
     assert plain.returncode == 1 and "1 failing test doesn't take the assay_case fixture" in plain.stdout
     (project / "tests" / "ai" / "test_plain.py").unlink()
 
-    toml = (project / "assay.toml").read_text()
-    (project / "assay.toml").write_text(toml.replace(f'{PYTEST} tests/ai"', f'{PYTEST} --assay tests/ai"'))
-    out = subprocess.run([sys.executable, "-m", "assay", "test"], capture_output=True, text=True, cwd=project)
+    toml = (project / "assay.toml").read_text(encoding="utf-8")
+    (project / "assay.toml").write_text(toml.replace(f'{PYTEST} tests/ai"', f'{PYTEST} --assay tests/ai"'), encoding="utf-8")
+    out = subprocess.run([sys.executable, "-m", "assay", "test"], capture_output=True, text=True, cwd=project, encoding="utf-8", errors="replace")
     assert out.stdout.count("Assay test  t-") == 1 and "= assay =" not in out.stdout  # compared once
 
 
 def test_pytest_assay_without_the_server_says_what_to_install(project):
     import subprocess
-    (project / "test_x.py").write_text("def test_x(assay_case):\n    pass\n")
+    (project / "test_x.py").write_text("def test_x(assay_case):\n    pass\n", encoding="utf-8")
     hidden = project / "no_server" / "assay"  # first on the path: assay-server, as if not installed
     hidden.mkdir(parents=True)
-    (hidden / "__init__.py").write_text("raise ImportError('assay-server is not installed')\n")
+    (hidden / "__init__.py").write_text("raise ImportError('assay-server is not installed')\n", encoding="utf-8")
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(hidden.parent), SDK])}
     out = subprocess.run([sys.executable, "-m", "pytest", "-q", "--assay",
-                          "test_x.py"], capture_output=True, text=True, cwd=project, env=env)
+                          "test_x.py"], capture_output=True, text=True, cwd=project, env=env, encoding="utf-8", errors="replace")
     assert out.returncode == 4 and "pip install assay-server" in out.stderr + out.stdout
 
 
@@ -548,10 +549,10 @@ def test_refund(assay_case):
 def test_behavior_that_got_worse_fails_the_session(project, monkeypatch):
     import subprocess
     (project / "tests").mkdir()
-    (project / "tests" / "test_b.py").write_text(BEHAVIOR)
+    (project / "tests" / "test_b.py").write_text(BEHAVIOR, encoding="utf-8")
     for k in ("ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "PROMPT"):
         monkeypatch.delenv(k, raising=False)
-    run = lambda: subprocess.run([*PYTEST.split(), "--assay", "tests"], capture_output=True, text=True, cwd=project)
+    run = lambda: subprocess.run([*PYTEST.split(), "--assay", "tests"], capture_output=True, text=True, cwd=project, encoding="utf-8", errors="replace")
     assert run().returncode == 0
     monkeypatch.setenv("PROMPT", "v2")
     out = run()
@@ -563,15 +564,15 @@ def test_behavior_that_got_worse_fails_the_session(project, monkeypatch):
         assert line in out.stdout
     assert "✗ tests/test_b.py  0/1" in out.stdout
 
-    (project / "assay.toml").write_text("[behavior]\nfail = false\n")
+    (project / "assay.toml").write_text("[behavior]\nfail = false\n", encoding="utf-8")
     out = run()
     assert out.returncode == 0 and "(not failing: [behavior] fail = false)" in out.stdout
-    (project / "assay.toml").write_text("[behavior]\ncost = 2\n")
+    (project / "assay.toml").write_text("[behavior]\ncost = 2\n", encoding="utf-8")
     assert "unknown cost" in run().stdout + run().stderr
 
 
 def test_the_defaults_without_assay_toml_have_every_setting(tmp_path):
-    (tmp_path / "assay.toml").write_text("")
+    (tmp_path / "assay.toml").write_text("", encoding="utf-8")
     assert set(local.DEFAULT_CONFIG) == set(local.load_config(tmp_path))  # else pytest --assay without one breaks
 
 
@@ -582,7 +583,7 @@ def test_pytest_assay_upload_sends_to_assay_url(project, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("ASSAY_URL", "http://127.0.0.1:9")  # the session records locally, then sends it here
     out = subprocess.run([*PYTEST.split(), "--assay", "--assay-upload", "tests/ai"], capture_output=True,
-                         text=True, cwd=project).stdout
+                         text=True, cwd=project, encoding="utf-8", errors="replace").stdout
     assert "Where to?" not in out and "127.0.0.1:9" in out
 
 
@@ -610,11 +611,11 @@ def test_plain_pytest_sends_nothing_though_assay_url_is_set(project, monkeypatch
     for k in ("ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("ASSAY_URL", f"http://127.0.0.1:{server.server_port}")
-    out = subprocess.run([*PYTEST.split(), "tests/ai"], capture_output=True, text=True, cwd=project)
+    out = subprocess.run([*PYTEST.split(), "tests/ai"], capture_output=True, text=True, cwd=project, encoding="utf-8", errors="replace")
     server.shutdown()
     assert out.returncode == 0, out.stdout
     assert hits == []
-    events = (project / ".assay" / "events.jsonl").read_text().splitlines()
+    events = (project / ".assay" / "events.jsonl").read_text(encoding="utf-8").splitlines()
     assert any(json.loads(e)["type"] == "run.start" for e in events)
 
 def test_init_adds_the_claude_code_skill_when_asked(project, capsys):
@@ -622,10 +623,10 @@ def test_init_adds_the_claude_code_skill_when_asked(project, capsys):
     assert main(["init"]) == 0 and not skill.exists()  # only when asked
     assert main(["init", "--claude-code"]) == 0
     assert local.CLAUDE_SKILL in capsys.readouterr().out
-    text = skill.read_text()
+    text = skill.read_text(encoding="utf-8")
     assert text.startswith("---\nname: assay\ndescription: ") and "Never run `assay accept`" in text
-    skill.write_text("mine")
-    assert main(["init", "--claude-code"]) == 0 and skill.read_text() == "mine"  # left alone
+    skill.write_text("mine", encoding="utf-8")
+    assert main(["init", "--claude-code"]) == 0 and skill.read_text(encoding="utf-8") == "mine"  # left alone
 
 
 def test_a_project_is_named_after_its_repository(project, monkeypatch):
@@ -649,7 +650,7 @@ def test_assay_upload_env_sends_every_run(project, monkeypatch):
     for k in ("ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION"):
         monkeypatch.delenv(k, raising=False)
     run = lambda: subprocess.run([*PYTEST.split(), "--assay", "tests/ai"], capture_output=True, text=True,
-                                 cwd=project).stdout
+                                 cwd=project, encoding="utf-8", errors="replace").stdout
     monkeypatch.setenv("ASSAY_UPLOAD", "1")
     assert "Where to?" not in run()  # no server set: nothing to send, and nothing said
     monkeypatch.setenv("ASSAY_URL", "http://127.0.0.1:9")
@@ -696,7 +697,7 @@ async function support(run, orderId) {{
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
 def test_a_node_project_is_tested_and_a_regression_caught(project, capsys, monkeypatch):
-    (project / "agent.js").write_text(JS_AGENT.format(sdk=json.dumps(str(JS_SDK))))
+    (project / "agent.js").write_text(JS_AGENT.format(sdk=json.dumps(str(JS_SDK))), encoding="utf-8")
     config(project, "node agent.js")
     assert main(["test"]) == 0
     out = capsys.readouterr().out
@@ -740,7 +741,7 @@ with assay.run("lookup", test="lookup") as run:  # a case that isn't offered ref
 
 
 def test_a_reworded_tool_description_shows_next_to_the_regression_it_caused(project, capsys, monkeypatch):
-    (project / "agent.py").write_text(MCP_AGENT)
+    (project / "agent.py").write_text(MCP_AGENT, encoding="utf-8")
     config(project, f"{sys.executable} agent.py",
            contracts='[[contracts]]\nkind = "requires_approval"\nstep = "refund"\n')
     assert main(["test"]) == 0
@@ -787,8 +788,8 @@ def test_tool_definition_changes_say_what_the_model_now_sees():
 @pytest.mark.skipif(shutil.which("ruby") is None, reason="needs Ruby")
 def test_the_ruby_recorder_in_the_docs_works_under_assay_test(project, capsys, monkeypatch):
     import re
-    doc = (Path(__file__).resolve().parents[1] / "docs" / "any-language.md").read_text()
-    (project / "refund_test.rb").write_text(re.search(r"```ruby\n(.*?)```", doc, re.S).group(1))
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "any-language.md").read_text(encoding="utf-8")
+    (project / "refund_test.rb").write_text(re.search(r"```ruby\n(.*?)```", doc, re.S).group(1), encoding="utf-8")
     config(project, "ruby refund_test.rb")
     assert main(["test"]) == 0
     out = capsys.readouterr().out
@@ -808,9 +809,9 @@ def test_init_picks_the_language_and_runner_a_js_project_uses(tmp_path):
     def project(pkg, *also):
         root = tmp_path / str(len(list(tmp_path.iterdir())))
         root.mkdir()
-        (root / "package.json").write_text(json.dumps(pkg))
+        (root / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
         for f in also:
-            (root / f).write_text("")
+            (root / f).write_text("", encoding="utf-8")
         return root
     dev = lambda *names: {"devDependencies": {n: "*" for n in names}}
     vitest = local.js_project(project(dev("vitest", "typescript")))
@@ -835,13 +836,13 @@ def test_init_picks_the_language_and_runner_a_js_project_uses(tmp_path):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
 def test_init_in_a_node_project_writes_a_setup_assay_test_runs(project, capsys):
-    (project / "package.json").write_text('{"name": "shop"}')
-    (project / "node_modules").mkdir()
-    (project / "node_modules" / "assay-evals").symlink_to(JS_SDK, target_is_directory=True)
+    (project / "package.json").write_text('{"name": "shop"}', encoding="utf-8")
+    (project / "node_modules").mkdir()  # the SDK from this commit; copied: Windows needs rights to symlink
+    shutil.copytree(JS_SDK, project / "node_modules" / "assay-evals", ignore=shutil.ignore_patterns("test", "node_modules"))
     assert main(["init"]) == 0
     out = capsys.readouterr().out
     assert "Created test/ai/support.assay.test.js, assay.toml." in out and "`assay test`" in out
-    assert 'command = "node --test test/ai/*.test.js"' in (project / "assay.toml").read_text()
+    assert 'command = "node --test test/ai/*.test.js"' in (project / "assay.toml").read_text(encoding="utf-8")
     assert not (project / local.EXAMPLE).exists()  # no Python example in a Node project
     assert main(["test"]) == 0
     out = capsys.readouterr().out

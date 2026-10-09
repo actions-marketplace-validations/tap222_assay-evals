@@ -47,13 +47,13 @@ class PasswordCommand:
 
     def token(self) -> str:
         with self._lock:
-            if self._token is None or time.monotonic() - self._at > self.ttl:
+            if self._token is None or time.monotonic() - self._at >= self.ttl:  # >=: a coarse clock can read 0
                 self._token, self._at = self._run(), time.monotonic()
             return self._token
 
     def _run(self) -> str:
         try:
-            r = subprocess.run(self.command, shell=True, capture_output=True, text=True, timeout=self.timeout)
+            r = subprocess.run(self.command, shell=True, capture_output=True, text=True, timeout=self.timeout, encoding="utf-8", errors="replace")
         except subprocess.TimeoutExpired:
             raise CredentialError(f"The password command took longer than {self.timeout:g}s: {self.command}")
         if r.returncode != 0:

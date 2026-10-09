@@ -72,24 +72,24 @@ def test_answers_to_the_same_input_are_a_group():
 
 @pytest.fixture
 def tagged(project):
-    (project / "evals" / "judges.py").write_text(JUDGES)
-    (project / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in golden()) + "\n")
+    (project / "evals" / "judges.py").write_text(JUDGES, encoding="utf-8")
+    (project / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in golden()) + "\n", encoding="utf-8")
     return project
 
 
 def test_calibration_says_so_and_so_does_every_judged_number(tagged, monkeypatch, capsys):
     project = tagged
-    toml = (project / "assay.toml").read_text()
+    toml = (project / "assay.toml").read_text(encoding="utf-8")
     (project / "assay.toml").write_text(toml.replace("judges.py:grade", "judges.py:topic")
                                         .replace('command = "true"', f'command = "{sys.executable} record.py"')
-                                        + 'field = "helpful"\n')
+                                        + 'field = "helpful"\n', encoding="utf-8")
     (project / "record.py").write_text("""
 import assay_sdk as assay
 assay.init()
 with assay.run("support", test="q1") as r:
     r.answer("ok")
     r.check("helpful", "pass", score=4)
-""")
+""", encoding="utf-8")
     monkeypatch.setenv("PYTHONPATH", SDK)
     assert main(["calibrate", "--repeat", "1"]) == 0  # not a regression: a trust problem
     out = capsys.readouterr().out
@@ -99,7 +99,7 @@ with assay.run("support", test="q1") as r:
     out = capsys.readouterr().out
     assert "helpful  calibrated today: Spearman" in out and "but it tracks the topic, not the answer" in out
 
-    (project / "assay.toml").write_text((project / "assay.toml").read_text().replace("judges.py:topic", "judges.py:good"))
+    (project / "assay.toml").write_text((project / "assay.toml").read_text(encoding="utf-8").replace("judges.py:topic", "judges.py:good"), encoding="utf-8")
     assert main(["calibrate", "--repeat", "1"]) == 0
     assert "tracks the topic" not in capsys.readouterr().out
     main(["test"])
@@ -107,14 +107,14 @@ with assay.run("support", test="q1") as r:
 
 
 def test_group_by_is_checked(tagged, capsys):
-    (tagged / "assay.toml").write_text((tagged / "assay.toml").read_text() + 'group_by = "topic"\n')
+    (tagged / "assay.toml").write_text((tagged / "assay.toml").read_text(encoding="utf-8") + 'group_by = "topic"\n', encoding="utf-8")
     assert main(["calibrate"]) == 2 and "group_by: one of tags, input, none" in capsys.readouterr().err
 
 
 def test_split_by_tags_keeps_each_tag_in_one_split(tagged, capsys):
     assert main(["golden", "split", "--by", "tags", "--train", "0.25", "--dev", "0.25"]) == 0
     assert "Whole tags go to one split" in capsys.readouterr().out
-    rows = [json.loads(x) for x in (tagged / "golden.jsonl").read_text().splitlines() if x.strip()]
+    rows = [json.loads(x) for x in (tagged / "golden.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
     by_tag = {}
     for x in rows:
         by_tag.setdefault(x["tags"][0], set()).add(x["split"])
@@ -122,7 +122,7 @@ def test_split_by_tags_keeps_each_tag_in_one_split(tagged, capsys):
     # A new item of a tag that's already split joins its tag's split.
     rows.append({"id": "refund-new", "input": "refund question x", "output": "quality=3", "score": 3, "by": "sam",
                  "tags": ["refund"]})
-    (tagged / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in rows) + "\n")
+    (tagged / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in rows) + "\n", encoding="utf-8")
     assert main(["golden", "split", "--by", "tags"]) == 0
-    rows = {x["id"]: x for x in (json.loads(y) for y in (tagged / "golden.jsonl").read_text().splitlines() if y.strip())}
+    rows = {x["id"]: x for x in (json.loads(y) for y in (tagged / "golden.jsonl").read_text(encoding="utf-8").splitlines() if y.strip())}
     assert rows["refund-new"]["split"] == rows["refund-0"]["split"]

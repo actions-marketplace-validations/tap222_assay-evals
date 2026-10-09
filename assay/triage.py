@@ -360,13 +360,13 @@ def cli(root, args) -> int:
         if t.get("draft"):
             path = Path(root) / args.folder / f"test_triage_{_slug(c['name'])}.py"
             if path.exists():
-                print(f"  {path.relative_to(root)} is there already: left alone.")
+                print(f"  {path.relative_to(root).as_posix()} is there already: left alone.")
             elif args.apply:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(t["draft"])
+                path.write_text(t["draft"], encoding="utf-8")
                 written.append(path)
             else:
-                print(f"  would write {path.relative_to(root)} (--apply writes it)")
+                print(f"  would write {path.relative_to(root).as_posix()} (--apply writes it)")
     for p in written:
-        print(f"Wrote {p.relative_to(root)}: call your app in it, then remove the skip mark.")
+        print(f"Wrote {p.relative_to(root).as_posix()}: call your app in it, then remove the skip mark.")
     return 0

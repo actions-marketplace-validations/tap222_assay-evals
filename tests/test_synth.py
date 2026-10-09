@@ -81,10 +81,10 @@ def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.delenv("ASSAY_URL", raising=False)
-    (tmp_path / "assay.toml").write_text(TOML)
-    (tmp_path / "bot.py").write_text(BOT)
+    (tmp_path / "assay.toml").write_text(TOML, encoding="utf-8")
+    (tmp_path / "bot.py").write_text(BOT, encoding="utf-8")
     (tmp_path / "prompt.txt").write_text("You help with billing and technical questions, and general ones. "
-                                         "Handle a new issue or a follow-up on an earlier one.")
+                                         "Handle a new issue or a follow-up on an earlier one.", encoding="utf-8")
     asker = Asker()
     monkeypatch.setattr(synth, "_asker", lambda j: asker)
     sent = []
@@ -137,7 +137,7 @@ def test_queries_one_prompt_each_near_duplicates_dropped_then_run_through_the_ap
 
 def test_an_app_that_opens_its_own_runs_is_tagged_not_wrapped(project, capsys):
     (project.root / "bot.py").write_text('import assay_sdk as assay\n\ndef answer(q):\n'
-                                    '    with assay.run("support", input=q) as r:\n        r.answer("ok")\n    return "ok"\n')
+                                    '    with assay.run("support", input=q) as r:\n        r.answer("ok")\n    return "ok"\n', encoding="utf-8")
     main(["synth", "tuple", "Issue=billing", "mood=frustrated", "Prior=follow-up"])
     main(["synth", "queries"])
     assert main(["synth", "run"]) == 0

@@ -369,6 +369,8 @@ pytest
 cd sdk/js && npm test    # the TypeScript and JavaScript SDK
 ```
 
+CI runs the suite on Linux (Python 3.10 and 3.12), macOS and Windows, and the JavaScript SDK's tests.
+
 Where things live in this repository: [docs/layout.md](docs/layout.md).
 
 ## Contributing

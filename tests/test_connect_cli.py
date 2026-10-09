@@ -1,4 +1,5 @@
 """`assay connect` (assay/attach.py): attach Assay to a pipeline with the least work."""
+import os
 import json
 import sqlite3
 import subprocess
@@ -74,12 +75,12 @@ STUBS = {  # just enough of each framework for the app to run in a test
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
     for name, text in (("graph.py", GRAPH), ("main.py", MAIN), ("tools.py", TOOLS)):
-        (tmp_path / "app" / name).write_text(text)
+        (tmp_path / "app" / name).write_text(text, encoding="utf-8")
     for name, text in STUBS.items():
         (tmp_path / "stubs" / name).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / "stubs" / name).write_text(text)
+        (tmp_path / "stubs" / name).write_text(text, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     for k in ("ASSAY_URL", "ASSAY_PATH", "DATABASE_URL", "ASSAY_SOURCE_URL", "OTEL_EXPORTER_OTLP_ENDPOINT"):
         monkeypatch.delenv(k, raising=False)
@@ -108,27 +109,28 @@ def test_code_is_a_diff_until_applied_and_then_the_pipeline_shows_up(project, ca
     out = capsys.readouterr().out
     for line in ('+@assay.step("classify")', '+@assay.pipeline("run")', "+@assay.tool", "+assay.instrument()"):
         assert line in out
-    assert "Nothing is changed yet" in out and "assay" not in (project / "app" / "graph.py").read_text()
-    patch = (project / ".assay" / "connect.patch").read_text()
+    assert "Nothing is changed yet" in out and "assay" not in (project / "app" / "graph.py").read_text(encoding="utf-8")
+    patch = (project / ".assay" / "connect.patch").read_text(encoding="utf-8")
     assert patch.startswith("--- a/app/graph.py")
     assert main(["connect", "code", "--apply"]) == 0
-    graph = (project / "app" / "graph.py").read_text()
+    graph = (project / "app" / "graph.py").read_text(encoding="utf-8")
     assert '@assay.step("classify")\ndef classify(state):' in graph
-    assert "@tool\n@assay.tool\ndef lookup_vendor" in (project / "app" / "tools.py").read_text()
-    main_py = (project / "app" / "main.py").read_text()
+    assert "@tool\n@assay.tool\ndef lookup_vendor" in (project / "app" / "tools.py").read_text(encoding="utf-8")
+    main_py = (project / "app" / "main.py").read_text(encoding="utf-8")
     assert main_py.index("import assay_sdk as assay") < main_py.index("assay.init()") < main_py.index('@assay.pipeline("run")')
     assert main(["connect", "code"]) == 0 and "Nothing to add: Assay is already attached." in capsys.readouterr().out
 
-    env = {"PYTHONPATH": ":".join([str(project / "stubs"), str(project), SDK]), "PATH": "/usr/bin:/bin"}
+    env = {"PYTHONPATH": os.pathsep.join([str(project / "stubs"), str(project), SDK]), "PATH": os.defpath,
+           **{k: os.environ[k] for k in ("SYSTEMROOT",) if k in os.environ}}  # Windows' Python needs SYSTEMROOT
     for i in range(2):  # the app runs as before, and records
         r = subprocess.run([sys.executable, "-m", "app.main", f"Invoice {i}"], cwd=project, env=env,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
         assert r.returncode == 0 and "27.61" in r.stdout, r.stderr
     capsys.readouterr()
     assert main(["connect", "verify"]) == 0
     out = capsys.readouterr().out
     assert "Received → classify → extract → Done" in out and "2 runs · 2 steps" in out
-    events = [json.loads(x) for x in (project / ".assay" / "events.jsonl").read_text().splitlines()]
+    events = [json.loads(x) for x in (project / ".assay" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     llm = [e for e in events if e.get("kind") == "llm"]
     assert len(llm) == 4 and {e["name"] for e in llm} == {"classify", "extract"}  # each call, in its step
 
@@ -161,7 +163,7 @@ def test_db_reads_the_schema_writes_the_mapping_and_it_works(project, capsys):
     assert "✓ stage_runs  ← stage_executions" in out and "– indexed     not found" in out
     assert "stage = step_name" in out and "segment = customer_id" in out  # guesses are shown to check
     assert "Every field it maps works against the database." in out
-    mapping = json.loads((project / "mappings" / "pipeline.json").read_text())
+    mapping = json.loads((project / "mappings" / "pipeline.json").read_text(encoding="utf-8"))
     assert mapping["stage_runs"]["columns"]["stage"] == "s.step_name"
     assert "LEFT JOIN documents d" in mapping["calls"]["from"]
     assert main(["connect", "db", f"sqlite:///{db}"]) == 2  # never overwrites without --force
