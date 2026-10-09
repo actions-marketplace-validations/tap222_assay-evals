@@ -43,6 +43,52 @@ Install the project's packages as well as Assay, and run `assay test`, which run
 
 Baselines, the PR comment and the checks a PR can't loosen work as they do for pytest.
 
+## GitLab, and any CI that runs a script
+
+The Action is a thin wrapper: install, run the tests, keep the baselines, post the summary.
+Anywhere else, do the same four things. The baselines are `.assay/assay.db` and
+`.assay/state.json`: restore them from your default branch before the run, and save them after a
+run on that branch only, so a merge request is compared with `main` and never moves its baseline.
+
+GitLab (`.gitlab-ci.yml`), with each case shown in the merge request's test report:
+
+```yaml
+.ai-tests: &ai-tests
+  image: python:3.12
+  script:
+    - pip install assay-server pytest
+    - assay test --junit assay-junit.xml     # runs [test] command; exit 1 on a regression
+  artifacts:
+    when: always
+    reports: { junit: assay-junit.xml }
+    paths: [.assay/summary.md]
+
+ai-tests:
+  <<: *ai-tests
+  rules: [{ if: $CI_PIPELINE_SOURCE == "merge_request_event" }]
+  cache: { key: assay-$CI_DEFAULT_BRANCH, paths: [.assay/assay.db, .assay/state.json], policy: pull }
+
+ai-tests-baseline:
+  <<: *ai-tests
+  rules: [{ if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH }]
+  cache: { key: assay-$CI_DEFAULT_BRANCH, paths: [.assay/assay.db, .assay/state.json], policy: pull-push }
+```
+
+For a JavaScript or TypeScript project, use an image with Node and Python (or install one), and
+add `npm ci` before `assay test`.
+
+Any other CI (Jenkins, CircleCI, Buildkite, a cron job) runs the same script:
+
+```bash
+pip install assay-server              # and npm ci, for a JavaScript project
+# restore .assay/assay.db and .assay/state.json from the default branch's last run, if there is one
+assay test --junit assay-junit.xml    # 0 nothing got worse, 1 a regression, 6 inconclusive
+code=$?
+assay diff --format markdown > assay-diff.md   # post it where reviewers look
+# on the default branch only: save .assay/assay.db and .assay/state.json for the next run
+exit $code
+```
+
 ## AI regression detected
 **48 cases** · 45 passed · 2 regressed · 1 flaky · 3 improved
 

@@ -293,6 +293,8 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
 - **Python SDK.** See [sdk/python](sdk/python/README.md).
 - **JavaScript and TypeScript.** `assayCase()` in a Jest or Vitest test records the run, and
   `assay test` checks and compares it like a pytest one. See [sdk/js](sdk/js/README.md).
+- **Any other language.** `assay test` runs any command and reads the events it writes: a recorder
+  is a few dozen lines. See [Any language](docs/any-language.md).
 
 ## Demo
 
@@ -347,9 +349,10 @@ Run `assay --help` for every command and option.
 | [Getting started](docs/getting-started.md) | Add Assay to your app in four steps: install, two lines in your app, one test, run |
 | [Testing](docs/testing.md) | `pytest --assay`, the `assay_case` fixture, assertions, baselines, flakiness |
 | [TypeScript and JavaScript](sdk/js/README.md) | `assayCase()` in Jest or Vitest, `run.expect()`, `assay test` |
+| [Any language](docs/any-language.md) | Go, Java, Ruby, Rust: a small recorder and `assay test` |
 | [Behavior diff](docs/diff.md) | What changed between two versions, with a severity |
 | [Repeated attempts](docs/repeats.md) | Chance, too few attempts, or a regression |
-| [CI](docs/ci.md) | The GitHub Action, PR comments, reruns, timeouts |
+| [CI](docs/ci.md) | The GitHub Action, GitLab and any other CI, PR comments, reruns, timeouts |
 | [Security](docs/security.md) | What the checks catch, and what a PR can't do to the evaluation |
 | [Agents](docs/agents.md) | Trajectories, plan adherence, the LLM judge, conversations, MCP |
 | [Document extraction](docs/documents.md) | Every document metric and gate |

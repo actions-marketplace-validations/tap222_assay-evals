@@ -782,6 +782,26 @@ def test_tool_definition_changes_say_what_the_model_now_sees():
     assert tool_schemas([{"name": "f", "description": "no schema"}]) == {}  # as before: no schema, no entry
 
 
+# --- any language: the recorder in docs/any-language.md, run as it's written ------------------
+
+@pytest.mark.skipif(shutil.which("ruby") is None, reason="needs Ruby")
+def test_the_ruby_recorder_in_the_docs_works_under_assay_test(project, capsys, monkeypatch):
+    import re
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "any-language.md").read_text()
+    (project / "refund_test.rb").write_text(re.search(r"```ruby\n(.*?)```", doc, re.S).group(1))
+    config(project, "ruby refund_test.rb")
+    assert main(["test"]) == 0
+    out = capsys.readouterr().out
+    assert "✓ 1 passed" in out and "approval before refund" in out
+
+    monkeypatch.setenv("SKIP_APPROVAL", "1")
+    assert main(["test"]) == 1
+    capsys.readouterr()
+    assert main(["diff"]) == 1
+    out = capsys.readouterr().out
+    assert "Expected: get_order → approval(refund) → refund" in out and "Actual:   get_order → refund" in out
+
+
 # --- assay init in a JavaScript or TypeScript project -----------------------------------------
 
 def test_init_picks_the_language_and_runner_a_js_project_uses(tmp_path):
