@@ -481,6 +481,8 @@ function renderSettings(){
 }
 
 /* ---------- all projects ---------- */
+// Where a test run came from: its git remote and its folder, as the upload recorded them.
+const fromWhere=o=>o?[o.repo&&`<span class="mono">${esc(o.repo)}</span>`,o.folder&&`<span class="mono">${esc(o.folder)}</span>`].filter(Boolean).join(" · "):"";
 // Every repository that sends its test runs here, filed under its name: its latest run against the one before.
 async function renderProjects(){
   const box=$("#tab-projects");
@@ -494,7 +496,7 @@ pytest --assay tests</pre></div>`;return}
   list=[...list.filter(worse),...list.filter(x=>!worse(x))];  // what regressed first, then by latest run
   const row=x=>{const k=x.counts,L=x.latest,w=worse(x);
     const state=!k?`<span class="chip neutral">first run</span>`:w?`<span class="chip bad">${w} regressed</span>`:`<span class="chip good">nothing worse</span>`;
-    return `<tr class="click" data-project="${esc(x.source)}"><td><b class="mono">${esc(x.project)}</b></td><td>${state}</td>
+    return `<tr class="click" data-project="${esc(x.source)}"><td><b class="mono">${esc(x.project)}</b>${fromWhere(L.origin)?`<div class="ref">${fromWhere(L.origin)}</div>`:""}</td><td>${state}</td>
       <td class="num">${L.passed.toLocaleString()} / ${L.results.toLocaleString()}</td><td class="num">${k?k.changed:"—"}</td>
       <td class="num">${k?k.flaky:"—"}</td><td class="num">${x.runs}</td><td class="ref">${esc(ago(L.start))}</td></tr>`};
   box.innerHTML=`<div class="strip">
@@ -525,7 +527,7 @@ pytest --assay --assay-upload tests</pre>
     <p class="note"><a href="${GUIDE}" target="_blank" rel="noopener">Getting started</a> shows the two lines to add to your app and a first test.</p></div>`;return}
   const cur=runs[0],prev=runs[1];
   const label=r=>Object.entries(r.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" · ");
-  const head=`<div class="panel-head"><div><h2>Latest test run</h2><p class="sub"><b class="mono">${esc(cur.run_id)}</b> ${esc(ago(cur.start))}${prev?`, compared with <b class="mono">${esc(prev.run_id)}</b>`:""}</p>${cur.lineage&&Object.keys(cur.lineage).length?`<p class="sub">${label(cur)}</p>`:""}</div><a href="#diff" class="ref">Open behavior diff →</a></div>`;
+  const head=`<div class="panel-head"><div><h2>Latest test run</h2><p class="sub"><b class="mono">${esc(cur.run_id)}</b> ${esc(ago(cur.start))}${prev?`, compared with <b class="mono">${esc(prev.run_id)}</b>`:""}</p>${fromWhere(cur.origin)?`<p class="sub">From ${fromWhere(cur.origin)}</p>`:""}${cur.lineage&&Object.keys(cur.lineage).length?`<p class="sub">${label(cur)}</p>`:""}</div><a href="#diff" class="ref">Open behavior diff →</a></div>`;
   if(!prev){box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">${cur.passed.toLocaleString()} of ${cur.results.toLocaleString()} checks passed. The next run is compared with this one.</p></div>`;return}
   box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">Comparing…</p></div>`;
   let d;
