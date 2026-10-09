@@ -106,12 +106,15 @@ pip install assay-server   # the `assay` command
 ```
 
 ```ts
-import { assayCase } from "assay-evals";
+import Anthropic from "@anthropic-ai/sdk";
+import { assayCase, instrument } from "assay-evals";
+
+const client = instrument(new Anthropic());   // every model call in a case is recorded (OpenAI, Vercel AI SDK too)
 
 test("refunds a delivered order", () =>
   assayCase(async (run) => {
     run.expect().mustCall("get_order").mustNotCall("delete_order").maxSteps(6);
-    const reply = await myAgent("Refund O-17", run);
+    const reply = await myAgent(client, "Refund O-17", run);
     expect(reply).toContain("27.61");
   }));
 ```

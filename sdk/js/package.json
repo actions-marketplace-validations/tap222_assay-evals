@@ -4,7 +4,7 @@
   "description": "Assay for JavaScript and TypeScript: record what your AI does in a test, so assay test compares each test with its last passing run",
   "main": "index.js",
   "types": "index.d.ts",
-  "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
+  "files": ["index.js", "instrument.js", "llm.js", "index.d.ts", "README.md", "LICENSE"],
   "scripts": {
     "test": "node --test test/"
   },

@@ -20,6 +20,8 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { instrument, assayMiddleware, currentRun, storage } = require("./instrument");
+const { costOf } = require("./llm");
 
 const MAX_TEXT = 20000;
 const EXPECT = "assay.expect@1";
@@ -172,12 +174,12 @@ class Run {
            ...(tags ? { tags: clean(tags) } : {}) });
   }
 
-  _step(kind, fields) {
+  _step(kind, fields, started) {
     const step = { kind, seq: this._seq++, ...fields };
     this.steps.push(step);
     const out = {};
     for (const [k, v] of Object.entries(step)) if (v !== undefined) out[k] = clean(v);
-    emit({ type: "step", run_id: this.id, ...out });
+    emit({ type: "step", run_id: this.id, ...out, ...(started instanceof Date ? { ts: started.toISOString() } : {}) });
     return step;
   }
 
@@ -198,9 +200,15 @@ class Run {
     }
   }
 
-  /** A model call: { model, tokensIn, tokensOut, costUsd, prompt ("id@version"), text, finishReason, tools, error }.
-   * tools: names, or the tool definitions the model was given (Anthropic, OpenAI, or an MCP tools/list). */
-  llm({ model, tokensIn, tokensOut, costUsd, prompt: promptRef, text, finishReason, tools, error } = {}) {
+  /** A model call: { model, tokensIn, tokensOut, costUsd, prompt ("id@version"), text, finishReason, tools,
+   * toolCalls, tokensCached, tokensReasoning, started, error }. tools: names, or the tool definitions
+   * the model was given (Anthropic, OpenAI, or an MCP tools/list). Without costUsd, the cost comes from
+   * ASSAY_PRICES ([prices] in assay.toml) when the model has a price. instrument() fills all of it. */
+  llm({ model, tokensIn, tokensOut, costUsd, prompt: promptRef, text, finishReason, tools, toolCalls, tokensCached,
+        tokensReasoning, started, error } = {}) {
+    if (costUsd === undefined && model && tokensIn != null) {
+      costUsd = costOf({ model, usage: { input: tokensIn, output: tokensOut, cached: tokensCached } });
+    }
     const fresh = {};
     for (const [name, schema] of Object.entries(toolSchemas(tools))) {
       if (JSON.stringify(this._toolSchemas[name]) !== JSON.stringify(schema)) fresh[name] = schema;
@@ -208,7 +216,9 @@ class Run {
     Object.assign(this._toolSchemas, fresh); // sent once per run and tool, not with every call
     this._step("llm", { model, tokens_in: tokensIn, tokens_out: tokensOut, cost_usd: costUsd, prompt: promptRef,
                         text, finish_reason: finishReason, tools: toolNames(tools),
-                        tool_schemas: Object.keys(fresh).length ? fresh : undefined, status: error ? "error" : "ok", error });
+                        tool_schemas: Object.keys(fresh).length ? fresh : undefined,
+                        tool_calls: toolCalls, tokens_cached: tokensCached, tokens_reasoning: tokensReasoning,
+                        status: error ? "error" : "ok", error }, started);
   }
 
   answer(text) {
@@ -269,7 +279,7 @@ async function assayCase(name, fn, { tags } = {}) {
   const run = new Run(name || current.name, { caseId, tags });
   let result, thrown;
   try {
-    result = await fn(run);
+    result = await storage.run(run, () => fn(run)); // instrument()ed clients record on this run
   } catch (e) {
     thrown = e;
   }
@@ -282,4 +292,5 @@ async function assayCase(name, fn, { tags } = {}) {
   return result;
 }
 
-module.exports = { assayCase, startRun, prompt, caseIdOf, toolSchemas, Run, Expectations };
+module.exports = { assayCase, startRun, prompt, caseIdOf, toolSchemas, instrument, assayMiddleware, currentRun,
+                   Run, Expectations };
