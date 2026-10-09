@@ -1,0 +1,24 @@
+{
+  "name": "assay-evals",
+  "version": "0.1.0",
+  "description": "Assay for JavaScript and TypeScript: record what your AI does in a test, so assay test compares each test with its last passing run",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["llm", "evals", "jest", "vitest", "regression-testing", "agents", "ai"],
+  "license": "MIT",
+  "author": "tap222",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tap222/assay-evals.git",
+    "directory": "sdk/js"
+  },
+  "homepage": "https://github.com/tap222/assay-evals/tree/main/sdk/js#readme",
+  "bugs": "https://github.com/tap222/assay-evals/issues"
+}
