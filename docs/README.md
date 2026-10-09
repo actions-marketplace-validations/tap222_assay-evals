@@ -6,9 +6,11 @@
 |---|---|
 | [Getting started](getting-started.md) | Start here: add Assay to the app you already have in four steps |
 | [Testing your AI app](testing.md) | Your AI tests are pytest tests: `pytest --assay`, the assay_case fixture, assertions, baselines, flakiness |
+| [TypeScript and JavaScript](../sdk/js/README.md) | `assayCase()` in Jest, Vitest or `node:test`, `instrument(client)`, `assay init` |
+| [Any language](any-language.md) | Go, Java, Ruby, Rust: the events `assay test` reads, and a recorder in a few dozen lines |
 | [Behavior diff](diff.md) | `assay diff`: what changed between two versions, with the flow before and after and a severity |
 | [Repeated attempts](repeats.md) | Chance, too few attempts to tell, or a regression: two gates, corrected for the number of checks, and what they can't tell you |
-| [CI and pull requests](ci.md) | The GitHub Action, the PR comment, rerunning what failed, timeouts |
+| [CI and pull requests](ci.md) | The GitHub Action, GitLab and any other CI, the PR comment, rerunning what failed, timeouts |
 | [Security](security.md) | What the checks catch in the agent, and what a pull request can and can't do to the evaluation |
 | [Agents](agents.md) | Evaluating the trajectory: lifecycle, plan adherence, the LLM judge, conversations, MCP, behavior |
 | [Document extraction](documents.md) | Each field against its correct value (wrong, missing, invented; typed from the values when there's no schema), per-field gates (line items by default, zero errors for a tax number), line items paired for the most cells right (complete: none missing, made up or duplicated), groups scored as one unit, robustness slices (scanned, stamps, language, unseen templates), the same value on every attempt, documents with zero errors, critical fields for straight-through processing, cell F1 over headers and line items, made-up values sorted into fabricated, inferred and format errors, rules like totals adding up, document types, splitting files (panoptic quality, pages to move by hand), confidence thresholds with risk-coverage curves, OCR error rates (digits and letters apart, what was read as what against the baseline), OCR engines ranked without labels and reading order, tables (with TEDS), locations, values not in the text, the escape rate, and superseded values |
