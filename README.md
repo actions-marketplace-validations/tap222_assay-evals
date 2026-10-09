@@ -263,6 +263,10 @@ output. A live copy runs at [docai-eval.vercel.app](https://docai-eval.vercel.ap
 The dashboard has an Agents view and a Documents view. Each starts with its core tabs, and
 **Settings** turns on the rest, one by one, for everyone on the team. See [Measures](docs/measures.md#what-you-get).
 
+Each page puts the summary first: a few numbers and a trend of checks passed over the last runs,
+then what failed, grouped by case. The rest (failure kinds, transitions, efficiency, every run 50
+at a time) is under **Details**, and loads when you open it.
+
 ## CLI reference
 
 | Command | What it does |
