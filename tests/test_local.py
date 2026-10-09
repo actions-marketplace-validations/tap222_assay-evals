@@ -670,7 +670,7 @@ def test_init_global_installs_the_skill_for_every_project(project, monkeypatch, 
 
 JS_SDK = Path(__file__).resolve().parents[1] / "sdk" / "js"
 
-AGENT = """
+JS_AGENT = """
 const {{ assayCase }} = require({sdk});
 const skipApproval = process.env.SKIP_APPROVAL === "1";
 
@@ -696,7 +696,7 @@ async function support(run, orderId) {{
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
 def test_a_node_project_is_tested_and_a_regression_caught(project, capsys, monkeypatch):
-    (project / "agent.js").write_text(AGENT.format(sdk=json.dumps(str(JS_SDK))))
+    (project / "agent.js").write_text(JS_AGENT.format(sdk=json.dumps(str(JS_SDK))))
     config(project, "node agent.js")
     assert main(["test"]) == 0
     out = capsys.readouterr().out
