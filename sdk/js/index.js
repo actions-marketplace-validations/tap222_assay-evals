@@ -108,10 +108,19 @@ class Expectations {
       return a.length && Math.min(...a) < Math.min(...b) ? null : `${then}() ran before ${first}().`;
     });
   }
+  mustGetApprovalBefore(action) {
+    return this._add(`expect.must_get_approval_before(${action})`, () => {
+      const first = this._calls(action).map((s) => s.seq);
+      if (!first.length) return null;
+      const ok = this._run.steps.some((s) => s.kind === "approval" && s.name === action && s.decision === "approved"
+                                            && s.seq < Math.min(...first));
+      return ok ? null : `${action} ran at step ${Math.min(...first)} without an approval.`;
+    });
+  }
   maxSteps(n) {
-    return this._add(`expect.max_steps(${n})`, () => {
-      const steps = this._run.steps.filter((s) => s.kind !== "answer").length;
-      return steps <= n ? null : `${steps} steps, more than ${n}.`;
+    return this._add(`expect.max_steps(${n})`, () => { // every step, the answer too, as in Python
+      const steps = this._run.steps.length;
+      return steps <= n ? null : `Took ${steps} steps; at most ${n} expected.`;
     });
   }
   mustAnswer(containing) {
@@ -221,6 +230,12 @@ class Run {
                         status: error ? "error" : "ok", error }, started);
   }
 
+  /** A decision to allow an action: approval("refund", "approved", { by: "manager" }). decision:
+   * approved, rejected or pending. Contracts (requires_approval) and mustGetApprovalBefore() check it. */
+  approval(action, decision = "approved", { by, reason } = {}) {
+    this._step("approval", { name: action, decision, by, text: reason });
+  }
+
   answer(text) {
     this.answerText = text;
     this._step("answer", { text });
@@ -257,10 +272,10 @@ function startRun(task, options = {}) {
   return new Run(task, options);
 }
 
-/** The current test's id, "<file>::<name>", from Jest's or Vitest's expect.getState(). */
-function currentTest() {
-  const state = typeof globalThis.expect === "function" && typeof globalThis.expect.getState === "function"
-    ? globalThis.expect.getState() : null;
+/** The current test's id, "<file>::<name>", from Jest's or Vitest's expect.getState() (the global
+ * one, or a test context's own). */
+function currentTest(expectFn = globalThis.expect) {
+  const state = expectFn && typeof expectFn.getState === "function" ? expectFn.getState() : null;
   if (!state || !state.currentTestName) return null;
   const file = state.testPath ? path.relative(process.cwd(), state.testPath).split(path.sep).join("/") : "";
   return { id: file ? `${file}::${state.currentTestName}` : state.currentTestName, name: state.currentTestName };
@@ -272,11 +287,23 @@ function currentTest() {
  * fn throws or an expectation fails, so the test fails as it should.
  */
 async function assayCase(name, fn, { tags } = {}) {
-  if (typeof name === "function") [fn, name] = [name, undefined];
-  const current = currentTest();
+  if (typeof name === "function" && fn === undefined) [fn, name] = [name, undefined]; // assayCase(fn)
+  let task, contextExpect;
+  const context = name && (typeof name === "object" || typeof name === "function"); // Vitest's context is a function
+  if (context && name.expect && typeof name.expect.getState === "function") {
+    contextExpect = name.expect; // Vitest's context, without globals: test("…", (ctx) => assayCase(ctx, fn))
+    name = undefined;
+  } else if (context && typeof name.name === "string") { // node:test's context: test("…", (t) => assayCase(t, fn))
+    const file = process.argv[1] ? path.relative(process.cwd(), process.argv[1]).split(path.sep).join("/") : "";
+    task = name.name;
+    const title = name.fullName || name.name;
+    name = file ? `${file}::${title}` : title;
+  }
+  const current = name ? null : currentTest(contextExpect);
   const caseId = current ? caseIdOf(current.id) : name && caseIdOf(name);
-  if (!caseId) throw new Error("assayCase needs a name outside Jest or Vitest: assayCase(\"refund\", fn)");
-  const run = new Run(name || current.name, { caseId, tags });
+  if (!caseId) throw new Error("assayCase needs a name outside Jest or Vitest: assayCase(\"refund\", fn), or with " +
+                               "node:test the test's context: test(\"refund\", (t) => assayCase(t, fn))");
+  const run = new Run(task || name || current.name, { caseId, tags });
   let result, thrown;
   try {
     result = await storage.run(run, () => fn(run)); // instrument()ed clients record on this run

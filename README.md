@@ -70,7 +70,8 @@ git clone https://github.com/tap222/assay-evals && cd assay-evals/examples/promp
 ./demo.sh
 ```
 
-See [examples/prompt-regression](examples/prompt-regression) for what it shows.
+See [examples/prompt-regression](examples/prompt-regression) for what it shows. The same demo in
+JavaScript: [examples/prompt-regression-js](examples/prompt-regression-js) (`./demo.sh` there).
 
 ## Quickstart
 
@@ -97,12 +98,14 @@ def test_refund(assay_case):
     assert "27.61" in reply
 ```
 
-In TypeScript or JavaScript, a Jest or Vitest test wraps its body in `assayCase()`
-([sdk/js](sdk/js/README.md)), and `assay test` runs the command in `assay.toml`:
+In TypeScript or JavaScript, a Jest, Vitest or `node:test` test wraps its body in `assayCase()`
+([sdk/js](sdk/js/README.md)), and `assay test` runs the command in `assay.toml`. In a project with a
+`package.json`, `assay init` writes both for the test runner it finds:
 
 ```bash
 npm install --save-dev assay-evals
 pip install assay-server   # the `assay` command
+assay init                 # assay.toml and test/ai/support.assay.test.ts (or .js), for Vitest, Jest or node:test
 ```
 
 ```ts

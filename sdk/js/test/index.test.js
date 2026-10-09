@@ -108,3 +108,31 @@ test("tool definitions are recorded once per run, each with its description", as
   assert.deepEqual(llm[0].tool_schemas.lookup, { type: "object", "x-assay-description": "Look up." });
   assert.equal(llm[1].tool_schemas, undefined); // unchanged: not sent again
 });
+
+test("with node:test, the test's context names the case after its file and title", async (t) => {
+  await assay.assayCase(t, async (run) => run.answer("ok"));
+  const start = events().find((e) => e.type === "run.start");
+  assert.ok(start.test.case.endsWith("::with node:test, the test's context names the case after its file and title"));
+  assert.equal(start.task, start.test.case.split("::").pop());
+});
+
+test("approvals are recorded as decisions, and mustGetApprovalBefore checks them", async () => {
+  await assay.assayCase("approved", async (run) => {
+    run.expect().mustGetApprovalBefore("refund");
+    run.approval("refund", "approved", { by: "manager" });
+    run.tool("refund", { id: 1 }, { ok: true });
+  });
+  const step = events().find((e) => e.kind === "approval");
+  assert.deepEqual({ name: step.name, decision: step.decision, by: step.by }, { name: "refund", decision: "approved", by: "manager" });
+  await assert.rejects(assay.assayCase("skipped", async (run) => {
+    run.expect().mustGetApprovalBefore("refund");
+    run.tool("refund", { id: 1 }, { ok: true });
+  }), /refund ran at step 0 without an approval/);
+});
+
+test("a Vitest context's own expect names the case, without globals", async () => {
+  const ctx = Object.assign(() => {}, { task: { name: "refunds" } }); // Vitest's context is a function
+  ctx.expect = { getState: () => ({ currentTestName: "suite > refunds", testPath: path.join(process.cwd(), "test/ai/a.test.ts") }) };
+  await assay.assayCase(ctx, async (run) => run.answer("ok"));
+  assert.equal(events().find((e) => e.type === "run.start").test.case, "test/ai/a.test.ts::suite > refunds");
+});

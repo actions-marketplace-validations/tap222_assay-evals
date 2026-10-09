@@ -780,3 +780,49 @@ def test_tool_definition_changes_say_what_the_model_now_sees():
               {"name": "f", "description": "d", "inputSchema": {"type": "object"}}):
         assert tool_schemas([t]) == {"f": {"type": "object", DESCRIPTION: "d"}}
     assert tool_schemas([{"name": "f", "description": "no schema"}]) == {}  # as before: no schema, no entry
+
+
+# --- assay init in a JavaScript or TypeScript project -----------------------------------------
+
+def test_init_picks_the_language_and_runner_a_js_project_uses(tmp_path):
+    def project(pkg, *also):
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        root.mkdir()
+        (root / "package.json").write_text(json.dumps(pkg))
+        for f in also:
+            (root / f).write_text("")
+        return root
+    dev = lambda *names: {"devDependencies": {n: "*" for n in names}}
+    vitest = local.js_project(project(dev("vitest", "typescript")))
+    assert (vitest["lang"], vitest["runner"], vitest["command"], vitest["example"]) == \
+        ("ts", "vitest", "npx vitest run test/ai", "test/ai/support.assay.test.ts")
+    jest = local.js_project(project({**dev("jest", "ts-jest", "typescript"), "jest": {"testRegex": ".*\\.spec\\.ts$"}}))
+    assert (jest["lang"], jest["runner"], jest["example"]) == ("ts", "jest", "test/ai/support.assay.spec.ts")
+    plain = local.js_project(project({"devDependencies": {"jest": "*", "assay-evals": "*"}}))
+    assert (plain["lang"], plain["runner"], plain["example"], plain["installed"]) == \
+        ("js", "jest", "test/ai/support.assay.test.js", True)  # TypeScript, but no ts-jest: JavaScript
+    bare = local.js_project(project({}))
+    assert (bare["runner"], bare["command"]) == ("node", "node --test test/ai/")
+    assert local.js_project(project({}, "pyproject.toml")) is None  # Python packaging: a Python project
+    assert local.js_project(project({}, "pyproject.toml"), "ts")["lang"] == "ts"  # unless asked
+    assert local.js_project(tmp_path / "nothing-here") is None
+    # The example is typed for TypeScript, and node:test and Vitest name the case by its context.
+    assert "run: Run, orderId: string" in local.js_example("jest", True)
+    assert "(t) =>\n  assayCase(t, " in local.js_example("node", False)
+    assert "(t) =>\n  assayCase(t, " in local.js_example("vitest", True)
+    assert "assayCase(async (run)" in local.js_example("jest", False)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
+def test_init_in_a_node_project_writes_a_setup_assay_test_runs(project, capsys):
+    (project / "package.json").write_text('{"name": "shop"}')
+    (project / "node_modules").mkdir()
+    (project / "node_modules" / "assay-evals").symlink_to(JS_SDK, target_is_directory=True)
+    assert main(["init"]) == 0
+    out = capsys.readouterr().out
+    assert "Created test/ai/support.assay.test.js, assay.toml." in out and "`assay test`" in out
+    assert 'command = "node --test test/ai/"' in (project / "assay.toml").read_text()
+    assert not (project / local.EXAMPLE).exists()  # no Python example in a Node project
+    assert main(["test"]) == 0
+    out = capsys.readouterr().out
+    assert "✓ 2 passed" in out and "expect.must_get_approval_before(refund)" in out
