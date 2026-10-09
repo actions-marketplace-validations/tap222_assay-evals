@@ -33,12 +33,12 @@ def project(tmp_path, monkeypatch):
 
 
 def test_a_judge_that_rewards_citations_is_caught_by_the_probes(project, capsys):
-    (project / "judges.py").write_text(JUDGE)
+    (project / "judges.py").write_text(JUDGE, encoding="utf-8")
     (project / "assay.toml").write_text('[test]\ncommand = "true"\n[calibrate]\njudge = "judges.py:grade"\nrepeat = 1\n'
-                                        'threshold = 3\n')
+                                        'threshold = 3\n', encoding="utf-8")
     items = [{"id": f"i{i}", "input": "q", "output": f"answer quality={i % 5 + 1}" + (" as shown in [1]" if i % 2 else ""),
               "score": i % 5 + 1, "by": "sam"} for i in range(30)]
-    (project / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in items) + "\n")
+    (project / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in items) + "\n", encoding="utf-8")
     assert main(["calibrate"]) == 0
     out = capsys.readouterr().out
     assert "Bias probe   answers with citations or links score" in out and "more than people scored them" in out, out
@@ -63,8 +63,8 @@ for i in range(4):
 
 
 def test_same_family_judging_and_a_score_that_rose_with_the_length(project, monkeypatch, capsys):
-    (project / "agent.py").write_text(FAMILY)
-    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n')
+    (project / "agent.py").write_text(FAMILY, encoding="utf-8")
+    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n', encoding="utf-8")
     assert main(["test"]) == 0
     out = capsys.readouterr().out
     assert "the judge and the answers are both anthropic models, and judges favor their own family" in out
@@ -76,8 +76,8 @@ def test_same_family_judging_and_a_score_that_rose_with_the_length(project, monk
 
 
 def test_suggest_where_the_judges_disagree(project, monkeypatch, capsys):
-    (project / "agent.py").write_text(FAMILY)
-    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n')
+    (project / "agent.py").write_text(FAMILY, encoding="utf-8")
+    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n', encoding="utf-8")
     monkeypatch.setenv("SECOND", "1")
     main(["test"])
     capsys.readouterr()

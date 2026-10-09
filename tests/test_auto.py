@@ -17,7 +17,7 @@ def events(tmp_path, monkeypatch):
     assay.init(path=str(path))
     def read():
         assay.flush()
-        return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
     yield read
     assay.shutdown()
 

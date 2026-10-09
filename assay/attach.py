@@ -87,7 +87,7 @@ def scan_code(root: Path) -> Found:
     for path in _py_files(root):
         rel = os.path.relpath(path, Path.cwd()) if path.is_absolute() else str(path)
         try:
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
             tree = ast.parse(text)
         except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
             continue
@@ -225,7 +225,8 @@ def diff(found: Found, changes: Dict[str, str]) -> str:
     parts = []
     for rel in sorted(changes):
         a, b = found.sources[rel].splitlines(keepends=True), changes[rel].splitlines(keepends=True)
-        parts.append("".join(difflib.unified_diff(a, b, f"a/{rel}", f"b/{rel}")))
+        name = Path(rel).as_posix()  # a patch names files with /, on every OS
+        parts.append("".join(difflib.unified_diff(a, b, f"a/{name}", f"b/{name}")))
     return "".join(parts)
 
 
@@ -542,7 +543,7 @@ def db(root: Path, url: Optional[str], out: Optional[str], force: bool = False,
         for rec, f, err in broken:
             print(f"  {rec}.{f}: {err}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(mapping, indent=2) + "\n")
+    path.write_text(json.dumps(mapping, indent=2) + "\n", encoding="utf-8")
     print(f"\nWrote {shown}. Every field it maps works against the database." if not broken else f"\nWrote {shown}.")
     print("\n" + _p("Next:", "bold"))
     print(f"  {_p(f'$ export ASSAY_SOURCE_URL={safe_url}', 'green')}   (a read-only login)")
@@ -575,7 +576,7 @@ def code(root: Path, apply: bool = False) -> int:
               _p(line, "red") if line.startswith("-") and not line.startswith("---") else line)
     patch = root / ".assay" / "connect.patch" if root.is_dir() else Path(".assay") / "connect.patch"
     patch.parent.mkdir(parents=True, exist_ok=True)
-    patch.write_text(d)
+    patch.write_text(d, encoding="utf-8")
     patch = Path(os.path.relpath(patch)) if patch.is_absolute() else patch
     print("\n" + _p(f"{len(notes)} change{'s' * (len(notes) != 1)} in {len(changes)} file{'s' * (len(changes) != 1)}:", "bold"))
     for n in notes:
@@ -586,7 +587,7 @@ def code(root: Path, apply: bool = False) -> int:
         print("Needs the SDK in your app's environment: pip install assay-evals")
         return 0
     for rel, text in changes.items():
-        Path(rel).write_text(text)
+        Path(rel).write_text(text, encoding="utf-8")
     print(f"\nApplied to {len(changes)} file{'s' * (len(changes) != 1)}. Run your app (or its tests) once, then:")
     print(f"  {_p('$ assay connect verify', 'green')}")
     return 0
@@ -604,20 +605,20 @@ def evals(root: Path, apply: bool = False, folder: str = "tests/ai") -> int:
     print(_p(f"{len(items)} model call site{'s' * (len(items) != 1)}:", "bold"))
     for x in items:
         s = x["site"]
-        what = {"new": _p(f"+ {x['path']}", "green"), "exists": f"  {x['path']} (there already)",
+        what = {"new": _p(f"+ {Path(x['path']).as_posix()}", "green"), "exists": f"  {Path(x['path']).as_posix()} (there already)",
                 "tested": "  has a test already"}[x["state"]]
         print(f"  {s.function} ({s.file}:{s.line})  {what}")
     if not new:
         print("\nNothing to propose: every model call has a test.")
         return 0
-    print("\n" + _p(f"{new[0]['path']}:", "bold"))
+    print("\n" + _p(f"{Path(new[0]['path']).as_posix()}:", "bold"))
     print(new[0]["text"])
     if not apply:
         print(f"Nothing is written yet. `assay connect evals --apply` writes {len(new)} file{'s' * (len(new) != 1)}.")
         return 0
     for x in new:
         x["path"].parent.mkdir(parents=True, exist_ok=True)
-        x["path"].write_text(x["text"])
+        x["path"].write_text(x["text"], encoding="utf-8")
     print(f"Wrote {len(new)} file{'s' * (len(new) != 1)}. Each is skipped until you write its spec and cases and remove "
           f"its skip mark: proposed, not trusted.")
     return 0

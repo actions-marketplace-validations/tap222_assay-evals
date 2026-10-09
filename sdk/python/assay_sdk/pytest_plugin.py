@@ -87,7 +87,7 @@ def _rerun_list(config) -> Optional[set]:
         return None
     path = config.rootpath / ".assay" / "state.json"
     try:
-        return set(json.loads(path.read_text()).get("rerun") or [])
+        return set(json.loads(path.read_text(encoding="utf-8")).get("rerun") or [])
     except (OSError, ValueError):
         raise pytest.UsageError("--assay-rerun failed needs a run to rerun: nothing in .assay/state.json yet")
 
@@ -122,6 +122,13 @@ def pytest_configure(config):
     config._assay_session = None
     if not config.getoption("assay", False):
         return
+    for stream in (sys.stdout, sys.stderr):  # the report uses → ✓ ✗: a Windows pipe would fail on them
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
     if os.environ.get("ASSAY_TEST_RUN") and not os.environ.get("ASSAY_PYTEST_SESSION"):
         return  # under `assay test`, which compares the run itself
     if hasattr(config, "workerinput"):  # a pytest-xdist worker: records into the session's file

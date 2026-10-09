@@ -148,7 +148,7 @@ def test_the_cli_writes_drafts_only_with_apply(tmp_path, monkeypatch, capsys):
 
 def test_what_each_judge_costs_to_keep(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "assay.toml").write_text('[test]\ncommand = "true"\n')
+    (tmp_path / "assay.toml").write_text('[test]\ncommand = "true"\n', encoding="utf-8")
     (tmp_path / ".assay").mkdir()
     e = store.make_engine(f"sqlite:///{tmp_path / '.assay' / 'assay.db'}")
     now = datetime.utcnow()

@@ -15,7 +15,7 @@ from assay_sdk.testing import expect
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "assay.toml").write_text('[test]\ncommand = "true"\n\n[calibrate]\nscore_range = [1, 5]\nthreshold = 3\n'
-                                         '\n[guardrails]\nmax_ms = 50\nmax_false_positive = 0.05\n')
+                                         '\n[guardrails]\nmax_ms = 50\nmax_false_positive = 0.05\n', encoding="utf-8")
     (tmp_path / ".assay").mkdir()
     e = store.make_engine(f"sqlite:///{tmp_path / '.assay' / 'assay.db'}")
     now = datetime.utcnow()
@@ -40,7 +40,7 @@ def project(tmp_path, monkeypatch):
             tenant="local", run_id="cal-1", created_at=now - timedelta(days=2), judge="evals/judges.py:helpful", golden="x",
             passed=True, result={"calibration": {"field": "helpful", "n": 30, "catch": {
                 "good": 25, "confirmed": 22, "bad": 5, "caught": ["a", "b", "c", "d"], "tnr": 0.8, "tpr": 0.88}}}))
-    (tmp_path / "golden.jsonl").write_text("".join(json.dumps(x) + "\n" for x in golden))
+    (tmp_path / "golden.jsonl").write_text("".join(json.dumps(x) + "\n" for x in golden), encoding="utf-8")
     return tmp_path
 
 
@@ -54,14 +54,14 @@ def test_what_could_run_in_the_request_path(project, capsys):
     assert "tone: 0 good outputs labeled" in cant
     assert "short_enough: 12% false positives, over 5%" in keep
     assert "helpful: an LLM judge" in keep and "2.4 s p95, over 50 ms" in keep
-    exported = json.loads((project / "guardrails.json").read_text())["candidates"]
+    exported = json.loads((project / "guardrails.json").read_text(encoding="utf-8"))["candidates"]
     assert [x["field"] for x in exported] == ["has_order_id"] and exported[0]["false_negative"] == 0.2
 
 
 def test_the_stakes_decide_the_thresholds(project, capsys):
     (project / "assay.toml").write_text('[test]\ncommand = "true"\n\n[calibrate]\nscore_range = [1, 5]\nthreshold = 3\n'
                                         '\n[guardrails]\nmax_ms = 5000\nmax_false_positive = 0.15\nmax_false_negative = 0.1\n'
-                                        'min_labeled = 5\njudges = true\n')
+                                        'min_labeled = 5\njudges = true\n', encoding="utf-8")
     assert main(["evals", "guardrails", "--format", "json"]) == 0
     r = {x["field"]: x for x in json.loads(capsys.readouterr().out)["evaluators"]}
     assert r["has_order_id"]["verdict"] == "not a candidate" and "20% false negatives" in r["has_order_id"]["why"]

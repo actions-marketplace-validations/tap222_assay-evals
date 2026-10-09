@@ -55,7 +55,7 @@ def test_a_conversation_to_the_goal_decided_by_your_own_check(tmp_path, monkeypa
     assay.shutdown()
     assert (sim.status, sim.goal_met, sim.turns, sim.decided_by) == ("PASS", True, 2, "success")
     assert [m["role"] for m in sim.transcript] == ["user", "assistant", "user", "assistant"]
-    events = [json.loads(x) for x in (tmp_path / "e.jsonl").read_text().splitlines()]
+    events = [json.loads(x) for x in (tmp_path / "e.jsonl").read_text(encoding="utf-8").splitlines()]
     kinds = [e["kind"] for e in events if e.get("type") == "step"]
     assert kinds == ["user", "answer", "user", "tool", "state", "answer"]  # the tools where they happened
     checks = {e["field"]: e["status"] for e in events if e.get("type") == "check"}
@@ -126,9 +126,9 @@ def test_contracts_hold_across_the_whole_conversation(tmp_path, monkeypatch, cap
     monkeypatch.setenv("NO_COLOR", "1")
     for k in ("ASSAY_URL", "ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "ASSAY_POLICY", "GITHUB_STEP_SUMMARY"):
         monkeypatch.delenv(k, raising=False)
-    (tmp_path / "agent.py").write_text(AGENT)
+    (tmp_path / "agent.py").write_text(AGENT, encoding="utf-8")
     (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n\n[[contracts]]\n'
-                                         'kind = "requires_approval"\nstep = "refund"\n')
+                                         'kind = "requires_approval"\nstep = "refund"\n', encoding="utf-8")
     assert main(["test"]) == 1
     out = capsys.readouterr().out
     assert "refund_upset" in out and "Safety" in out and "without an approval" in out

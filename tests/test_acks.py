@@ -33,8 +33,8 @@ def project(tmp_path, monkeypatch):
     for k in ("ASSAY_URL", "ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "ASSAY_POLICY",
               "ASSAY_POLICY_CHANGE", "GITHUB_STEP_SUMMARY"):
         monkeypatch.delenv(k, raising=False)
-    (tmp_path / "checks.py").write_text(CHECKS)
-    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} checks.py"\n')
+    (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
+    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} checks.py"\n', encoding="utf-8")
     return tmp_path
 
 
@@ -114,7 +114,7 @@ def test_a_pull_request_cant_acknowledge_its_own_regression(project, monkeypatch
     assert run(monkeypatch, capsys, q1=judge(3))[0] == 1
     base = project / "base"
     base.mkdir()
-    (base / "assay.base.toml").write_text((project / "assay.toml").read_text())  # the base branch: no acks
+    (base / "assay.base.toml").write_text((project / "assay.toml").read_text(encoding="utf-8"), encoding="utf-8")  # the base branch: no acks
     assert main(["ack", "q1", "--reason", "fine, trust me"]) == 0
     capsys.readouterr()
     monkeypatch.setenv("ASSAY_POLICY", str(base / "assay.base.toml"))
@@ -139,8 +139,8 @@ with assay.run("support", test="rag") as r:
 
 
 def test_a_behavior_change_can_be_acknowledged_up_to_what_it_showed(project, monkeypatch, capsys):
-    (project / "agent.py").write_text(AGENT)
-    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n')
+    (project / "agent.py").write_text(AGENT, encoding="utf-8")
+    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n', encoding="utf-8")
     for tokens, code in (("800", 0), ("3000", 1)):
         monkeypatch.setenv("TOKENS", tokens)
         assert main(["test"]) == code
@@ -173,10 +173,10 @@ def test_failure_classes_and_durations():
 
 def test_an_acknowledgement_for_ever_is_rejected(tmp_path):
     (tmp_path / "assay.acks.toml").write_text('[[ack]]\ncase = "q1"\ncheck = "answer"\nreason = "x"\nby = "me"\n'
-                                              'at = 2026-09-01T00:00:00Z\nuntil = 2099-01-01T00:00:00Z\n')
+                                              'at = 2026-09-01T00:00:00Z\nuntil = 2099-01-01T00:00:00Z\n', encoding="utf-8")
     with pytest.raises(acks.AckError, match="more than 90 days"):
         acks.load(tmp_path / "assay.toml")
-    (tmp_path / "assay.toml").write_text("[test]\ncommand = 'x'\n")
+    (tmp_path / "assay.toml").write_text("[test]\ncommand = 'x'\n", encoding="utf-8")
     with pytest.raises(local.SetupError, match="Nothing is acknowledged for ever"):
         local.load_config(tmp_path)
 

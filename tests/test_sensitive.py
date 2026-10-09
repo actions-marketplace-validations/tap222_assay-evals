@@ -63,8 +63,8 @@ def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ASSAY_URL", raising=False)
     (tmp_path / ".assay").mkdir()
-    (tmp_path / ".assay" / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in EVENTS))
-    (tmp_path / "bot.py").write_text(APP)
+    (tmp_path / ".assay" / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in EVENTS), encoding="utf-8")
+    (tmp_path / "bot.py").write_text(APP, encoding="utf-8")
     yield tmp_path
     assay.init(enabled=False)
 
@@ -74,7 +74,7 @@ def test_redact_check_finds_what_got_through(project, capsys):
     out = capsys.readouterr().out
     assert "email" in out and "card" in out and "tool.args" in out and "ana@x.com" not in out  # masked
     clean = [{**e, "input": learn.redact(e.get("input"))} if "input" in e else e for e in EVENTS[:1]]
-    (project / "clean.jsonl").write_text("".join(json.dumps(e) + "\n" for e in clean))
+    (project / "clean.jsonl").write_text("".join(json.dumps(e) + "\n" for e in clean), encoding="utf-8")
     assert main(["redact", "check", "--file", "clean.jsonl"]) == 0
     assert "Read these yourself" in capsys.readouterr().out
 
@@ -166,11 +166,11 @@ def test_an_experts_decisions_on_claims_become_labels_signals_and_findings(tmp_p
     # Into the golden set, from the command line: none twice.
     from assay import local
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "assay.toml").write_text('[test]\ncommand = "true"\n')
+    (tmp_path / "assay.toml").write_text('[test]\ncommand = "true"\n', encoding="utf-8")
     monkeypatch.setattr(local, "_http", lambda m, url, body, h: (200, c.get(
         url.replace("http://s", ""), headers=c.h["read"]).json()))
     monkeypatch.setenv("ASSAY_URL", "http://s")
     assert main(["golden", "claims", "--source", "events:acme"]) == 0
     assert main(["golden", "claims", "--source", "events:acme"]) == 0
     assert "0 claim labels from experts added" in capsys.readouterr().out.splitlines()[-1]
-    assert len((tmp_path / "golden.jsonl").read_text().splitlines()) == 2
+    assert len((tmp_path / "golden.jsonl").read_text(encoding="utf-8").splitlines()) == 2

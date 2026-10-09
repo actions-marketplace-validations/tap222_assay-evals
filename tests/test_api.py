@@ -131,7 +131,7 @@ def test_sql_source_with_a_custom_mapping(tmp_path):
             "model_declared": "NULL", "model_served": "l.model", "resolving_layer": "NULL", "gate_reason": "NULL",
             "cost_usd": "l.price", "code_revision": "NULL", "latency_ms": "NULL", "status": "NULL",
             "segment": "j.customer", "document_type": "j.kind"}},
-    }))
+    }), encoding="utf-8")
     src = SQLSource("sqlite://", engine=eng, mapping=load_mapping(str(path)))
     w = Window(datetime(2026, 8, 1), datetime(2026, 10, 1))
     [call] = src.calls(w)
@@ -146,7 +146,7 @@ def test_sql_source_with_a_custom_mapping(tmp_path):
 def test_unknown_mapping_key_is_rejected(tmp_path):
     from assay.sources.sql import load_mapping
     path = tmp_path / "m.json"
-    path.write_text('{"calls_typo": {}}')
+    path.write_text('{"calls_typo": {}}', encoding="utf-8")
     with pytest.raises(ValueError, match="calls_typo"):
         load_mapping(str(path))
 

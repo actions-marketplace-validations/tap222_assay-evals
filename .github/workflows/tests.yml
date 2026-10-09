@@ -32,6 +32,26 @@ jobs:
       - name: Test
         run: pytest -q
 
+  other-os:
+    # The same suite on macOS and Windows: `assay test` starts and stops your command there too.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install
+        run: pip install -e sdk/python -e ".[dev]"
+      - name: Test
+        run: pytest -q
+
   js:
     # The JavaScript SDK (sdk/js): no dependencies, so nothing to install.
     runs-on: ubuntu-latest

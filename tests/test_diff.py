@@ -64,9 +64,9 @@ def two_versions(tmp_path, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     for k in ("ASSAY_URL", "ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "ASSAY_POLICY", "GITHUB_STEP_SUMMARY"):
         monkeypatch.delenv(k, raising=False)
-    (tmp_path / "app.py").write_text(APP)
+    (tmp_path / "app.py").write_text(APP, encoding="utf-8")
     (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} app.py"\nrepeat = 3\n\n'
-                                         '[[contracts]]\nkind = "requires_approval"\nstep = "refund"\n')
+                                         '[[contracts]]\nkind = "requires_approval"\nstep = "refund"\n', encoding="utf-8")
     monkeypatch.setenv("APP_VERSION", "v1.8.2")
     main(["test"])
     assert main(["accept"]) == 0
@@ -107,7 +107,7 @@ def test_formats_defaults_and_errors(two_versions, capsys):
 
 
 def test_the_pr_comment_shows_the_flow_before_and_after(two_versions):
-    md = (two_versions / ".assay" / "summary.md").read_text()
+    md = (two_versions / ".assay" / "summary.md").read_text(encoding="utf-8")
     assert "1 changed, still passing" in md
     assert ("- `support_agent` → Tool usage: Called cancel\\_order(id='O-18'), which the reference doesn't expect\n"
             "  - Expected: `search_order`\n  - Actual: `search_order → cancel_order`") in md

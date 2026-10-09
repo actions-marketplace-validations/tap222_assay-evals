@@ -23,7 +23,7 @@ def test_greeting(assay_case):
 
 def write(project):
     (project / "tests").mkdir(exist_ok=True)
-    (project / "tests" / "test_suite.py").write_text(SUITE)
+    (project / "tests" / "test_suite.py").write_text(SUITE, encoding="utf-8")
 
 
 def test_a_change_that_breaks_one_wording_fails(project):
@@ -54,7 +54,7 @@ def test_where_the_original_fails_theres_nothing_to_be_consistent_with(project):
     write(project)
     (project / "tests" / "test_suite.py").write_text(SUITE.replace(
         "    support_agent(assay_case, wording, \"O-18\")",
-        "    support_agent(assay_case, wording, \"O-18\")\n    assert \"pls\" in wording, \"the original fails\""))
+        "    support_agent(assay_case, wording, \"O-18\")\n    assert \"pls\" in wording, \"the original fails\""), encoding="utf-8")
     run(project)
     engine = store.make_engine(f"sqlite:///{project / '.assay' / 'assay.db'}")
     t = store.eval_results
@@ -89,9 +89,9 @@ def test_an_agent_that_varies_isnt_called_sensitive_to_wording(project):
     import sys
     from assay.__main__ import main
     (project / "tests").mkdir()
-    (project / "tests" / "test_suite.py").write_text(RANDOM)
+    (project / "tests" / "test_suite.py").write_text(RANDOM, encoding="utf-8")
     (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} -m pytest -q -p no:cacheprovider '
-                                        f'tests"\nrepeat = 4\n')
+                                        f'tests"\nrepeat = 4\n', encoding="utf-8")
     assert main(["test"]) == 0  # attempt by attempt the two never match; path for path they always do
     from assay import rewordings, store
     from sqlalchemy import select
@@ -119,8 +119,8 @@ for i, text in enumerate(["Can I get a refund for O-18?", "refund O-18 pls"]):
 def test_without_pytest_the_runs_are_tagged(project, monkeypatch, capsys):
     import sys
     from assay.__main__ import main
-    (project / "agent.py").write_text(PLAIN)
-    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n')
+    (project / "agent.py").write_text(PLAIN, encoding="utf-8")
+    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n', encoding="utf-8")
     assert main(["test"]) == 0
     monkeypatch.setenv("MODE", "after")
     assert main(["test"]) == 1

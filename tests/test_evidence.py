@@ -84,8 +84,8 @@ def project(tmp_path, monkeypatch):
     for k in ("ASSAY_URL", "ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "ASSAY_POLICY", "GITHUB_STEP_SUMMARY",
               "GITHUB_SHA"):
         monkeypatch.delenv(k, raising=False)
-    (tmp_path / "kinds.py").write_text(KINDS)
-    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} kinds.py"\n')
+    (tmp_path / "kinds.py").write_text(KINDS, encoding="utf-8")
+    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} kinds.py"\n', encoding="utf-8")
     return tmp_path
 
 
@@ -112,7 +112,7 @@ def test_a_regression_with_nothing_changed_on_your_side(project, monkeypatch, ca
     out = capsys.readouterr().out
     assert "Nothing on your side changed since this case's baseline: the same commit" in out
     assert "The model underneath changed, or a service a tool calls did." in out
-    (project / "kinds.py").write_text(KINDS + "\n# a change\n")  # now something did change
+    (project / "kinds.py").write_text(KINDS + "\n# a change\n", encoding="utf-8")  # now something did change
     assert main(["test"]) == 1
     assert "Nothing on your side changed" not in capsys.readouterr().out
 
@@ -130,8 +130,8 @@ with assay.run("support", test="q1") as r:
 
 def test_a_new_prompt_version_is_a_change_on_your_side(project, monkeypatch, capsys):
     """A prompt picked at run time (an env var, a registry) changes no file, and is still your change."""
-    (project / "prompted.py").write_text(PROMPTED)
-    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} prompted.py"\n')
+    (project / "prompted.py").write_text(PROMPTED, encoding="utf-8")
+    (project / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} prompted.py"\n', encoding="utf-8")
     git = lambda *a: subprocess.run(["git", *a], cwd=project, check=True, capture_output=True)
     git("init", "-q")
     git("-c", "user.email=a@b.c", "-c", "user.name=a", "add", "-A")

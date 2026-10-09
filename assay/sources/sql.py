@@ -133,7 +133,7 @@ def load_mapping(path: Optional[str] = None) -> Dict:
     mapping = copy.deepcopy(DEFAULT_MAPPING)
     path = path or os.environ.get("ASSAY_SOURCE_MAPPING")
     if path:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             override = json.load(f)
         for key, spec in override.items():
             if key == "noop_stages":

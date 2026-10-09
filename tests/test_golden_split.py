@@ -9,7 +9,7 @@ from test_calibrate import project  # noqa: F401  the golden set and judge
 
 
 def rows(root):
-    return [json.loads(x) for x in (root / "golden.jsonl").read_text().splitlines() if x.strip()]
+    return [json.loads(x) for x in (root / "golden.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
 def test_split_stratified_kept_and_calibrated_on_dev(project, capsys):
@@ -35,19 +35,19 @@ def test_a_judge_that_has_seen_dev_items_fails(project, capsys):
     items = rows(project)
     for x in items:  # outputs long enough to be recognizably one item's
         x["output"] += " because the order shipped on Tuesday"
-    (project / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in items) + "\n")
+    (project / "golden.jsonl").write_text("\n".join(json.dumps(x) for x in items) + "\n", encoding="utf-8")
     dev = next(x for x in items if x["split"] == "dev")
     judges = project / "evals" / "judges.py"
-    src = judges.read_text()
-    judges.write_text(src + f"\nEXAMPLES = [{dev['output'].upper()!r}]  # pasted in as a few-shot example\n")
+    src = judges.read_text(encoding="utf-8")
+    judges.write_text(src + f"\nEXAMPLES = [{dev['output'].upper()!r}]  # pasted in as a few-shot example\n", encoding="utf-8")
     capsys.readouterr()
     assert main(["calibrate", "--repeat", "1"]) == 1
     assert "leak" in capsys.readouterr().out.lower()
     judges.write_text(src.replace("def grade(", "from assay_sdk import golden_examples\n"
-                                  "SHOTS = golden_examples('golden.jsonl', split='dev')\ndef grade(", 1))
+                                  "SHOTS = golden_examples('golden.jsonl', split='dev')\ndef grade(", 1), encoding="utf-8")
     assert main(["calibrate", "--repeat", "1"]) == 1
     judges.write_text(src.replace("def grade(", "from assay_sdk import golden_examples\n"
-                                  "SHOTS = golden_examples('golden.jsonl', k=3)\ndef grade(", 1))
+                                  "SHOTS = golden_examples('golden.jsonl', k=3)\ndef grade(", 1), encoding="utf-8")
     assert main(["calibrate", "--repeat", "1"]) == 0  # train examples: fine
 
 

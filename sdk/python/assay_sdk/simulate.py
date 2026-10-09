@@ -82,7 +82,7 @@ def load_personas(path: str = "synthetic/personas.jsonl") -> List[Persona]:
     if not p.exists():
         return []
     out = []
-    for line in p.read_text().splitlines():
+    for line in p.read_text(encoding="utf-8").splitlines():
         if line.strip():
             x = json.loads(line)
             out.append(Persona(goal=x.get("goal", ""), traits=x.get("traits") or "an ordinary user",

@@ -37,7 +37,7 @@ def golden_examples(path: str = "golden.jsonl", split: str = "train", k: Optiona
     if not p.exists():
         return []
     out = []
-    for line in p.read_text().splitlines():
+    for line in p.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         x = json.loads(line)

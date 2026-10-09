@@ -35,8 +35,8 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     for k in ("ASSAY_URL", "ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "ASSAY_POLICY", "GITHUB_STEP_SUMMARY"):
         monkeypatch.delenv(k, raising=False)
-    (tmp_path / "agent.py").write_text(AGENT)
-    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n')
+    (tmp_path / "agent.py").write_text(AGENT, encoding="utf-8")
+    (tmp_path / "assay.toml").write_text(f'[test]\ncommand = "{sys.executable} agent.py"\n', encoding="utf-8")
     return tmp_path
 
 
@@ -54,7 +54,7 @@ def test_the_report_counts_what_tests_caught_and_what_fixed_it(project, monkeypa
     assert "- **MEDIUM** `shipping` answer: wrong delivery date — still failing" in md
     assert "## The log" in md and "Approval prompts need an explicit wait step (sam)" in md
     assert "Caught by tests: refund safety: refund before approval" in md
-    assert Path("report.md").read_text().strip() == md.strip()
+    assert Path("report.md").read_text(encoding="utf-8").strip() == md.strip()
     main(["report", "--format", "json"])
     data = json.loads(capsys.readouterr().out)
     assert {x["case"] for x in data["caught"]} == {"refund", "shipping"}

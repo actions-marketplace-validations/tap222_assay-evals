@@ -212,9 +212,9 @@ def test_sdk_records_locally_without_a_server_and_load_brings_it_in(tmp_path, mo
     assay.shutdown()
 
     log = tmp_path / ".assay" / "events.jsonl"
-    lines = log.read_text().splitlines()
+    lines = log.read_text(encoding="utf-8").splitlines()
     assert [json.loads(x)["type"] for x in lines] == ["run.start", "step", "step", "run.end", "check"]
-    assert (tmp_path / ".assay" / ".gitignore").read_text() == "*\n"  # recorded inputs stay out of git
+    assert (tmp_path / ".assay" / ".gitignore").read_text(encoding="utf-8") == "*\n"  # recorded inputs stay out of git
 
     monkeypatch.setenv("ASSAY_STORE_URL", f"sqlite:///{tmp_path / 'store.db'}")
     assert main(["load"]) == 0 and "Loaded 5 events into tenant 'local'" in capsys.readouterr().out
@@ -236,7 +236,7 @@ def test_sdk_local_path_and_processes_appending_to_one_file(tmp_path, monkeypatc
     env.pop("ASSAY_URL", None)
     procs = [subprocess.Popen([sys.executable, "-c", script], env=env) for _ in range(4)]
     assert all(p.wait(timeout=60) == 0 for p in procs)
-    lines = (tmp_path / "runs.jsonl").read_text().splitlines()
+    lines = (tmp_path / "runs.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 4 * 40 * 3 and all(json.loads(x)["v"] == 1 for x in lines)  # no line split or lost
     assert not (tmp_path / ".gitignore").exists()  # only a folder the SDK created gets one
 
@@ -246,7 +246,7 @@ def test_load_checks_every_line_and_loads_nothing_from_a_bad_file(tmp_path, monk
     good = json.dumps(ev(id="a", type="run.start", run_id="r"))
     bad_step = json.dumps(ev(id="b", type="step", run_id="r", seq=0, kind="tool"))  # a tool step needs a name
     f = tmp_path / "events.jsonl"
-    f.write_text("\n".join([good, "{not json", bad_step]) + "\n")
+    f.write_text("\n".join([good, "{not json", bad_step]) + "\n", encoding="utf-8")
     monkeypatch.setenv("ASSAY_STORE_URL", f"sqlite:///{tmp_path / 'store.db'}")
     assert main(["load", str(f)]) == 1
     err = capsys.readouterr().err

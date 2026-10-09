@@ -118,7 +118,7 @@ def test_a_spent_budget_judges_nothing(tmp_path, monkeypatch):
 def test_what_the_ci_suite_costs(tmp_path, monkeypatch, capsys):
     from assay.__main__ import main
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "assay.toml").write_text('[test]\ncommand = "true"\n')
+    (tmp_path / "assay.toml").write_text('[test]\ncommand = "true"\n', encoding="utf-8")
     (tmp_path / ".assay").mkdir()
     e = store.make_engine(f"sqlite:///{tmp_path / '.assay' / 'assay.db'}")
     now = datetime.utcnow()
