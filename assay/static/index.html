@@ -354,13 +354,13 @@ function spark(points){
 function chart(h,m){
   const pts=h.points.filter(p=>p.value!=null);
   if(pts.length<2)return`<p class="note">Not enough history to draw yet. Each run adds a point.</p>`;
-  const W=900,H=240,L=64,R=16,T=12,B=28;
+  const W=900,H=m.height||240,L=64,R=16,T=12,B=28;
   let lo=Math.min(...pts.map(p=>p.value)),hi=Math.max(...pts.map(p=>p.value));
   if(h.band){lo=Math.min(lo,h.band.low);hi=Math.max(hi,h.band.high)}
   if(h.slo){lo=Math.min(lo,h.slo.target);hi=Math.max(hi,h.slo.target)}
   if(m.unit==="ratio"||m.unit==="count"||m.unit==="ms"||m.unit==="seconds"||m.unit==="psi")lo=Math.max(0,lo);
   const pad=(hi-lo)*0.08||Math.abs(hi)*0.1||1;lo=Math.max(m.unit==="ratio"||m.unit==="count"?0:lo-pad,lo-pad);hi+=pad;
-  if(m.unit==="ratio")hi=Math.min(hi,1.02);
+  if(m.unit==="ratio")hi=Math.min(hi,1);
   const t0=new Date(pts[0].at).getTime(),t1=new Date(pts[pts.length-1].at).getTime()||t0+1;
   const x=t=>L+(new Date(t).getTime()-t0)/((t1-t0)||1)*(W-L-R),y=v=>T+(1-(v-lo)/((hi-lo)||1))*(H-T-B);
   let g="";
@@ -376,6 +376,7 @@ function chart(h,m){
   g+=`<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
   g+=pts.map((p,i)=>{const last=i===pts.length-1,out=last&&h.band&&(p.value<h.band.low||p.value>h.band.high);
     return `<circle cx="${x(p.at)}" cy="${y(p.value)}" r="${last?4.5:2.5}" fill="${out?"var(--bad)":"var(--accent)"}"><title>${esc(p.at.slice(0,16).replace("T"," "))} · ${esc(fmt(p.value,m.unit))} · n=${p.n}</title></circle>`}).join("");
+  if(m.legend===false)return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.name)} over time">${g}</svg>`;
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.name)} over time">${g}</svg>
     <div class="legend"><span><i style="background:var(--accent)"></i>value per run</span>${h.band?`<span><i style="background:var(--band)"></i>expected range from the last ${h.band.points} runs</span>`:""}${h.slo?`<span><i style="border-top:2px dashed var(--warn);height:0"></i>SLO target</span>`:""}${(h.changes||[]).length?`<span><i style="border-top:2px dashed var(--accent-ink);height:0"></i>a prompt version went live</span>`:""}</div>`;
 }
@@ -514,6 +515,13 @@ pytest --assay tests</pre></div>`;return}
     sel.value=s;store.set("assay-source",s);store.set("assay-view","agents");location.hash="overview";refresh()});
 }
 
+// Checks passed in each of the last 20 test runs: is it getting better or worse? Drawn into el.
+async function trendChart(el,runs){
+  runs=runs||await api(`/v1/evals/runs?${q({source:src()})}`).catch(()=>[]);
+  const pts=runs.slice(0,20).reverse().filter(r=>r.results).map(r=>({at:r.start,value:r.passed/r.results,n:r.results,run:r.run_id}));
+  if(pts.length<2||!el)return;
+  el.innerHTML=`<h3 style="margin-bottom:6px">Checks passed, last ${pts.length} runs</h3>`+chart({points:pts},{unit:"ratio",name:"Checks passed",height:150,legend:false});
+}
 /* ---------- tests overview ---------- */
 async function renderTests(){
   const box=$("#tab-overview");
@@ -546,8 +554,10 @@ pytest --assay --assay-upload tests</pre>
     <div class="${k.flaky?"warn":"good"}"><b>${k.flaky.toLocaleString()}</b><span>flaky</span></div>
     <div><b>${k.unchanged.toLocaleString()}</b><span>unchanged of ${d.scenarios.toLocaleString()}</span></div>
   </div>
+  <div class="panel" id="overview-trend" hidden></div>
   <div class="panel stack"><div class="panel-head"><h2>${worse?"What got worse":"Nothing got worse"}</h2>${bad.length>5?`<a href="#diff" class="ref">All ${bad.length} →</a>`:""}</div>
     ${bad.length?`<ol class="stack">${bad.slice(0,5).map(row).join("")}</ol>`:`<p class="note">Every scenario passes as it did in ${esc(prev.run_id)}${k.changed?`, though ${k.changed} took a different path`:""}.</p>`}</div>`;
+  const tr=$("#overview-trend");await trendChart(tr,runs);tr.hidden=!tr.innerHTML;
 }
 
 /* ---------- overview ---------- */
@@ -1458,13 +1468,13 @@ function lifecyclePanel(l){
   if(l.oldest_awaiting_minutes!=null&&l.oldest_awaiting_minutes>l.backlog_minutes)warn.push(`${l.awaiting_evaluation.toLocaleString()} ended run${l.awaiting_evaluation===1?" is":"s are"} waiting to be evaluated, the oldest for ${l.oldest_awaiting_minutes} minutes. Is the evaluation sweep running? (An alert opens for this.)`);
   if(l.sweep&&!l.sweep.ok)warn.push(`The last evaluation sweep failed: ${l.sweep.error}`);
   if(l.evaluation_errors)warn.push(`${l.evaluation_errors.toLocaleString()} runs couldn't be evaluated; open one for the error. They're checked again when they get new data.`);
-  return `<div class="panel stack"><div class="panel-head"><div><h2>Live agent runs</h2><p class="sub">Every run is checked when it ends, however long it took: it finished, kept the critical path contracts, didn't loop, and recovered from its tool errors. A run that goes quiet for ${l.abandon_minutes} minutes is marked abandoned, then checked.</p></div></div>
+  return `<div class="panel stack"><div class="panel-head"><div><h2>Live agent runs</h2><p class="sub">Each run is checked when it ends: it finished, kept the path contracts, didn't loop, recovered from tool errors.</p></div></div>
     ${warn.map(w=>`<p class="flag"><span class="chip warn">evaluation</span>${esc(w)}</p>`).join("")}
     <div class="tiles">${tiles.map(([k,v,why])=>`<div class="tile"><b>${(v||0).toLocaleString()}</b><span>${k}<br><span class="ref">${why}</span></span></div>`).join("")}</div>
-    ${l.recent_failures.length?`<div class="scroll"><table><tr><th>Run</th><th>Task</th><th>Status</th><th>Failed</th><th>Evaluated</th></tr>
+    ${l.recent_failures.length?`<details><summary class="note">Latest failing runs (${Math.min(15,l.recent_failures.length)})</summary><div class="scroll"><table><tr><th>Run</th><th>Task</th><th>Status</th><th>Failed</th><th>Evaluated</th></tr>
       ${l.recent_failures.slice(0,15).map(r=>`<tr class="click" data-traj="${esc(r.trajectory_id)}"><td class="mono">${esc(r.trajectory_id)}</td><td class="ref">${esc(r.task||"")}</td><td>${lifeStatus(r.status)}</td>
         <td>${Object.entries(r.failed.reduce((g,c)=>((g[c.reason||""]??=[]).push(LIFE_CHECK[c.check]||c.check),g),{}))
-          .map(([why,checks])=>`<div><b>${esc([...new Set(checks)].join(", "))}</b> <span class="ref">${esc(why)}</span></div>`).join("")}</td><td class="ref">${esc(r.evaluated_at.slice(0,16).replace("T"," "))}</td></tr>`).join("")}</table></div>`
+          .map(([why,checks])=>`<div><b>${esc([...new Set(checks)].join(", "))}</b> <span class="ref" title="${esc(why)}">${esc(why.length>140?why.slice(0,140)+"…":why)}</span></div>`).join("")}</td><td class="ref">${esc(r.evaluated_at.slice(0,16).replace("T"," "))}</td></tr>`).join("")}</table></div></details>`
       :`<p class="note">${l.evaluated?"No evaluated run failed a check.":"No run has ended yet."}</p>`}</div>`;
 }
 async function agentMatrix(el,run,baseline){
@@ -1499,38 +1509,67 @@ async function renderAgents(){
   const effRows=[["Steps per run","steps",1,true],["Tool calls","tool_calls",1,true],["Repeated identical calls","repeated_calls",1,true],["Tool errors","tool_errors",1,true],
     ["Errors recovered","recovery_rate",0,false],["Tokens","tokens",0,true],["Cost per run","cost_usd",4,true],["Seconds","seconds",1,true],["Tool precision","precision",0,false],["Tool recall","recall",0,false]];
   const fmtE=(k,v,d)=>v==null?"—":["recovery_rate","precision","recall"].includes(k)?pct(v,0):k==="cost_usd"?money(v):k==="tokens"?Math.round(v).toLocaleString():v.toFixed(d);
-  const onlyBad=store.get("assay-agent-bad")!=="0";
-  const list=c.trajectories_list.filter(t=>!onlyBad||Object.values(t.checks).includes("fail"));
-  box.innerHTML=(anyLive?live:"")+`<div class="panel stack">
-    <div class="panel-head"><div><h2>Agent run</h2><p class="sub">Each trajectory is checked against its case's reference and the source's path contracts: the answer, the end state, the tool calls, safety and efficiency. ${s.baseline?`Compared with <b class="mono">${esc(s.baseline)}</b>.`:"No earlier run to compare with."} ${Object.entries(s.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" ")}</p></div>
+  const all=c.trajectories_list,failing=all.filter(t=>Object.values(t.checks).includes("fail"));
+  const whatFailed=t=>Object.keys(CHECK_LABEL).filter(k=>t.checks[k]==="fail").map(k=>k==="recorded"&&(t.failing_recorded||[]).length?t.failing_recorded.join(", "):CHECK_LABEL[k]).join(", ");
+  const cols=Object.keys(CHECK_LABEL).filter(k=>all.some(t=>t.checks[k]!=null));  // a check no run has gets no column
+  const trajRow=t=>`<tr class="click" data-traj="${esc(t.trajectory_id)}"><td class="mono">${esc(t.case_id||t.trajectory_id)}</td><td class="num">${t.attempt??""}</td><td class="ref">${esc(t.task||"")}</td>
+      ${cols.map(k=>`<td>${t.checks[k]==null?"":`<span class="okx ${t.checks[k]==="pass"?"y":"n"}">${t.checks[k]==="pass"?"✓":"✗"}</span>`}</td>`).join("")}
+      <td class="num">${t.steps}</td><td class="num">${money(t.cost_usd)}</td></tr>`;
+  const TOP=10,PAGE=50,byCase={};
+  all.forEach(t=>{const k=t.case_id||t.trajectory_id,g=byCase[k]??={case:k,runs:0,bad:[],what:new Set()};g.runs++;
+    if(failing.includes(t)){g.bad.push(t);whatFailed(t).split(", ").forEach(w=>g.what.add(w))}});
+  const badCases=Object.values(byCase).filter(g=>g.bad.length).sort((a,b)=>b.bad.length/b.runs-a.bad.length/a.runs);
+  // Summary first: the pass rates and their trend, then what failed. Everything else waits under Details.
+  box.innerHTML=`<div class="panel stack">
+    <div class="panel-head"><div><h2>Agent run</h2><p class="sub">${s.baseline?`Compared with <b class="mono">${esc(s.baseline)}</b>.`:"No earlier run to compare with."} ${Object.entries(s.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" ")}</p></div>
       <div class="picker"><select id="agent-run" aria-label="Run">${runs.map(r=>`<option value="${esc(r.run_id)}" ${r.run_id===run?"selected":""}>${esc(r.run_id)} · ${r.cases} cases, ${r.trajectories} runs${r.evaluated?"":" · not evaluated"}</option>`).join("")}</select>
         <button type="button" id="agent-eval" class="${s.evaluated?"":"primary"}">${s.evaluated?"Re-evaluate":"Evaluate against references"}</button></div></div>
     ${s.evaluated?"":`<p class="flag"><span class="chip warn">not evaluated</span>These numbers are computed live. Evaluate to store the checks as eval results, which feeds Failure causes and the release call.</p>`}
     <div class="tiles">${Object.keys(CHECK_LABEL).filter(k=>c.checks[k]).map(k=>`<div class="tile"><b>${pct(c.checks[k].rate,0)}</b><span>${CHECK_LABEL[k]} passed ${p?.checks[k]?delta(c.checks[k].rate,p.checks[k].rate):""}</span></div>`).join("")}</div>
+    <div id="agent-trend"></div>
+  </div>
+  <div class="panel stack"><div class="panel-head"><div><h2>${failing.length?`What failed`:"Nothing failed"}</h2><p class="sub">${failing.length?`${badCases.length} of ${Object.keys(byCase).length} cases failed in at least one attempt. Open one to see it step by step.`:`All ${all.length} runs passed every check.`}</p></div></div>
+    ${failing.length?`<div class="scroll"><table><tr><th>Case</th><th>What failed</th><th class="num">Attempts failed</th></tr>
+      ${badCases.slice(0,TOP).map(g=>`<tr class="click" data-traj="${esc(g.bad[0].trajectory_id)}"><td class="mono">${esc(g.case)}</td><td>${esc([...g.what].join(", "))}</td><td class="num">${g.bad.length} of ${g.runs}</td></tr>`).join("")}</table></div>
+      ${badCases.length>TOP?`<p class="note">${TOP} of ${badCases.length} shown, most often failing first. Every run is under Details.</p>`:""}`:""}
+  </div>
+  ${anyLive?live:""}
+  <details class="panel" id="agent-details"><summary><b>Details</b> <span class="note">· where runs first went wrong, transitions, efficiency, every run</span></summary>
+    <div class="stack" style="margin-top:12px">
     <div><h3 style="margin-bottom:6px">Where failing runs first went wrong</h3>
       ${Object.keys(c.mechanisms).length?`<div class="kindbar">${Object.entries(c.mechanisms).map(([m,n])=>`<i style="width:${n/mechTotal*100}%;background:${MECH[m][1]}" title="${esc(MECH[m][0])}: ${n}"></i>`).join("")}</div>
       <div class="legend">${Object.entries(c.mechanisms).map(([m,n])=>`<span><i style="background:${MECH[m][1]}"></i>${esc(MECH[m][0])} · ${n}${p&&p.mechanisms[m]!=null?` <span class="ref">(was ${p.mechanisms[m]})</span>`:p?` <span class="ref">(new)</span>`:""}</span>`).join("")}</div>
       <p class="note"><a href="#failures" id="to-causes">See these grouped into causes, with the release call →</a></p>`:`<p class="note">No failing runs.</p>`}</div>
     <div id="agent-matrix"></div>
-  </div>
-  <div class="two"><div class="panel"><h2>Efficiency</h2><p class="sub">Average per run. Getting to the same answer by a different path isn't a regression; getting there with twice the steps might be.</p>
+    <div class="two"><div><h3>Efficiency</h3><p class="sub">Average per run. Getting to the same answer by a different path isn't a regression; getting there with twice the steps might be.</p>
       <table style="margin-top:8px"><tr><th>Measure</th><th class="num">Before</th><th class="num">Now</th><th class="num">Change</th></tr>
       ${effRows.map(([l,k,d,lower])=>`<tr><td>${l}</td><td class="num">${fmtE(k,pe[k],d)}</td><td class="num">${fmtE(k,ef[k],d)}</td><td class="num">${p?delta(ef[k],pe[k],{pp:["recovery_rate","precision","recall"].includes(k),lowerBetter:lower}):""}</td></tr>`).join("")}</table></div>
-    <div class="panel"><h2>Runs that got longer</h2><p class="sub">Cases whose median steps grew by half or more (and by 2+).</p>
+    <div><h3>Runs that got longer</h3><p class="sub">Cases whose median steps grew by half or more (and by 2+).</p>
       ${s.costlier.length?`<table style="margin-top:8px"><tr><th>Case</th><th class="num">Steps before</th><th class="num">Now</th><th class="num">Cost now</th></tr>${s.costlier.slice(0,15).map(r=>`<tr><td class="mono">${esc(r.case_id)}</td><td class="num">${r.steps_before}</td><td class="num">${r.steps_now}</td><td class="num">${money(r.cost_now)}</td></tr>`).join("")}</table>`:`<p class="note">None.</p>`}</div></div>
-  <div class="panel"><div class="panel-head"><div><h2>Trajectories</h2><p class="sub">${list.length} shown. Open one to see it step by step against its reference.</p></div>
-    <label class="picker"><input type="checkbox" id="agent-bad" ${onlyBad?"checked":""}> failing only</label></div>
-    <div class="scroll"><table><tr><th>Case</th><th>Attempt</th><th>Task</th>${Object.keys(CHECK_LABEL).map(k=>`<th>${CHECK_LABEL[k]}</th>`).join("")}<th class="num">Steps</th><th class="num">Cost</th></tr>
-    ${list.slice(0,200).map(t=>`<tr class="click" data-traj="${esc(t.trajectory_id)}"><td class="mono">${esc(t.case_id||t.trajectory_id)}</td><td class="num">${t.attempt??""}</td><td class="ref">${esc(t.task||"")}${(t.failing_recorded||[]).length?`<div class="ref" style="color:var(--bad)">${esc(t.failing_recorded.join(", "))}</div>`:""}</td>
-      ${Object.keys(CHECK_LABEL).map(k=>`<td>${t.checks[k]==null?"":`<span class="okx ${t.checks[k]==="pass"?"y":"n"}">${t.checks[k]==="pass"?"✓":"✗"}</span>`}</td>`).join("")}
-      <td class="num">${t.steps}</td><td class="num">${money(t.cost_usd)}</td></tr>`).join("")}</table></div></div>`;
+    <div><div class="panel-head"><h3>Every run</h3><label class="picker"><input type="checkbox" id="agent-bad"> failing only</label></div>
+      <div id="agent-list"></div></div>
+    </div>
+  </details>`;
   $("#agent-run").onchange=e=>{store.set("assay-agent-run",e.target.value);renderAgents()};
-  agentMatrix($("#agent-matrix"),run,s.baseline||undefined);
-  $("#agent-bad").onchange=e=>{store.set("assay-agent-bad",e.target.checked?"1":"0");renderAgents()};
+  wire();
   $("#agent-eval").onclick=async e=>{const b=e.target;b.disabled=true;b.textContent="Evaluating…";
     try{await api(`/v1/agents/runs/${encodeURIComponent(run)}/evaluate?${q({source:src()})}`,{method:"POST"});renderAgents()}catch(err){b.textContent=err.message}};
   const tc=$("#to-causes");if(tc)tc.onclick=()=>store.set("assay-fail-scope",run);
-  box.querySelectorAll("[data-traj]").forEach(r=>r.onclick=()=>{location.hash="trace/"+encodeURIComponent(r.dataset.traj)});
+  // Every run, PAGE at a time.
+  let page=0;const bad=$("#agent-bad");bad.checked=store.get("assay-agent-bad")==="1";
+  const drawList=()=>{const list=bad.checked?failing:all,pages=Math.max(1,Math.ceil(list.length/PAGE));page=Math.min(page,pages-1);
+    $("#agent-list").innerHTML=`<div class="scroll"><table><tr><th>Case</th><th>Attempt</th><th>Task</th>${cols.map(k=>`<th>${CHECK_LABEL[k]}</th>`).join("")}<th class="num">Steps</th><th class="num">Cost</th></tr>
+      ${list.slice(page*PAGE,(page+1)*PAGE).map(trajRow).join("")}</table></div>
+      ${pages>1?`<p class="note"><button type="button" id="agent-prev" ${page?"":"disabled"}>Previous</button> ${page*PAGE+1}–${Math.min(list.length,(page+1)*PAGE)} of ${list.length} <button type="button" id="agent-next" ${page<pages-1?"":"disabled"}>Next</button></p>`:""}`;
+    const pv=$("#agent-prev"),nx=$("#agent-next");if(pv)pv.onclick=()=>{page--;drawList()};if(nx)nx.onclick=()=>{page++;drawList()};
+    $("#agent-list").querySelectorAll("[data-traj]").forEach(r=>r.onclick=()=>{location.hash="trace/"+encodeURIComponent(r.dataset.traj)})};
+  bad.onchange=()=>{store.set("assay-agent-bad",bad.checked?"1":"0");page=0;drawList()};
+  // Details is drawn when it's opened: the transition matrix is a request of its own.
+  const det=$("#agent-details");let drawn=false;
+  const openDetails=()=>{if(drawn)return;drawn=true;drawList();agentMatrix($("#agent-matrix"),run,s.baseline||undefined)};
+  det.ontoggle=()=>{store.set("assay-agent-details",det.open?"1":"0");if(det.open)openDetails()};
+  if(store.get("assay-agent-details")==="1"){det.open=true;openDetails()}
+  trendChart($("#agent-trend"));
 }
 // One trajectory, step by step, against its reference.
 function renderTrajectory(t){

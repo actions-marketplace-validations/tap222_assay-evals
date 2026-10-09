@@ -302,7 +302,7 @@ Got worse:
   gen_sql → exec_sql: 3 (+2), Tool error, not recovered 3; e.g. a, b, c
 ```
 
-It's in the Agents tab under the run, and at `GET /v1/agents/matrix?source=…&run=…&baseline=…`.
+It's in the Agents tab, under **Details** for the run, and at `GET /v1/agents/matrix?source=…&run=…&baseline=…`.
 Without `run`, it's built from the first failures people marked in the Review tab.
 
 ### Simulated users: the whole conversation, not one message
