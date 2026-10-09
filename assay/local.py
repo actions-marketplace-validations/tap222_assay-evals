@@ -47,7 +47,7 @@ HOME = ".assay"
 TENANT = "local"
 EXAMPLE = "tests/ai/test_support.py"
 CHECK_NAMES = {"plan_quality": "Plan quality", "consistency": "Consistency", "completed": "Finished", "answer": "Answer", "tool_calls": "Tool usage", "end_state": "End state",
-               "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts",
+               "safety": "Safety", "pii": "PII", "efficiency": "Efficiency", "pytest": "Your asserts", "test": "Your asserts",
                "plan": "Plan adherence", "injection": "Prompt injection", "max_fragments": "Fragments per query",
                "max_retrieved_tokens": "Retrieved tokens per query", "max_context_tokens": "Prompt size",
                "faithfulness": "Faithfulness", "context_relevance": "Context relevance",
@@ -2380,8 +2380,8 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
                   file=sys.stderr)
     codes = run_command(command, events, run_id, repeat, timeout, failed, cfg.get("prices"))
     if not events.exists():
-        print(f"\n`{command}` recorded nothing. Does it call assay.init() and record runs with "
-              "assay.run(..., test=\"<case>\")?", file=sys.stderr)
+        print(f"\n`{command}` recorded nothing. Does it record its cases: with the assay_case fixture or "
+              "assay.run(..., test=\"<case>\") in Python, assayCase() in JavaScript?", file=sys.stderr)
         return 2
     why = f"the command timed out after {timeout:g}s" if TIMED_OUT in codes else None
     code, text = finish(root, cfg, run_id, repeat, codes, baseline, junit, why, subset=failed)

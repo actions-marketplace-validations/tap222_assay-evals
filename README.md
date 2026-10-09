@@ -241,6 +241,8 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
   database, a few lines of code, or a proposed test per model call. See [Setup](docs/setup.md).
 - **Any model provider.**
 - **Python SDK.** See [sdk/python](sdk/python/README.md).
+- **JavaScript and TypeScript.** `assayCase()` in a Jest or Vitest test records the run, and
+  `assay test` checks and compares it like a pytest one. See [sdk/js](sdk/js/README.md).
 
 ## Demo
 
