@@ -14,6 +14,9 @@ npm install --save-dev assay-evals
 pip install assay-server          # or: pipx install assay-server (the `assay` command)
 ```
 
+`assay init` in a project with a `package.json` writes `assay.toml` and an example test for the
+runner it finds (Vitest, Jest, or Node's own `node:test`), in TypeScript when the project uses it.
+
 ## A test
 
 ```ts
@@ -45,6 +48,44 @@ test("refunds a delivered order", () =>
 
 `assayCase` names the case after the current test (`<file>::<test name>`), checks the run's
 expectations, records whether the test passed, and fails the test when an expectation fails.
+With `node:test`, or Vitest without `globals: true`, pass the test's context so it can name the case:
+
+```ts
+test("refunds a delivered order", (t) => assayCase(t, async (run) => { /* ... */ }));
+```
+
+## Record model calls without a line per call
+
+Instrument the client once, and every call made inside an `assayCase` is recorded on its run: the
+model, tokens (and cached and reasoning tokens), cost, text, the tool definitions it was offered,
+the tool calls it asked for, and why it stopped.
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";      // or OpenAI: new OpenAI()
+import { assayCase, instrument } from "assay-evals";
+
+const client = instrument(new Anthropic());     // the app's own client: outside a case, nothing is recorded
+
+test("answers from the clinic info", () =>
+  assayCase(async (run) => {
+    run.expect().maxSteps(4).mustAnswer("500");
+    const reply = await receptionist(client, "How much is a consultation?");
+    run.answer(reply);
+  }));
+```
+
+`instrument()` covers Anthropic's `messages.create` (and `beta.messages.create`) and OpenAI's
+`chat.completions.create` and `responses.create`. For the Vercel AI SDK, wrap the model:
+
+```ts
+import { wrapLanguageModel } from "ai";
+import { assayMiddleware } from "assay-evals";
+
+const model = wrapLanguageModel({ model: openai("gpt-x"), middleware: assayMiddleware() });
+```
+
+Streamed calls aren't recorded: the caller reads the stream, so there's nothing whole to record.
+Costs come from the response's tokens and `[prices]` in `assay.toml`, which `assay test` passes on.
 
 ## Run it
 
@@ -70,12 +111,14 @@ nothing recorded: events are written only to `ASSAY_PATH`, which `assay test` se
 | | |
 |---|---|
 | `assayCase([name], fn)` | One test as an Assay case; `fn(run)` records it |
+| `instrument(client)`, `assayMiddleware()` | Record an Anthropic or OpenAI client's calls, or a Vercel AI SDK model's |
 | `run.call(name, fn, args)` | Calls `fn(args)`, records it as a tool call (result or error), returns the result |
 | `run.tool(name, args, result, { error })` | A tool call already made |
+| `run.approval(action, decision, { by })` | A decision to allow an action (`requires_approval` contracts check it) |
 | `run.llm({ model, tokensIn, tokensOut, costUsd, prompt, text, finishReason, tools })` | A model call. `tools`: names, or the definitions you gave the model (Anthropic, OpenAI, or an MCP `tools/list`), so a changed description or schema shows in `assay diff` |
 | `run.answer(text)`, `run.outcome("resolved")` | The reply, and whether it resolved the request |
 | `run.check(field, passed, reason)` | A check of your own |
-| `run.expect()` | `.mustCall(t)`, `.mustNotCall(t)`, `.mustCallBefore(a, b)`, `.maxSteps(n)`, `.mustAnswer(text)` |
+| `run.expect()` | `.mustCall(t)`, `.mustNotCall(t)`, `.mustCallBefore(a, b)`, `.mustGetApprovalBefore(action)`, `.maxSteps(n)` (every step, the answer too), `.mustAnswer(text)` |
 | `prompt(id, version, template)` | Registers a prompt version; returns `"id@version"` for `run.llm` |
 | `run.steps` | What was recorded, for your own asserts |
 

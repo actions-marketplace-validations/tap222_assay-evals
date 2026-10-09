@@ -33,6 +33,12 @@ export interface LlmCall {
    * input_schema, OpenAI's function.parameters, or an MCP tools/list entry's inputSchema). With
    * definitions, a changed description or schema shows in `assay diff`. */
   tools?: Array<string | ToolDefinition>;
+  /** The tool calls the model asked for. */
+  toolCalls?: Array<{ name: string; arguments: Record<string, unknown>; id?: string }>;
+  tokensCached?: number;
+  tokensReasoning?: number;
+  /** When the call started (defaults to when it's recorded). */
+  started?: Date;
   error?: string;
 }
 
@@ -49,6 +55,8 @@ export class Expectations {
   mustCall(tool: string): this;
   mustNotCall(tool: string): this;
   mustCallBefore(first: string, then: string): this;
+  /** An approved run.approval(action) comes before the first call to `action`. */
+  mustGetApprovalBefore(action: string): this;
   maxSteps(n: number): this;
   mustAnswer(containing?: string): this;
   /** Records each rule as a check of the run; returns what failed. assayCase calls it. */
@@ -69,6 +77,8 @@ export class Run {
   call<A extends Record<string, unknown>, T>(name: string, fn: (args: A) => T | Promise<T>, args?: A): Promise<T>;
   /** A model call. */
   llm(call?: LlmCall): void;
+  /** A decision to allow an action; contracts (requires_approval) and mustGetApprovalBefore() check it. */
+  approval(action: string, decision?: "approved" | "rejected" | "pending", options?: { by?: string; reason?: string }): void;
   answer(text: string): void;
   outcome(value: "resolved" | "unresolved" | "escalated"): void;
   /** A check of the run's own: a domain rule, or a test's assert. */
@@ -85,6 +95,10 @@ export class Run {
 export function assayCase<T>(name: string, fn: (run: Run) => T | Promise<T>,
                              options?: { tags?: Record<string, Scalar> }): Promise<T>;
 export function assayCase<T>(fn: (run: Run) => T | Promise<T>): Promise<T>;
+/** The test's context names the case, with node:test or Vitest without globals:
+ * test("refund", (t) => assayCase(t, async (run) => ...)). */
+export function assayCase<T>(context: { name?: string; fullName?: string; expect?: unknown }, fn: (run: Run) => T | Promise<T>,
+                             options?: { tags?: Record<string, Scalar> }): Promise<T>;
 
 /** A run outside a test case, e.g. recorded by the app itself. */
 export function startRun(task: string, options?: { caseId?: string; tags?: Record<string, Scalar>; kind?: "agent" }): Run;
@@ -97,3 +111,18 @@ export function caseIdOf(fullId: string): string;
 
 /** {name: input schema} from tool definitions, each with its description under "x-assay-description". */
 export function toolSchemas(tools?: Array<string | ToolDefinition>): Record<string, Record<string, unknown>>;
+
+/**
+ * Records the model calls an Anthropic or OpenAI client makes (messages.create, chat.completions.create,
+ * responses.create) on the current assayCase's run. Returns the same client. Outside a case, and
+ * for streams, nothing is recorded.
+ */
+export function instrument<T>(client: T): T;
+
+/** Vercel AI SDK middleware: wrapLanguageModel({ model, middleware: assayMiddleware() }). */
+export function assayMiddleware(): {
+  wrapGenerate: (options: { doGenerate: () => Promise<any>; params: any; model: any }) => Promise<any>;
+};
+
+/** The run of the assayCase() the calling code runs inside, or undefined. */
+export function currentRun(): Run | undefined;

@@ -1,0 +1,2 @@
+[test]
+command = "node --test tests/*.test.js"

@@ -70,7 +70,8 @@ git clone https://github.com/tap222/assay-evals && cd assay-evals/examples/promp
 ./demo.sh
 ```
 
-See [examples/prompt-regression](examples/prompt-regression) for what it shows.
+See [examples/prompt-regression](examples/prompt-regression) for what it shows. The same demo in
+JavaScript: [examples/prompt-regression-js](examples/prompt-regression-js) (`./demo.sh` there).
 
 ## Quickstart
 
@@ -97,21 +98,26 @@ def test_refund(assay_case):
     assert "27.61" in reply
 ```
 
-In TypeScript or JavaScript, a Jest or Vitest test wraps its body in `assayCase()`
-([sdk/js](sdk/js/README.md)), and `assay test` runs the command in `assay.toml`:
+In TypeScript or JavaScript, a Jest, Vitest or `node:test` test wraps its body in `assayCase()`
+([sdk/js](sdk/js/README.md)), and `assay test` runs the command in `assay.toml`. In a project with a
+`package.json`, `assay init` writes both for the test runner it finds:
 
 ```bash
 npm install --save-dev assay-evals
 pip install assay-server   # the `assay` command
+assay init                 # assay.toml and test/ai/support.assay.test.ts (or .js), for Vitest, Jest or node:test
 ```
 
 ```ts
-import { assayCase } from "assay-evals";
+import Anthropic from "@anthropic-ai/sdk";
+import { assayCase, instrument } from "assay-evals";
+
+const client = instrument(new Anthropic());   // every model call in a case is recorded (OpenAI, Vercel AI SDK too)
 
 test("refunds a delivered order", () =>
   assayCase(async (run) => {
     run.expect().mustCall("get_order").mustNotCall("delete_order").maxSteps(6);
-    const reply = await myAgent("Refund O-17", run);
+    const reply = await myAgent(client, "Refund O-17", run);
     expect(reply).toContain("27.61");
   }));
 ```
@@ -287,6 +293,8 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
 - **Python SDK.** See [sdk/python](sdk/python/README.md).
 - **JavaScript and TypeScript.** `assayCase()` in a Jest or Vitest test records the run, and
   `assay test` checks and compares it like a pytest one. See [sdk/js](sdk/js/README.md).
+- **Any other language.** `assay test` runs any command and reads the events it writes: a recorder
+  is a few dozen lines. See [Any language](docs/any-language.md).
 
 ## Demo
 
@@ -341,9 +349,10 @@ Run `assay --help` for every command and option.
 | [Getting started](docs/getting-started.md) | Add Assay to your app in four steps: install, two lines in your app, one test, run |
 | [Testing](docs/testing.md) | `pytest --assay`, the `assay_case` fixture, assertions, baselines, flakiness |
 | [TypeScript and JavaScript](sdk/js/README.md) | `assayCase()` in Jest or Vitest, `run.expect()`, `assay test` |
+| [Any language](docs/any-language.md) | Go, Java, Ruby, Rust: a small recorder and `assay test` |
 | [Behavior diff](docs/diff.md) | What changed between two versions, with a severity |
 | [Repeated attempts](docs/repeats.md) | Chance, too few attempts, or a regression |
-| [CI](docs/ci.md) | The GitHub Action, PR comments, reruns, timeouts |
+| [CI](docs/ci.md) | The GitHub Action, GitLab and any other CI, PR comments, reruns, timeouts |
 | [Security](docs/security.md) | What the checks catch, and what a PR can't do to the evaluation |
 | [Agents](docs/agents.md) | Trajectories, plan adherence, the LLM judge, conversations, MCP |
 | [Document extraction](docs/documents.md) | Every document metric and gate |
