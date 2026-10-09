@@ -674,6 +674,13 @@ def eval_runs(engine: Engine, tenant: str) -> List[dict]:
     t = store.eval_results
     with engine.connect() as conn:
         rows = conn.execute(select(t.c.run_id, t.c.status, t.c.ts, t.c.lineage).where(t.c.tenant == tenant)).all()
+        r = store.runs
+        origins = {}
+        for row in conn.execute(select(r.c.test_run, r.c.tags).where(and_(r.c.tenant == tenant,
+                                                                         r.c.test_run.is_not(None)))):
+            tags = row.tags or {}
+            if row.test_run not in origins and (tags.get("repo") or tags.get("folder")):
+                origins[row.test_run] = {k: tags[k] for k in ("repo", "folder") if tags.get(k)}
     runs = defaultdict(lambda: {"results": 0, "pass": 0, "fail": 0, "error": 0, "start": None, "end": None,
                                 "lineage": Counter()})
     for r in rows:
@@ -691,7 +698,7 @@ def eval_runs(engine: Engine, tenant: str) -> List[dict]:
             lineage.setdefault(k, v)
         out.append({"run_id": run_id, "results": x["results"], "passed": x["pass"], "failed": x["fail"],
                     "errored": x["error"], "start": x["start"].isoformat(), "end": x["end"].isoformat(),
-                    "lineage": lineage})
+                    "lineage": lineage, "origin": origins.get(run_id)})
     return sorted(out, key=lambda r: r["start"], reverse=True)
 
 

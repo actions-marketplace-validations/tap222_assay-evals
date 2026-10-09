@@ -168,6 +168,11 @@ repository's name from its git remote (`ASSAY_PROJECT` overrides it). **All proj
 each repository's latest run against the one before it, with what regressed first. A repository
 needs Assay tests to show up; in one without them, Claude offers to set them up.
 
+Each run also records where it came from: the repository's git remote (with any credentials
+removed) and its folder, with your home folder as `~`. The dashboard shows them under **Latest
+test run** and in **All projects**, so a project name can always be traced back to its
+repository.
+
 If the server isn't running, the tests still run and their result stands; the run is kept in
 `.assay/` and the output says so. Send it once the server is up with `assay upload`.
 

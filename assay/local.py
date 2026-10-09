@@ -931,7 +931,8 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     skip = {(c["case_id"], c["field"] or "", c["evaluator"] or "") for c in not_judged}
     # Listed apart, and out of every count: judged on the wrong data, or not judged at all.
     rows = [r for r in rows if r.result_id not in found and flaky.check_key(r) not in skip]
-    base_rows = [r for r in base_rows if r.result_id not in audit.audit_rows(engine, tenant, base_rows)]
+    base_found = audit.audit_rows(engine, tenant, base_rows)  # once: per row, it was n² on a big run
+    base_rows = [r for r in base_rows if r.result_id not in base_found]
     out = {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
            "attempts": attempts(rows), "base_attempts": attempts(base_rows),
            "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg, tenant),
@@ -3060,6 +3061,10 @@ def upload(root: Path, run_id: Optional[str], url: Optional[str], key: Optional[
         print(f"No recording for run {run_id} in {home / 'runs'}.", file=sys.stderr)
         return 2
     events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    where = run_origin(root)
+    for e in events:  # so the dashboard can say which repository and folder a run came from
+        if e.get("type") == "run.start" and e.get("test"):
+            e["tags"] = {**(e.get("tags") or {}), **where}
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
         if not tenant:  # a platform key or an open server: each project gets its own source
@@ -3100,6 +3105,21 @@ def project_name(root: Path) -> str:
         name = re.sub(r"\.git$", "", re.split(r"[/:]", remote)[-1]) if remote else ""
     name = name or root.resolve().name
     return re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")[:48] or "default"
+
+
+def run_origin(root: Path) -> dict:
+    """Where a run came from, as run tags: the git remote (without any credentials in it) and the
+    folder, with the home folder as ~."""
+    out = {}
+    remote = (_git(root, "remote", "get-url", "origin") or "").strip()
+    if remote:
+        out["repo"] = re.sub(r"^(\w+://)[^/@]+@", r"\1", remote)[:200]  # https://user:token@host → https://host
+    folder = str(root.resolve())
+    home = str(Path.home())
+    if folder == home or folder.startswith(home + os.sep):
+        folder = "~" + folder[len(home):]
+    out["folder"] = folder[-200:]
+    return out
 
 
 def upload_wanted(flag: bool, url: Optional[str] = None) -> bool:
