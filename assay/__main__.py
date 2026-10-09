@@ -75,6 +75,9 @@ def main(argv=None) -> int:
                    help="Also add a Claude Code skill: Claude runs these tests after it changes a prompt or the agent")
     i.add_argument("--global", dest="global_", action="store_true",
                    help="With --claude-code: install the skill for every project (~/.claude), and nothing here")
+    i.add_argument("--lang", choices=["python", "ts", "js"],
+                   help="The example's language (default: a package.json and no Python packaging means JavaScript, "
+                        "TypeScript when the project uses it)")
     t = sub.add_parser("test", help="Run your tests with the SDK recording, check every run, compare with the "
                                     "last run that passed")
     t.add_argument("--repeat", type=int, metavar="N", help="Attempts per case (overrides assay.toml)")
@@ -346,11 +349,20 @@ def main(argv=None) -> int:
                   "dashboard, filed by repository, set ASSAY_URL and ASSAY_UPLOAD=1 (in ~/.claude/settings.json "
                   "under \"env\").")
             return 0
-        made = local.init(root, args.claude_code)
+        made = local.init(root, args.claude_code, args.lang)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
+        js = local.js_project(root, args.lang)
         if local.CLAUDE_SKILL in made:
-            print("Claude Code now runs `pytest --assay` after changing a prompt or the agent, and never accepts "
-                  "a new baseline on its own. Commit .claude/skills/assay so your team gets it too.")
+            print(f"Claude Code now runs {'`assay test`' if js else '`pytest --assay`'} after changing a prompt or the "
+                  "agent, and never accepts a new baseline on its own. Commit .claude/skills/assay so your team gets "
+                  "it too.")
+        if js:
+            runner = {"vitest": "Vitest", "jest": "Jest", "node": "Node's test runner"}[js["runner"]]
+            print(f"The example runs with {runner} ({js['command']}); change [test] command in {local.CONFIG} "
+                  "if your tests live elsewhere.")
+            print("Next: " + ("" if js["installed"] else "`npm install --save-dev assay-evals`, then ") + "`assay test`. "
+                  "Then add your own tests next to the example.")
+            return 0
         try:
             import pytest  # noqa: F401
             print("Next: `pytest --assay tests/ai`. Then add your own tests next to the example.")

@@ -1,0 +1,11 @@
+{
+  "name": "assay-demo-prompt-regression",
+  "private": true,
+  "description": "Catch a prompt regression with Assay, in JavaScript, with no API key",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "assay-evals": "file:../../sdk/js"
+  }
+}
