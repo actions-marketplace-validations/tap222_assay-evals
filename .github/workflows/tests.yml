@@ -31,3 +31,15 @@ jobs:
         run: pip install -e sdk/python -e ".[dev]"
       - name: Test
         run: pytest -q
+
+  js:
+    # The JavaScript SDK (sdk/js): no dependencies, so nothing to install.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+      - name: Test
+        working-directory: sdk/js
+        run: npm test
