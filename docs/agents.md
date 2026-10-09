@@ -265,6 +265,23 @@ raises `TimeoutError`, `error:N` fails the first N calls and then calls it for r
 the answer doesn't claim success, no tool is retried more than `max_retries` times, and the user is
 told (or the run escalated, or a retry worked).
 
+**The world changing while the agent works.** An approval checked when the agent plans can be stale
+by the time it acts. `{"returns": [a, b, ...]}` gives a tool one value per call, the last one from
+then on, and `assay.REAL` in the list calls the tool for real. The invoice stays approved, and the
+supplier, in another system, goes on hold between the agent reading it and paying:
+
+```python
+with assay.faults(get_supplier={"returns": [assay.REAL, {"status": "on_hold"}]}):
+    reply = my_agent("Pay invoice 17", run=assay_case)
+assert_not_called(assay_case, "pay")   # it read the supplier again before paying, and stopped
+```
+
+An agent that pays on what it read when it planned fails: only a fresh read just before the write
+sees the hold. Each tool gets its own
+list, so several sources can change in the same run, and a related record can change while the
+approved one stays the same. The substituted call is recorded as `fault="return"`, so
+`handles_failure()` also checks the agent told the user it didn't go ahead.
+
 **Where failures cluster: the transition failure matrix.** Rows are the last step that went right,
 columns the first that failed: the goal checkpoints when a case has them, else the last tool call
 that worked and the first bad step credit assignment found.

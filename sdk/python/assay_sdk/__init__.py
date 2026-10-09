@@ -644,4 +644,4 @@ from assay_sdk.faithfulness import faithfulness  # noqa: E402
 from assay_sdk.simulate import Persona, Simulation, load_personas, simulate  # noqa: E402
 from assay_sdk.golden import golden_examples  # noqa: E402
 # Breaking tools on purpose, to test error handling (assay_sdk/faults.py).
-from assay_sdk.faults import ToolFault, faults  # noqa: E402
+from assay_sdk.faults import REAL, ToolFault, faults  # noqa: E402
