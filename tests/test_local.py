@@ -585,6 +585,37 @@ def test_pytest_assay_upload_sends_to_assay_url(project, monkeypatch):
     assert "Where to?" not in out and "127.0.0.1:9" in out
 
 
+
+def test_plain_pytest_sends_nothing_though_assay_url_is_set(project, monkeypatch):
+    """ASSAY_URL is there for --assay (set once for every project): pytest without it records
+    locally, as with no server, instead of sending each test to the server as it runs."""
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):
+            pass
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    init_pytest_example(project)
+    for k in ("ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("ASSAY_URL", f"http://127.0.0.1:{server.server_port}")
+    out = subprocess.run([*PYTEST.split(), "tests/ai"], capture_output=True, text=True, cwd=project)
+    server.shutdown()
+    assert out.returncode == 0, out.stdout
+    assert hits == []
+    events = (project / ".assay" / "events.jsonl").read_text().splitlines()
+    assert any(json.loads(e)["type"] == "run.start" for e in events)
+
 def test_init_adds_the_claude_code_skill_when_asked(project, capsys):
     skill = project / local.CLAUDE_SKILL
     assert main(["init"]) == 0 and not skill.exists()  # only when asked
