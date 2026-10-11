@@ -325,7 +325,8 @@ at a time) is under **Details**, and loads when you open it.
 
 | Command | What it does |
 |---|---|
-| `assay init` | Set up local testing: `assay.toml` and a runnable example (`--claude-code` adds a Claude Code skill) |
+| `assay init` | Set up local testing: `assay.toml` and a runnable example (`--claude-code` adds a Claude Code skill, `--hook` a pre-push hook that checks every push) |
+| `assay doctor` | Check the setup and print the fix for each problem: versions, hook, base branch, dependencies, dashboard |
 | `assay test` | Run your tests with recording, check every run, and compare with the baseline (`--repeat N`, `--junit`, `--failed`, `--base main` to also check for weakened tests) |
 | `assay diff` | What behavior changed between two runs |
 | `assay accept` | Make the latest run the baseline |

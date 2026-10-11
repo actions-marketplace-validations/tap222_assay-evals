@@ -241,3 +241,20 @@ def test_a_pr_that_weakens_a_test_fails_until_a_maintainer_accepts_it(repo):
     # Outside a pull request it's said, not failed.
     local = run()
     assert local.returncode == 0 and "Weakened against main: loosens an assertion in test_status" in local.stdout
+
+
+def test_with_no_assay_tests_a_pr_is_still_checked_for_weakened_tests(repo, monkeypatch, capsys):
+    monkeypatch.syspath_prepend(SDK)
+    for k in ("ASSAY_POLICY_CHANGE", "GITHUB_STEP_SUMMARY"):
+        monkeypatch.delenv(k, raising=False)
+    (repo / "test_api.py").write_text("def test_ok():\n    assert status()\n", encoding="utf-8")
+    assert main(["test", "--", sys.executable, "-c", "pass"]) == 2  # nothing ran, nothing to compare with
+    assert main(["test", "--base", "main", "--", sys.executable, "-c", "pass"]) == 1
+    out = capsys.readouterr().out
+    assert "1 assertion change weakens the tests:" in out
+    md = (repo / ".assay" / "summary.md").read_text(encoding="utf-8")
+    assert "## Checks weakened: this PR loosens the tests that judge it" in md
+    assert "- loosens: loosens an assertion in test\\_ok (test\\_api.py:2)" in md
+    monkeypatch.setenv("ASSAY_POLICY_CHANGE", "accepted")
+    assert main(["test", "--base", "main", "--", sys.executable, "-c", "pass"]) == 0
+    assert "## Tests weakened, and accepted" in (repo / ".assay" / "summary.md").read_text(encoding="utf-8")

@@ -2530,8 +2530,9 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
          send: Optional[dict] = None, junit: Optional[str] = None, timeout: Optional[float] = None,
          failed: bool = False, judge: bool = False) -> int:
     """`assay test`. Prints the report; returns the exit code."""
-    try:
-        cfg = load_config(root)
+    try:  # no assay.toml: the defaults, still held to a pull request's trusted policy
+        cfg = load_config(root) if (root / CONFIG).exists() else with_trusted_policy(
+            __import__("copy").deepcopy(DEFAULT_CONFIG))
     except SetupError as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -2541,10 +2542,24 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     if problem:
         print(problem, file=sys.stderr)
         return 2
+    from assay import workspace
     command = command or cfg["command"]
+    if not command and not (root / CONFIG).exists():  # no assay.toml: run what the project's runner would
+        command = workspace.detected_command(root)
+        if command:
+            print(f"No {CONFIG} here: running `{command}`. `assay init` writes one to change it.", file=sys.stderr)
     if not command:
-        print(f"Give a command to run: set command under [test] in {CONFIG}, or `assay test -- <command>`.",
+        print(f"No {CONFIG} here, and no test runner found. Run `assay init` first, or `assay test -- <command>`."
+              if not (root / CONFIG).exists() else
+              f"Give a command to run: set command under [test] in {CONFIG}, or `assay test -- <command>`.",
               file=sys.stderr)
+        return 2
+    # npx with the runner missing would download another version of it: a worktree with nothing installed
+    # uses the main checkout's dependencies instead, or says what to install.
+    ready, note = workspace.dependencies(root) if command.lstrip().startswith("npx ") else (True, None)
+    if note:
+        print(note, file=sys.stderr)
+    if not ready:
         return 2
     repeat = repeat or cfg["repeat"]
     home = ensure_home(root)
@@ -2568,7 +2583,40 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     if not events.exists():
         print(f"\n`{command}` recorded nothing. Does it record its cases: with the assay_case fixture or "
               "assay.run(..., test=\"<case>\") in Python, assayCase() in JavaScript?", file=sys.stderr)
+        return guard_only(root, home)
+    return _finish_test(root, cfg, run_id, repeat, codes, baseline, junit, timeout, failed, command, send)
+
+
+def guard_only(root: Path, home: Path) -> int:
+    """No Assay test ran. With a base branch to compare with (a pull request), the tests are still
+    checked for weakened assertions, and that's the result: 0, or 1 when one was weakened (unless the
+    policy label accepts it). With none, 2: nothing was checked."""
+    from assay import weakening
+    ref = weakening.base_ref(root)
+    if not ref:
         return 2
+    code, text = weakening.guard(root, ref)
+    accepted = code == 1 and os.environ.get(POLICY_ACCEPT_ENV) == "accepted"
+    found = weakening.scan(root, ref)
+    print("\n" + text + ("\nThe change is accepted (assay-policy-change)." if accepted else ""))
+    head = ("Checks weakened: this PR loosens the tests that judge it" if code == 1 and not accepted
+            else "Tests weakened, and accepted" if accepted else "No test weakened")
+    md = [MARKER, f"## {head}", "", "No Assay tests ran here, so the tests' assertions were checked against the "
+          f"base branch ({_md(ref)}).", ""]
+    for f in found:
+        verb = "changes" if f["kind"] == "rewritten" else "loosens"
+        md.append(f"- {verb}: {_md(weakening.describe(f))}")
+    if code == 1 and not accepted:
+        md += ["", "Fix the test, or add the `assay-policy-change` label to accept the change."]
+    out = "\n".join(md).rstrip() + "\n"
+    (home / "summary.md").write_text(out, encoding="utf-8")
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+            fh.write(out + "\n")
+    return 0 if accepted else code
+
+
+def _finish_test(root, cfg, run_id, repeat, codes, baseline, junit, timeout, failed, command, send) -> int:
     why = f"the command timed out after {timeout:g}s" if TIMED_OUT in codes else None
     code, text = finish(root, cfg, run_id, repeat, codes, baseline, junit, why, subset=failed)
     print("\n" + text, file=sys.stderr if code == 2 else sys.stdout)
