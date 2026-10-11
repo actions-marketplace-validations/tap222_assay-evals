@@ -87,6 +87,24 @@ That's it. You're using Assay.
 | `assay diff` | Shows what changed, test by test. |
 | `assay accept` | The change was on purpose: save it as the new baseline. |
 
+## Check every push (optional)
+
+```bash
+assay init --hook
+```
+
+This installs a git pre-push hook, shared by every worktree of the repository. Before each push
+it checks that no test was weakened against the base branch (`assay guard`), runs your Assay
+tests, and stops the push on a weakened test or a regression. When a dashboard is running
+(`ASSAY_URL`, or `http://localhost:8400`), the run goes there too. `git push --no-verify` skips
+it once. An existing hook from another tool is left alone, with the line to add to it.
+
+It needs no `assay.toml`: without one, `assay test` runs your runner on files with "assay" in
+their name (`npx jest assay`, `npx vitest run assay`), or `pytest -q`. In a git worktree with
+nothing installed, it uses the main checkout's `node_modules` when the lockfile is the same, and
+otherwise installs from the lockfile (`npm ci`, or pnpm's or yarn's; `ASSAY_NO_INSTALL=1` to
+leave that to you). It never lets `npx` download a different test runner.
+
 ## Let Claude Code run it for you (optional)
 
 If you use Claude Code, add a skill that has Claude run these tests whenever it changes a prompt,
@@ -239,6 +257,7 @@ Running the server yourself: [Setup](setup.md#deploy).
 | `No module named 'myapp'` | Add `pythonpath = ["."]` to `pyproject.toml` (step 3). |
 | The first run fails | A failing run never becomes the baseline. Fix the test, or run `assay accept` to start from where you are. |
 | You want to start over | Delete the `.assay/` folder. |
+| Anything else | `assay doctor` checks the setup (an older `assay` earlier on your PATH, the hook, the base branch, dependencies, the dashboard) and prints the fix for each problem. |
 
 ## Want more?
 
