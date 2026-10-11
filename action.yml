@@ -63,6 +63,8 @@ runs:
         ACCEPTED: ${{ contains(github.event.pull_request.labels.*.name, inputs.policy-label) }}
       run: |
         git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF" >/dev/null 2>&1 || true
+        # The tests are compared with the base branch's too: assertions the PR removed or loosened.
+        if base=$(git rev-parse --verify --quiet FETCH_HEAD); then echo "ASSAY_BASE_REF=$base" >> "$GITHUB_ENV"; fi
         if git show "FETCH_HEAD:$CONFIG" > "$RUNNER_TEMP/assay.base.toml" 2>/dev/null; then
           echo "ASSAY_POLICY=$RUNNER_TEMP/assay.base.toml" >> "$GITHUB_ENV"
           # Its acknowledged failures too: one the PR adds is held back unless the label accepts it.

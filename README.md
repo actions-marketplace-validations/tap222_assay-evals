@@ -163,7 +163,7 @@ worse with a judge that disagrees with itself).
 | **Behavior diff** | What changed between two versions, with the flow before and after and a severity. | [Diff](docs/diff.md) |
 | **Real change or noise** | Run each case several times and Assay separates chance (8/8 → 7/8, passes) from too few attempts to tell (inconclusive) from a regression (8/8 → 0/8, fails), corrected for the number of checks. A result that couldn't be judged is kept apart, never scored as 0. | [Repeated attempts](docs/repeats.md) |
 | **The AI or the judge** | Ask the judge again about the same answer (`evaluate(..., rejudge=3)`). A case that varies because the judge splits on it is reported as judge unstable, not flaky: more attempts won't settle it, a steadier judge will. | [AI or judge](docs/repeats.md#is-it-the-ai-or-the-judge) |
-| **Checks can't be loosened** | A PR that removes a contract, raises a limit, or deletes, skips or filters out the test its change breaks fails the run until a maintainer accepts it with a label. | [Security](docs/security.md) |
+| **Checks can't be loosened** | A PR that removes a contract, raises a limit, deletes, skips or filters out the test its change breaks, or removes or loosens an assertion (`== 1200` to `> 0`, `toBe` to `toBeDefined`) fails the run until a maintainer accepts it with a label. `assay guard` checks any repository's pytest, Jest and Vitest tests this way, Assay tests or not. | [Security](docs/security.md) |
 | **Document extraction** | Field, line-item, table, OCR, splitting and confidence metrics, with per-field gates. See [below](#document-extraction). | [Documents](docs/documents.md) |
 | **Agents and workflows** | Trajectories, path and claim contracts, plan adherence, multi-turn conversations, simulated users, tools that fail or whose state changes mid-run (an approval that's stale by the time the agent acts), and [rewordings](docs/testing.md#rewordings-the-same-request-in-other-words): the same request in other words must get the same behavior. | [Agents](docs/agents.md) |
 | **Judges you can check** | Calibration against labels a person gave, bias probes, drift, whether a judge ranks answers or only recognizes the topic, and a trust label on every judged score. | [Calibration](docs/calibration.md) |
@@ -326,11 +326,12 @@ at a time) is under **Details**, and loads when you open it.
 | Command | What it does |
 |---|---|
 | `assay init` | Set up local testing: `assay.toml` and a runnable example (`--claude-code` adds a Claude Code skill) |
-| `assay test` | Run your tests with recording, check every run, and compare with the baseline (`--repeat N`, `--junit`, `--failed`) |
+| `assay test` | Run your tests with recording, check every run, and compare with the baseline (`--repeat N`, `--junit`, `--failed`, `--base main` to also check for weakened tests) |
 | `assay diff` | What behavior changed between two runs |
 | `assay accept` | Make the latest run the baseline |
 | `assay ack` | Acknowledge a failing check until it gets worse |
 | `assay pr-comment` | Post the latest run's summary on the pull request |
+| `assay guard` | Assertions a change removed or loosened, against the base branch (`--base main`); works on any pytest, Jest or Vitest suite |
 | `assay connect` | Attach Assay to an existing pipeline |
 | `assay synth` | Generate synthetic queries from dimensions you define |
 | `assay golden` | Manage the golden set a judge is calibrated against |
