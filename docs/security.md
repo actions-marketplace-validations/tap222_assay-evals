@@ -33,6 +33,21 @@ them, as with any test suite. What Assay adds:
   rerun of what failed (`--assay-rerun failed`) leaves the rest out on purpose and isn't counted.
   Outside a pull request it's one line, not a failure: running a subset is how you work on one
   file.
+- **A PR can't quietly weaken a test either.** A test can also be made to pass by checking less:
+  `assert total == 1200` becoming `assert total > 0`, `expect(total).toBe(1200)` becoming
+  `toBeDefined()`, `toHaveBeenCalledWith(...)` becoming `toHaveBeenCalled()`, a wider
+  `pytest.approx` or `toBeCloseTo` tolerance, or an assertion that's simply gone. Coding agents do
+  this when told to make the tests pass. Each test file the PR changed is compared with the base
+  branch's, test by test and assertion by assertion, and a weakened one counts as loosening the
+  checks: "loosens an assertion in test_total (tests/test_cart.py:12): assert total == 1200 →
+  assert total > 0, while cart.py changed". The same label accepts it. An exact check whose
+  expected value changed (`== 1200` to `== 1350`) is often the change you meant, so it's listed
+  to confirm, not failed. pytest and unittest files are read with Python's parser, Jest and
+  Vitest files by following `expect(...)` chains; reformatting, renaming a test or switching
+  between equivalent matchers isn't a change. The action compares with the base branch on its
+  own. Elsewhere, set `ASSAY_BASE_REF` (or `assay test --base main`); outside a pull request
+  it's a warning, not a failure. `assay guard --base main` runs the comparison alone, on any
+  pytest, Jest or Vitest suite, with or without Assay: exit code 1 when a test was weakened.
 - **Who did what.** With SSO, people sign in with the company's identity provider and get a role
   from their groups; every change, sign-in and refusal is in the audit log
   ([API and authentication](api.md#single-sign-on-people-and-roles)).
