@@ -339,6 +339,9 @@ function fmt(v,unit){
 }
 function ago(iso){if(!iso)return"";const s=(Date.now()-new Date(iso+"Z").getTime())/1000;
   if(s<90)return"just now";if(s<5400)return Math.round(s/60)+" min ago";if(s<129600)return Math.round(s/3600)+" h ago";return Math.round(s/86400)+" d ago"}
+// Local date and time, then how long ago: "Oct 9, 14:24 (2 d ago)".
+function at(iso){return iso?new Date(iso+"Z").toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}
+const when=iso=>iso?`${at(iso)} (${ago(iso)})`:"";
 function dur(a,b){const s=(new Date((b||new Date().toISOString().slice(0,19))+"Z")-new Date(a+"Z"))/1000;return s<3600?Math.round(s/60)+" min":s<172800?(s/3600).toFixed(1)+" h":(s/86400).toFixed(1)+" d"}
 const sliceName=(d,v)=>d?`${d.replace(/_/g," ")} = ${v}`:"overall";
 function direction(m,delta){if(m.higher_is_better==null||Math.abs(delta)<1e-12)return"flat";return (delta>0)===m.higher_is_better?"better":"worse"}
@@ -393,13 +396,21 @@ async function loadSources(){
   const pick=all.includes(keep)?keep:all.includes(DEMO_SOURCE)?DEMO_SOURCE:all[0];
   $("#source").innerHTML=all.length?all.map(x=>`<option ${x===pick?"selected":""}>${esc(x)}</option>`).join(""):`<option value="">No sources yet</option>`;
 }
+// The header's "Last run": the newer of the latest measure run and the latest test run.
+async function showLastRun(){
+  const s=src(),el=$("#updated");
+  const test=s?await api(`/v1/evals/runs?${q({source:s})}`).then(r=>r[0]&&r[0].start).catch(()=>null):null;
+  if(s!==src())return;
+  const iso=[test,S.overview&&S.overview.run.started_at].filter(Boolean).sort().pop();
+  el.textContent=iso?"Last run "+when(iso):s?"No runs yet":"";
+}
 async function refresh(){
   await loadViews();
-  if(!src()){buildNav();renderEmpty();return}
-  try{S.overview=await api(`/v1/overview?${q({source:src()})}`)}catch(e){S.overview=null;S.latest=null;buildNav();renderEmpty(e.message);return}
+  if(!src()){S.overview=null;showLastRun();buildNav();renderEmpty();return}
+  try{S.overview=await api(`/v1/overview?${q({source:src()})}`)}catch(e){S.overview=null;S.latest=null;showLastRun();buildNav();renderEmpty(e.message);return}
   try{S.latest=await api(`/v1/runs/latest?${q({source:src()})}`)}catch(e){S.latest=null}
   S.alertCount=S.overview.open_alerts.length;buildNav();
-  $("#updated").textContent="Last run "+ago(S.overview.run.started_at);
+  showLastRun();
   render();
 }
 function renderEmpty(msg){
@@ -499,12 +510,12 @@ pytest --assay tests</pre></div>`;return}
     const state=!k?`<span class="chip neutral">first run</span>`:w?`<span class="chip bad">${w} regressed</span>`:`<span class="chip good">nothing worse</span>`;
     return `<tr class="click" data-project="${esc(x.source)}"><td><b class="mono">${esc(x.project)}</b>${fromWhere(L.origin)?`<div class="ref">${fromWhere(L.origin)}</div>`:""}</td><td>${state}</td>
       <td class="num">${L.passed.toLocaleString()} / ${L.results.toLocaleString()}</td><td class="num">${k?k.changed:"—"}</td>
-      <td class="num">${k?k.flaky:"—"}</td><td class="num">${x.runs}</td><td class="ref">${esc(ago(L.start))}</td></tr>`};
+      <td class="num">${k?k.flaky:"—"}</td><td class="num">${x.runs}</td><td class="ref">${esc(when(L.start))}</td></tr>`};
   box.innerHTML=`<div class="strip">
     <div><b>${list.length}</b><span>project${list.length>1?"s":""}</span></div>
     <div class="${bad?"bad":"good"}"><b>${bad}</b><span>with a regression in its latest run</span></div>
     <div><b>${list.reduce((n,x)=>n+x.runs,0).toLocaleString()}</b><span>test runs</span></div>
-    <div><b style="font-size:20px;padding-top:6px">${esc(ago(list[0].latest.start))}</b><span>latest run, ${esc(list[0].project)}</span></div>
+    <div><b style="font-size:20px;padding-top:6px">${esc(ago(list[0].latest.start))}</b><span>latest run, ${esc(list[0].project)}, ${esc(at(list[0].latest.start))}</span></div>
   </div>
   <div class="panel"><div class="panel-head"><div><h2>All projects</h2><p class="sub">Each repository's latest test run against the one before it. Open one to see what changed.</p></div></div>
     <div class="scroll"><table><tr><th>Project</th><th>Latest run</th><th class="num">Checks passed</th><th class="num">Changed</th><th class="num">Flaky</th><th class="num">Runs</th><th>When</th></tr>
@@ -535,7 +546,7 @@ pytest --assay --assay-upload tests</pre>
     <p class="note"><a href="${GUIDE}" target="_blank" rel="noopener">Getting started</a> shows the two lines to add to your app and a first test.</p></div>`;return}
   const cur=runs[0],prev=runs[1];
   const label=r=>Object.entries(r.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" · ");
-  const head=`<div class="panel-head"><div><h2>Latest test run</h2><p class="sub"><b class="mono">${esc(cur.run_id)}</b> ${esc(ago(cur.start))}${prev?`, compared with <b class="mono">${esc(prev.run_id)}</b>`:""}</p>${fromWhere(cur.origin)?`<p class="sub">From ${fromWhere(cur.origin)}</p>`:""}${cur.lineage&&Object.keys(cur.lineage).length?`<p class="sub">${label(cur)}</p>`:""}</div><a href="#diff" class="ref">Open behavior diff →</a></div>`;
+  const head=`<div class="panel-head"><div><h2>Latest test run</h2><p class="sub"><b class="mono">${esc(cur.run_id)}</b> ${esc(when(cur.start))}${prev?`, compared with <b class="mono">${esc(prev.run_id)}</b>`:""}</p>${fromWhere(cur.origin)?`<p class="sub">From ${fromWhere(cur.origin)}</p>`:""}${cur.lineage&&Object.keys(cur.lineage).length?`<p class="sub">${label(cur)}</p>`:""}</div><a href="#diff" class="ref">Open behavior diff →</a></div>`;
   if(!prev){box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">${cur.passed.toLocaleString()} of ${cur.results.toLocaleString()} checks passed. The next run is compared with this one.</p></div>`;return}
   box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">Comparing…</p></div>`;
   let d;
@@ -599,7 +610,7 @@ function renderOverview(){
     <div class="${anomalies.length?"bad":"good"}"><b>${anomalies.length}</b><span>open alerts</span></div>
     <div class="${breached.length?"warn":"good"}"><b>${judged.length?`${judged.length-breached.length}/${judged.length}`:"—"}</b><span>SLOs met${o.slos.length>judged.length?` · ${o.slos.length-judged.length} unmeasured`:""}</span></div>
     <div><b>${o.counts.measured}/${o.counts.measured+o.counts.unmeasured}</b><span>measures with data</span></div>
-    <div><b style="font-size:20px;padding-top:6px">${esc(ago(o.run.started_at))}</b><span>${sched.enabled?`auto-runs every ${sched.every_minutes} min`:"scheduler off (runs on demand)"}</span></div>
+    <div><b style="font-size:20px;padding-top:6px">${esc(ago(o.run.started_at))}</b><span>${esc(at(o.run.started_at))} · ${sched.enabled?`auto-runs every ${sched.every_minutes} min`:"scheduler off (runs on demand)"}</span></div>
   </div>
   <div class="two">
     <div class="panel"><div class="panel-head"><h2>Needs attention</h2><a href="#alerts" class="ref">All alerts →</a></div>

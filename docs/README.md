@@ -32,6 +32,7 @@
 | [API and authentication](api.md) | Keys, sending data, alert webhooks |
 | [Event schema](event-schema.md) | The v1 events: runs, steps, checks, expectations |
 | [Code layout](layout.md) | Where things are in this repository |
-| [Not built yet](roadmap.md) | What's missing |
+| [Roadmap](roadmap.md) | Where Assay is going, phase by phase, and what's not built yet |
+| [User stories](user-stories.md) | Who it's for, what each person needs, and how we'll know it's done |
 
 The Python SDK has its own guide: [sdk/python](../sdk/python/README.md).

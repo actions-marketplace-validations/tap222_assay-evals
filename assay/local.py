@@ -593,9 +593,11 @@ def policy_lines(policy: Optional[dict]) -> List[str]:
                 "change, add the assay-policy-change label (ASSAY_POLICY_CHANGE=accepted):")
     elif policy["accepted"]:
         head = "This PR changes the checks, and the change is accepted: its own checks are used."
+    elif all(c.get("note") for c in policy["changes"]):
+        head = "This PR changes expected values in its tests; check they're the change you meant:"
     else:
         head = "This PR tightens the checks; they apply to this run:"
-    return [head, *(f"  {'- ' if c['weakens'] else '+ '}{c['text']}" for c in policy["changes"])]
+    return [head, *(f"  {'- ' if c['weakens'] else '~ ' if c.get('note') else '+ '}{c['text']}" for c in policy["changes"])]
 
 
 def judge_cost(judged: dict) -> str:
@@ -2259,8 +2261,12 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         HEADLINES.get(code, "AI regression detected")
     out = [MARKER, f"## {head}", "", " · ".join(counts), ""]
     if policy and policy["changes"]:
-        out += [f"**{'Policy changes (not applied: add the `assay-policy-change` label to accept them)' if policy['weakened'] else 'Policy changes (accepted)' if policy['accepted'] else 'Policy changes (applied)'}**",
-                "", *(f"- {'loosens' if c['weakens'] else 'tightens'}: {_md(c['text'])}" for c in policy["changes"]), ""]
+        title = ('Policy changes (not applied: add the `assay-policy-change` label to accept them)' if policy['weakened']
+                 else 'Policy changes (accepted)' if policy['accepted']
+                 else 'Expected values changed (check they\'re the change you meant)' if all(c.get('note') for c in policy['changes'])
+                 else 'Policy changes (applied)')
+        out += [f"**{title}**", "", *(f"- {'loosens' if c['weakens'] else 'changes' if c.get('note') else 'tightens'}: "
+                                      f"{_md(c['text'])}" for c in policy["changes"]), ""]
     if changes:  # a change is its "- " line and the Expected/Actual lines under it
         starts = [i for i, x in enumerate(changes) if x.startswith("- ")]
         cut = starts[30] if len(starts) > 30 else len(changes)
@@ -2663,6 +2669,22 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
             policy["weakened"] = policy["weakened"] or not policy["accepted"]
         else:
             text += "\n" + _paint(f"{_n(len(missing), 'case')} that ran last time didn't run now: {names}.", "dim")
+    # Assertions a change removed or loosened, against the base branch: the quieter way to make a test pass.
+    from assay import weakening
+    found = weakening.scan(root, weakening.base_ref(root))
+    result["weakened_tests"] = found
+    if found:
+        loose, notes = weakening.weakening(found), [f for f in found if f["kind"] == "rewritten"]
+        if policy is not None:  # a PR: a weakened test loosens the checks like removing a contract
+            policy = {**policy, "changes": [*policy["changes"],
+                                            *({"text": weakening.describe(f), "weakens": True} for f in loose),
+                                            *({"text": weakening.describe(f), "weakens": False, "note": True} for f in notes)]}
+            if loose:
+                policy["weakened"] = policy["weakened"] or not policy["accepted"]
+        else:
+            lines = [*(f"Weakened against {os.environ.get(weakening.BASE_ENV)}: {weakening.describe(f)}" for f in loose),
+                     *(f"Expected value changed: {weakening.describe(f)}" for f in notes)]
+            text += "\n" + _paint("\n".join(lines), "yellow" if loose else "dim")
     if not policy and not subset and abandoned_why is None:
         state["suite"] = sorted(ran_all)
     if policy_lines(policy):
