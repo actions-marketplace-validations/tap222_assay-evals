@@ -17,6 +17,10 @@ things to look at.
 
 Who it's for, and what each person needs: [user stories](user-stories.md).
 
+![A mockup of the change report for one pull request: a verdict, "Check 3 things before merging", over a weakened test, a changed function no test runs, and a checkout that now runs 21 database queries instead of 3](assets/roadmap/change-report.png)
+
+*A mockup with sample data: the change report P2 builds. Nothing on this page is built yet.*
+
 ## Where Assay fits
 
 | Tools that | What they do | What Assay does |
@@ -109,6 +113,10 @@ pull requests.
 User stories: [US-08](user-stories.md#us-08), [US-09](user-stories.md#us-09),
 [US-10](user-stories.md#us-10).
 
+![A mockup of rules an app follows, each with its evidence ("6 of 6 delete flows"), three checked on every pull request and two waiting for a yes or no](assets/roadmap/rules.png)
+
+*Mockup, sample data.*
+
 ### P4. Cost and performance
 
 - Database queries and outside calls per test, with growth flagged ("1 query became 21").
@@ -129,6 +137,10 @@ User stories: [US-12](user-stories.md#us-12), [US-13](user-stories.md#us-13),
 - A monthly page with the four numbers, each linked to its evidence, exported as PDF and CSV.
 
 User stories: [US-15](user-stories.md#us-15).
+
+![A mockup of the overview a lead sees: quality, reliability, cost and delivery time this month, each compared with last month](assets/roadmap/overview.png)
+
+*Mockup, sample data.*
 
 ### P6. Teams and companies
 
