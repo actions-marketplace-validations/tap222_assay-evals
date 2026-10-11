@@ -292,7 +292,8 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
 - **Any model provider.**
 - **Python SDK.** See [sdk/python](sdk/python/README.md).
 - **JavaScript and TypeScript.** `assayCase()` in a Jest or Vitest test records the run, and
-  `assay test` checks and compares it like a pytest one. See [sdk/js](sdk/js/README.md).
+  `assay test` checks and compares it like a pytest one. In the running app, `track()` sends each
+  request (its steps, model calls, tokens, cost and time) to the dashboard. See [sdk/js](sdk/js/README.md).
 - **Any other language.** `assay test` runs any command and reads the events it writes: a recorder
   is a few dozen lines. See [Any language](docs/any-language.md).
 
@@ -348,7 +349,7 @@ Run `assay --help` for every command and option.
 |---|---|
 | [Getting started](docs/getting-started.md) | Add Assay to your app in four steps: install, two lines in your app, one test, run |
 | [Testing](docs/testing.md) | `pytest --assay`, the `assay_case` fixture, assertions, baselines, flakiness |
-| [TypeScript and JavaScript](sdk/js/README.md) | `assayCase()` in Jest or Vitest, `run.expect()`, `assay test` |
+| [TypeScript and JavaScript](sdk/js/README.md) | `assayCase()` in Jest or Vitest, `run.expect()`, `assay test`, `track()` for the live app |
 | [Any language](docs/any-language.md) | Go, Java, Ruby, Rust: a small recorder and `assay test` |
 | [Behavior diff](docs/diff.md) | What changed between two versions, with a severity |
 | [Repeated attempts](docs/repeats.md) | Chance, too few attempts, or a regression |

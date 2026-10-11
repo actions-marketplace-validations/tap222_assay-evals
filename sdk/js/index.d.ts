@@ -100,8 +100,34 @@ export function assayCase<T>(fn: (run: Run) => T | Promise<T>): Promise<T>;
 export function assayCase<T>(context: { name?: string; fullName?: string; expect?: unknown }, fn: (run: Run) => T | Promise<T>,
                              options?: { tags?: Record<string, Scalar> }): Promise<T>;
 
+export interface RunOptions {
+  caseId?: string;
+  tags?: Record<string, Scalar>;
+  kind?: "agent";
+  /** What the run was asked, e.g. the customer's message. */
+  input?: unknown;
+  /** What it ran on, e.g. { prompt: "receptionist@3", model: "claude-opus-5" }. */
+  version?: Record<string, string>;
+  segment?: string;
+  /** The conversation this run is a turn of, and its place in it from 0. */
+  conversationId?: string;
+  turn?: number;
+  /** Who asked, as a pseudonymous id. */
+  user?: string;
+}
+
 /** A run outside a test case, e.g. recorded by the app itself. */
-export function startRun(task: string, options?: { caseId?: string; tags?: Record<string, Scalar>; kind?: "agent" }): Run;
+export function startRun(task: string, options?: RunOptions): Run;
+
+/**
+ * One request of the app as a run: opens it, calls fn(run) with it current (an instrument()ed client
+ * records its model calls on it), and ends it, failed if fn throws. With ASSAY_URL set (and not
+ * ASSAY_PATH) the run is sent to the server in the background.
+ */
+export function track<T>(task: string, fn: (run: Run) => T | Promise<T>, options?: Omit<RunOptions, "caseId">): Promise<T>;
+
+/** Sends what's queued now (with ASSAY_URL); resolves true once nothing is left. For shutdown hooks. */
+export function flush(): Promise<boolean>;
 
 /** A prompt template, registered by version. Returns "id@version", for run.llm({ prompt }). */
 export function prompt(id: string, version: string | number, template?: string): string;
@@ -114,8 +140,8 @@ export function toolSchemas(tools?: Array<string | ToolDefinition>): Record<stri
 
 /**
  * Records the model calls an Anthropic or OpenAI client makes (messages.create, chat.completions.create,
- * responses.create) on the current assayCase's run. Returns the same client. Outside a case, and
- * for streams, nothing is recorded.
+ * responses.create) on the current run: an assayCase's, or a track()'s. Returns the same client.
+ * Outside a run, and for streams, nothing is recorded.
  */
 export function instrument<T>(client: T): T;
 
@@ -124,5 +150,5 @@ export function assayMiddleware(): {
   wrapGenerate: (options: { doGenerate: () => Promise<any>; params: any; model: any }) => Promise<any>;
 };
 
-/** The run of the assayCase() the calling code runs inside, or undefined. */
+/** The run of the assayCase() or track() the calling code runs inside, or undefined. */
 export function currentRun(): Run | undefined;

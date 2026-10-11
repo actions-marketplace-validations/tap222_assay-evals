@@ -12,9 +12,14 @@
  *   }));
  *
  * Run it with `assay test` (`[test] command = "npx jest test/ai"` in assay.toml). Events are written
- * to ASSAY_PATH, which `assay test` sets; with no ASSAY_PATH nothing is written, and the run is kept
- * in memory for the test's own asserts. Nothing is ever sent to a server from here: `assay test
- * --upload` sends the whole run once it's checked.
+ * to ASSAY_PATH, which `assay test` sets; `assay test --upload` sends the whole run once it's checked.
+ *
+ * In the app itself, with ASSAY_URL set (and ASSAY_PATH not), runs go to the server: track() opens
+ * one per request, and an instrument()ed client records its model calls on it.
+ *
+ *   const reply = await track("whatsapp_reply", () => receptionist.reply(message), { conversationId });
+ *
+ * With neither set, nothing is written or sent, and the run is kept in memory.
  */
 
 const fs = require("fs");
@@ -22,6 +27,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { instrument, assayMiddleware, currentRun, storage } = require("./instrument");
 const { costOf } = require("./llm");
+const { sender } = require("./send");
 
 const MAX_TEXT = 20000;
 const EXPECT = "assay.expect@1";
@@ -52,10 +58,18 @@ function clean(value, depth = 0) {
 
 function emit(event) {
   const file = process.env.ASSAY_PATH;
-  if (!file) return;
-  const line = JSON.stringify({ v: 1, id: id(), ts: new Date().toISOString(), ...event }) + "\n";
+  const send = file ? null : sender();
+  if (!file && !send) return;
+  const full = { v: 1, id: id(), ts: new Date().toISOString(), ...event };
+  if (send) return send.add(full);
   fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
-  fs.appendFileSync(file, line); // one write per event: test workers sharing the file don't split lines
+  fs.appendFileSync(file, JSON.stringify(full) + "\n"); // one write per event: test workers sharing the file don't split lines
+}
+
+/** Sends what's queued now (with ASSAY_URL); resolves true once nothing is left. For shutdown hooks. */
+function flush() {
+  const send = sender();
+  return send ? send.flush() : Promise.resolve(true);
 }
 
 const MAX_CASE = 128;
@@ -168,7 +182,7 @@ function toolNames(tools) {
 }
 
 class Run {
-  constructor(task, { caseId, tags, kind = "agent" } = {}) {
+  constructor(task, { caseId, tags, kind = "agent", input, version, segment, conversationId, turn, user } = {}) {
     this.id = id();
     this.task = task;
     this.caseId = caseId;
@@ -180,7 +194,10 @@ class Run {
     this._expectations = [];
     this._ended = false;
     emit({ type: "run.start", run_id: this.id, kind, task, ...(caseId ? { test: testRef(caseId) } : {}),
-           ...(tags ? { tags: clean(tags) } : {}) });
+           ...(tags ? { tags: clean(tags) } : {}), ...(input !== undefined ? { input: clean(input) } : {}),
+           ...(version ? { version: clean(version) } : {}), ...(segment ? { segment } : {}),
+           ...(conversationId ? { conversation_id: String(conversationId).slice(0, 128) } : {}),
+           ...(turn != null ? { turn } : {}), ...(user ? { user: String(user).slice(0, 128) } : {}) });
   }
 
   _step(kind, fields, started) {
@@ -272,6 +289,28 @@ function startRun(task, options = {}) {
   return new Run(task, options);
 }
 
+/**
+ * One request of the app as a run: opens it, calls fn(run) with it current (so an instrument()ed
+ * client records its model calls on it), and ends it, failed if fn throws. Returns fn's result,
+ * and rethrows what it throws. Recording never breaks fn.
+ */
+async function track(task, fn, options = {}) {
+  let run;
+  try {
+    run = new Run(task, options);
+  } catch {
+    return fn(undefined);
+  }
+  try {
+    const result = await storage.run(run, () => fn(run));
+    run.end("completed");
+    return result;
+  } catch (e) {
+    run.end("failed", `${e && e.name ? e.name : "Error"}: ${e && e.message ? e.message : e}`.slice(0, 2000));
+    throw e;
+  }
+}
+
 /** The current test's id, "<file>::<name>", from Jest's or Vitest's expect.getState() (the global
  * one, or a test context's own). */
 function currentTest(expectFn = globalThis.expect) {
@@ -319,5 +358,5 @@ async function assayCase(name, fn, { tags } = {}) {
   return result;
 }
 
-module.exports = { assayCase, startRun, prompt, caseIdOf, toolSchemas, instrument, assayMiddleware, currentRun,
+module.exports = { assayCase, startRun, track, flush, prompt, caseIdOf, toolSchemas, instrument, assayMiddleware, currentRun,
                    Run, Expectations };
