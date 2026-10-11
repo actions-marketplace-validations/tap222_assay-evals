@@ -359,7 +359,7 @@ Run `assay --help` for every command and option.
 | [Judge calibration](docs/calibration.md) | Golden sets and whether a judge tracks them |
 | [Setup](docs/setup.md) | Install, connect, go live, deploy |
 
-The full list is in [docs/README.md](docs/README.md). What's not built yet: [docs/roadmap.md](docs/roadmap.md).
+The full list is in [docs/README.md](docs/README.md). Where Assay is going, and what's not built yet: [docs/roadmap.md](docs/roadmap.md).
 
 ## Development
 
