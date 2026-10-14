@@ -9,16 +9,47 @@ The decision rule:
 
 Samples are per-unit outcomes (e.g. 1/0 per document for "split correctly",
 or a per-document score) for baseline and candidate on the same corpus.
+A rule compares their mean by default, or a percentile ("p95") for measures
+like latency, where a slow tail can grow while the average holds.
 """
 from __future__ import annotations
 
 import random
 from dataclasses import asdict, dataclass, field
 from statistics import fmean, stdev
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 ADVANCE, HOLD, ROLLBACK = "advance", "hold", "rollback"
 _RANK = {ADVANCE: 0, HOLD: 1, ROLLBACK: 2}
+# A percentile rests on the values beyond it: p99 of 100 values is one value.
+MIN_TAIL = 5
+
+
+def percentile_of(statistic: str) -> Optional[float]:
+    """50.0 for "p50", None for "mean"; anything else is rejected."""
+    if statistic == "mean":
+        return None
+    try:
+        q = float(statistic[1:]) if statistic[:1] == "p" else None
+    except ValueError:
+        q = None
+    if q is None or not 0 < q < 100:
+        raise ValueError(f'statistic must be "mean" or a percentile such as "p95", not {statistic!r}')
+    return q
+
+
+def percentile(values: Sequence[float], q: float) -> float:
+    """The q-th percentile, interpolating between the two nearest values."""
+    v = sorted(values)
+    pos = (len(v) - 1) * q / 100
+    lo = int(pos)
+    hi = min(lo + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (pos - lo)
+
+
+def stat_fn(statistic: str) -> Callable[[Sequence[float]], float]:
+    q = percentile_of(statistic)
+    return fmean if q is None else (lambda xs: percentile(xs, q))
 
 
 @dataclass
@@ -28,6 +59,15 @@ class GateRule:
     tolerance: float = 0.01  # largest acceptable worsening, in the metric's units
     min_n: int = 30
     severity: str = "normal"  # "high" halves the tolerance
+    statistic: str = "mean"  # or a percentile, "p95"
+
+    def __post_init__(self) -> None:
+        percentile_of(self.statistic)
+
+    @property
+    def key(self) -> str:
+        """Names the rule's noise floor: two rules can gate one measure on different statistics."""
+        return self.measure_id if self.statistic == "mean" else f"{self.measure_id}:{self.statistic}"
 
     @property
     def effective_tolerance(self) -> float:
@@ -45,6 +85,7 @@ class SliceDecision:
     worsening: Optional[float] = None
     ci: Optional[Tuple[float, float]] = None
     noise_floor: Optional[float] = None
+    statistic: str = "mean"
 
 
 @dataclass
@@ -56,16 +97,18 @@ class GateDecision:
         return {"outcome": self.outcome, "slices": [asdict(s) for s in self.slices]}
 
 
-def noise_floor(identical_runs: Sequence[Sequence[float]]) -> Optional[float]:
+def noise_floor(identical_runs: Sequence[Sequence[float]], statistic: str = "mean") -> Optional[float]:
     """How far apart two runs of the same config on the same corpus usually land.
 
     With two runs, their difference. With three or more, 1.96 × √2 × the standard
     deviation of the run means: the 95% range of the difference between two runs.
     (The largest pairwise difference, used before, grows with the number of runs,
     so more evidence made the floor looser.) Returns None with fewer than two runs,
-    which the gate treats as "no threshold can be trusted yet".
+    which the gate treats as "no threshold can be trusted yet". With a percentile
+    statistic, the same is measured on each run's percentile.
     """
-    means = [fmean(r) for r in identical_runs if r]
+    stat = stat_fn(statistic)
+    means = [stat(r) for r in identical_runs if r]
     if len(means) < 2:
         return None
     if len(means) == 2:
@@ -75,16 +118,29 @@ def noise_floor(identical_runs: Sequence[Sequence[float]]) -> Optional[float]:
 
 def bootstrap_diff_ci(baseline: Sequence[float], candidate: Sequence[float], *,
                       paired: bool, iters: int = 2000, alpha: float = 0.05,
-                      seed: int = 7) -> Tuple[float, float, float]:
-    """Mean(candidate) - mean(baseline) with a percentile bootstrap CI.
+                      seed: int = 7, statistic: str = "mean") -> Tuple[float, float, float]:
+    """stat(candidate) - stat(baseline) with a percentile bootstrap CI.
 
     Paired resampling is used when both samples score the same units in the
     same order, which is much tighter than treating them as independent.
     """
     rng = random.Random(seed)
-    point = fmean(candidate) - fmean(baseline)
+    stat = stat_fn(statistic)
+    point = stat(candidate) - stat(baseline)
     diffs = []
-    if paired:
+    if statistic != "mean":
+        # A percentile of differences isn't the difference of percentiles, so
+        # resample units (the same ones on both sides when paired) and compare.
+        nb, nc = len(baseline), len(candidate)
+        for _ in range(iters):
+            if paired:
+                idx = [rng.randrange(nb) for _ in range(nb)]
+                b, c = [baseline[i] for i in idx], [candidate[i] for i in idx]
+            else:
+                b = [baseline[rng.randrange(nb)] for _ in range(nb)]
+                c = [candidate[rng.randrange(nc)] for _ in range(nc)]
+            diffs.append(stat(c) - stat(b))
+    elif paired:
         d = [c - b for b, c in zip(baseline, candidate)]
         n = len(d)
         for _ in range(iters):
@@ -106,7 +162,7 @@ def evaluate_slice(rule: GateRule, slice_name: str, baseline: Optional[Sequence[
                    paired: bool = True) -> SliceDecision:
     base = SliceDecision(rule.measure_id, slice_name, HOLD, "",
                          n_baseline=len(baseline or []), n_candidate=len(candidate or []),
-                         noise_floor=floor)
+                         noise_floor=floor, statistic=rule.statistic)
     if not baseline or not candidate:
         base.reason = "Slice is unmeasured; unmeasured never passes."
         return base
@@ -117,10 +173,15 @@ def evaluate_slice(rule: GateRule, slice_name: str, baseline: Optional[Sequence[
     if n < rule.min_n:
         base.reason = f"Sample of {n} is below the minimum of {rule.min_n} for this slice."
         return base
+    q = percentile_of(rule.statistic)
+    if q is not None and n * min(q, 100 - q) / 100 < MIN_TAIL:
+        base.reason = (f"{n} values put fewer than {MIN_TAIL} beyond the {rule.statistic}, too few to measure "
+                       f"it; this slice needs at least {MIN_TAIL * 100 / min(q, 100 - q):.0f}.")
+        return base
     if paired and len(baseline) != len(candidate):
         paired = False
 
-    point, lo, hi = bootstrap_diff_ci(baseline, candidate, paired=paired)
+    point, lo, hi = bootstrap_diff_ci(baseline, candidate, paired=paired, statistic=rule.statistic)
     # Express as worsening: positive = worse, whichever direction is good.
     sign = -1 if rule.higher_is_better else 1
     w_point = sign * point
@@ -149,6 +210,8 @@ def evaluate(rules: Sequence[GateRule],
     """Evaluate every rule on every slice; the worst slice decides.
 
     samples[measure_id][slice] = {"baseline": [...], "candidate": [...]}
+    noise_floors is keyed by GateRule.key ("latency_ms:p95" for a percentile rule),
+    falling back to the measure id.
     required_slices[measure_id] lists slices that must be present; a missing
     one is reported as unmeasured and holds the release.
     """
@@ -161,6 +224,7 @@ def evaluate(rules: Sequence[GateRule],
             by_slice = {"overall": {}}
         for slice_name, pair in sorted(by_slice.items()):
             decisions.append(evaluate_slice(rule, slice_name, pair.get("baseline"),
-                                            pair.get("candidate"), noise_floors.get(rule.measure_id)))
+                                            pair.get("candidate"),
+                                            noise_floors.get(rule.key, noise_floors.get(rule.measure_id))))
     outcome = max((d.outcome for d in decisions), key=_RANK.__getitem__, default=HOLD)
     return GateDecision(outcome, decisions)

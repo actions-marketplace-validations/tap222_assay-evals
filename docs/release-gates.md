@@ -12,6 +12,20 @@ if even the optimistic end of the confidence interval is worse than max(toleranc
 floor). It holds if the interval straddles that limit, and advances otherwise.
 `severity: "high"` halves the tolerance. The worst slice decides.
 
+**Percentiles.** A rule compares means by default. For latency, a slow tail can grow while the
+average holds: most calls get a little faster and one in twelve now takes four seconds. Set
+`statistic: "p95"` (any percentile from `p1` to `p99.9`) and the rule compares that percentile
+instead, with the tolerance in the measure's units:
+
+```json
+{"measure_id": "latency_ms", "higher_is_better": false, "tolerance": 200, "min_n": 200, "statistic": "p95"}
+```
+
+The interval comes from resampling the cases (the same ones on both sides when they're paired),
+and the noise floor from each baseline run's own p95. A percentile rests on the values beyond
+it, so a slice holds until at least 5 lie there: 100 cases for p95, 500 for p99. One measure can
+have a mean rule and a p95 rule at the same time; each gets its own noise floor.
+
 **The noise floor** is how far apart two runs of the same version on the same corpus usually
 land. With two baseline runs, it's their difference. With three or more, it's 1.96 × √2 × the
 standard deviation of the run means, which is the 95% range of the gap between two runs. It
