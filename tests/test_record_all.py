@@ -215,3 +215,29 @@ def test_a_plain_test_isnt_held_to_agent_checks(plain_project):
     assert out.returncode == 0 and "Looped" not in out.stdout, out.stdout
     events, _ = recorded(plain_project)
     assert all(e["tags"].get("assay_record") == "plain" for e in events if e.get("type") == "run.start")
+
+
+def test_on_the_server_a_plain_test_is_judged_by_its_asserts_and_says_who_ran_it(plain_project, tmp_path_factory):
+    from fastapi.testclient import TestClient
+    from assay.api import create_app
+    from assay.config import Settings
+    (plain_project / "tests" / "test_poll.py").write_text(textwrap.dedent('''
+        import urllib.request
+        from server import start
+
+        def test_polls_until_ready():
+            base = start()
+            for _ in range(3):
+                assert urllib.request.urlopen(base + "/status").status == 200
+    '''), encoding="utf-8")
+    assert run(plain_project, "--assay-all", env={"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s-1"}).returncode == 0
+    server = TestClient(create_app(Settings(store_url=f"sqlite:///{tmp_path_factory.mktemp('srv') / 's.db'}")))
+
+    def http(method, url, body, headers):
+        r = server.request(method, url.replace("http://assay.test", ""), json=body, headers=headers)
+        return r.status_code, r.json()
+    assert local.upload(plain_project, None, "http://assay.test", None, None, http=http) == 0
+    source = f"events:{local.project_name(plain_project)}"
+    (r,) = server.get("/v1/evals/runs", params={"source": source}).json()
+    assert r["failed"] == 0 and r["passed"] > 0  # three calls to /status aren't a loop for a test
+    assert r["origin"]["ran_by_agent"] == "Claude Code" and r["origin"]["branch"] == "main"

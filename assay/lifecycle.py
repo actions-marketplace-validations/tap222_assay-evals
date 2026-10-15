@@ -107,19 +107,6 @@ def pending(engine: Engine, tenant: Optional[str] = None, ids: Optional[Iterable
         return [dict(r._mapping) for r in conn.execute(q)]
 
 
-PLAIN_TAG = ("assay_record", "plain")  # a test recorded by --assay-all: not an agent, so no agent checks
-
-
-def plain_runs(engine: Engine, tenant: str, ids: List[str]) -> set:
-    """The runs among ids that are plain tests (tagged by pytest --assay-all)."""
-    if not ids:
-        return set()
-    r = store.runs
-    with engine.connect() as conn:
-        rows = conn.execute(select(r.c.run_id, r.c.tags).where(and_(r.c.tenant == tenant, r.c.run_id.in_(list(ids))))).all()
-    return {x.run_id for x in rows if (x.tags or {}).get(PLAIN_TAG[0]) == PLAIN_TAG[1]}
-
-
 def run_checks(traj: dict, rules: List[dict], abandon_minutes: float = ABANDON_MINUTES,
                abandoned_why: Optional[str] = None) -> List[dict]:
     """The checks every run gets, reference or not. [{"check", "status", "reason"}]"""
@@ -200,7 +187,7 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
             errors = dict(conn.execute(select(store.runs.c.run_id, store.runs.c.error).where(
                 and_(store.runs.c.tenant == tenant, store.runs.c.run_id.in_(list(trajs)),
                      store.runs.c.error.is_not(None)))).all())
-        plain = plain_runs(engine, tenant, list(trajs))
+        plain = agents.plain_runs(engine, tenant, list(trajs))
         for tid, traj in trajs.items():
             traj["error"] = errors.get(tid)
             traj["plain"] = tid in plain

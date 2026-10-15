@@ -698,6 +698,19 @@ def result_rows(tenant: str, run_id: str, head: dict, checks: List[dict], evalua
             for c in checks]
 
 
+PLAIN_TAG = ("assay_record", "plain")  # a test recorded by --assay-all: not an agent, so no agent checks
+
+
+def plain_runs(engine: Engine, tenant: str, ids: List[str]) -> set:
+    """The runs among ids that are plain tests (tagged by pytest --assay-all)."""
+    if not ids:
+        return set()
+    r = store.runs
+    with engine.connect() as conn:
+        rows = conn.execute(select(r.c.run_id, r.c.tags).where(and_(r.c.tenant == tenant, r.c.run_id.in_(list(ids))))).all()
+    return {x.run_id for x in rows if (x.tags or {}).get(PLAIN_TAG[0]) == PLAIN_TAG[1]}
+
+
 def evaluate_run(engine: Engine, source, tenant: str, run_id: str) -> dict:
     """Check every trajectory in an evaluation run against its case's reference and the
     source's contracts, and store the checks as evaluation results (idempotent). A trajectory
@@ -709,10 +722,11 @@ def evaluate_run(engine: Engine, source, tenant: str, run_id: str) -> dict:
     trajs = source.trajectories([h["trajectory_id"] for h in heads])
     refs = references(engine, tenant, {h["case_id"] for h in heads if h["case_id"]})
     rules = contracts_mod.load(engine, source.name)
+    plain = plain_runs(engine, tenant, list(trajs))
     rows = []
     for h in heads:
         traj = trajs.get(h["trajectory_id"])
-        if traj is not None:
+        if traj is not None and h["trajectory_id"] not in plain:  # a plain test's asserts are its checks
             rows += result_rows(tenant, run_id, h, checks_for(traj, refs.get(h["case_id"]), rules))
     ingest.upsert(engine, store.eval_results, rows, "result_id")
     counts = Counter((r["field"], r["status"]) for r in rows)
