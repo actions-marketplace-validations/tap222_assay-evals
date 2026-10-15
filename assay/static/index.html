@@ -60,7 +60,7 @@ h3{font:600 16px var(--display);margin:0}
 .sub{color:var(--ink-2);margin:4px 0 0}
 .ref{font-family:var(--mono);font-size:11px;color:var(--muted)}
 .mono{font-family:var(--mono)}
-.stack{display:grid;gap:18px}
+.stack{display:grid;gap:18px;grid-template-columns:minmax(0,1fr)}  /* the column fits the page: a chart can't size it */
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
 .panel-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px}
 /* status strip */
@@ -113,7 +113,7 @@ svg.spark{width:100%;height:34px;display:block}
 /* detail */
 .detail-head{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start}
 .picker{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-svg.chart{width:100%;height:auto;display:block}
+svg.chart{width:100%;height:auto;max-height:340px;display:block}
 svg.chart text{fill:var(--muted);font:11px var(--mono)}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
 .legend i{display:inline-block;width:18px;height:10px;vertical-align:middle;margin-right:6px;border-radius:2px}
