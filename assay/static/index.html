@@ -85,6 +85,8 @@ h3{font:600 16px var(--display);margin:0}
 .chip{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;padding:2px 7px;border-radius:999px;white-space:nowrap;display:inline-block}
 .chip.good{color:var(--good);background:var(--good-bg)}.chip.warn{color:var(--warn);background:var(--warn-bg)}
 .chip.bad{color:var(--bad);background:var(--bad-bg)}.chip.neutral{color:var(--muted);background:var(--sunk)}
+.chip.new{color:#fff;background:var(--accent);margin-left:6px;font-size:9.5px;padding:1px 6px;vertical-align:middle}
+.panel-sub{border-top:1px solid var(--line);padding-top:12px;margin-top:4px}.panel-sub ul{list-style:none;padding:0;margin:8px 0 0}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:500;padding:0 10px 8px 0;border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);vertical-align:top}
@@ -545,8 +547,22 @@ export ASSAY_KEY=ak_...        # an API key from Connect
 pytest --assay --assay-upload tests</pre>
     <p class="note"><a href="${GUIDE}" target="_blank" rel="noopener">Getting started</a> shows the two lines to add to your app and a first test.</p></div>`;return}
   const cur=runs[0],prev=runs[1];
+  const NEWTAG=`<span class="chip new">New</span>`;
+  // Who ran it: a coding agent's session, CI, or a person; the branch and commit it ran on.
+  const ranBy=o=>{if(!o||!(o.ran_by_agent||o.commit))return"";
+    const who=o.ran_by_agent?`<b>${esc(o.ran_by_agent)}</b>${o.agent_session?` <span class="mono ref" title="${esc(o.agent_session)}">session ${esc(o.agent_session.slice(0,8))}</span>`:""}`:"a person (no coding agent)";
+    const on=o.commit?` on <span class="mono">${esc(o.branch||"detached")}</span> @ <span class="mono">${esc(o.commit)}</span>${o.uncommitted?` <span class="chip warn">uncommitted changes</span>`:""}`:"";
+    return `<p class="sub">Run by ${who}${on}${NEWTAG}</p>`};
+  // Tests a change weakened against the base branch: removed or loosened assertions, rewritten expected values.
+  const weak=o=>{const W=(o&&o.weakened_tests)||[];if(!W.length)return"";
+    const loose=W.filter(f=>f.kind!=="rewritten"),more=(o.weakened_total||W.length)-W.length;
+    return `<div class="panel-sub"><h3>${loose.length?`${loose.length} test${loose.length===1?"":"s"} weakened`:"Expected values changed"}${NEWTAG}</h3>
+      <p class="note">Against the base branch: an assertion removed or loosened makes a test pass without checking anything; a rewritten expected value is listed to confirm.</p>
+      <ul class="stack">${W.map(f=>`<li><span class="chip ${f.kind==="rewritten"?"neutral":"bad"}">${esc(f.kind)}</span> <b class="mono">${esc(f.test)}</b> <span class="ref">${esc(f.file)}${f.line?":"+f.line:""}</span>
+        <div class="mono ref">Before: ${esc(f.before||"")}</div><div class="mono">Now:&nbsp;&nbsp;&nbsp; ${esc(f.after||"")}</div></li>`).join("")}</ul>
+      ${more>0?`<p class="note">And ${more} more: the PR comment and <code>assay guard</code> list them all.</p>`:""}</div>`};
   const label=r=>Object.entries(r.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" · ");
-  const head=`<div class="panel-head"><div><h2>Latest test run</h2><p class="sub"><b class="mono">${esc(cur.run_id)}</b> ${esc(when(cur.start))}${prev?`, compared with <b class="mono">${esc(prev.run_id)}</b>`:""}</p>${fromWhere(cur.origin)?`<p class="sub">From ${fromWhere(cur.origin)}</p>`:""}${cur.lineage&&Object.keys(cur.lineage).length?`<p class="sub">${label(cur)}</p>`:""}</div><a href="#diff" class="ref">Open behavior diff →</a></div>`;
+  const head=`<div class="panel-head"><div><h2>Latest test run</h2><p class="sub"><b class="mono">${esc(cur.run_id)}</b> ${esc(when(cur.start))}${prev?`, compared with <b class="mono">${esc(prev.run_id)}</b>`:""}</p>${fromWhere(cur.origin)?`<p class="sub">From ${fromWhere(cur.origin)}</p>`:""}${ranBy(cur.origin)}${cur.lineage&&Object.keys(cur.lineage).length?`<p class="sub">${label(cur)}</p>`:""}</div><a href="#diff" class="ref">Open behavior diff →</a></div>${weak(cur.origin)}`;
   if(!prev){box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">${cur.passed.toLocaleString()} of ${cur.results.toLocaleString()} checks passed. The next run is compared with this one.</p></div>`;return}
   box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">Comparing…</p></div>`;
   let d;

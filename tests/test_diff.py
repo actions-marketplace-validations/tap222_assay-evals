@@ -119,6 +119,10 @@ def test_how_a_flow_changed():
     assert ch["approval_moved"] and not ch["added"]
     ch = diff.flow_change(("search", "refund"), ("search", "escalate"))
     assert (ch["added"], ch["removed"], ch["reordered"]) == (["escalate"], ["refund"], False)
+    twice = diff.flow_change(("search", "HTTP POST api.x.com/charges"),
+                             ("search", "HTTP POST api.x.com/charges", "HTTP POST api.x.com/charges"))
+    assert not twice["reordered"] and twice["counts"] == {"HTTP POST api.x.com/charges": [1, 2]}
+    assert diff._describe(twice) == "HTTP POST api.x.com/charges: twice instead of once"
 
 
 # ---------- on the server ----------

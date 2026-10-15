@@ -74,6 +74,19 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
   Without pytest, record each case with `assay.run(..., test="<case>")` and
   `run.expect(...)`. For pipelines, send field results with
   `run.check("invoice_date", "pass" | "fail", expected=..., actual=...)`.
+- **Every test, not only AI ones (opt-in):** `pytest --assay --assay-all`, or `[pytest] record =
+  "all"` in `assay.toml`, records each test as a case, with or without the fixture: its pass or
+  fail, its time, and the outbound HTTP calls it made (through `urllib`, `requests` or `httpx`),
+  each as a step named after its method, host and path (`HTTP POST api.stripe.com/v1/charges`).
+  Ids in the path become `{id}` and query values are dropped, so the same call has the same name
+  every run; headers and bodies are never kept. Calls to model APIs (recorded by `instrument()`)
+  and to the Assay server are skipped. The behavior diff then shows a test that now fails, a call
+  that's new or gone, or one made twice instead of once ("HTTP POST api.x.com/charges: twice
+  instead of once"). Assay's own checks (contracts, PII) still apply only to tests that take the
+  fixture. Each run also records who ran it: a Claude Code session (from `CLAUDECODE` and
+  `CLAUDE_CODE_SESSION_ID`), GitHub Actions, or a person, with the branch, the commit and whether
+  there were uncommitted changes. With `ASSAY_BASE_REF` set, the tests the change weakened go
+  with the run too, so the dashboard's Overview shows both.
 - **Safety rules:** go in `assay.toml` as path contracts, e.g. `never delete_order`, or
   `refund only_after get_order`. Every agent run is checked against them.
 - **PII:** personal data (email, card, IBAN, SSN, phone) in a tool's arguments fails the PII

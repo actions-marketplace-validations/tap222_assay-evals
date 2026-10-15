@@ -9,6 +9,12 @@ The fixture wraps the test in assay.run(<test name>, test=<test id>), and record
 outcome (its asserts) as a check on the field "pytest", so `assay test` counts them. Tests that
 don't take the fixture are left alone. Installed with assay-evals; nothing to configure.
 
+Every test, opt-in: `pytest --assay --assay-all` (or `[pytest] record = "all"` in assay.toml) records
+each test as a case, with or without the fixture: its pass or fail, its time, and the outbound HTTP
+calls it made (assay_sdk.http_calls). The whole suite is then compared with its last passing run, so
+the behavior diff shows a test that newly fails, stopped running, or calls something new. Assay's
+checks (contracts, PII) only apply to tests that take the fixture.
+
 With assay-server installed, the test also fails when the run does: after the test body, the run
 gets the checks `assay test` makes (the case's expectations, and the contracts and PII rules in
 assay.toml), so pytest's own pass/fail is the answer. `[pytest] checks = false` in assay.toml
@@ -76,6 +82,9 @@ def pytest_addoption(parser):
                      "(default: timeout in assay.toml, or ASSAY_TIMEOUT; 0: no limit)")
     g.addoption("--assay-judge", action="store_true",
                 help="Also have an LLM judge each test's plan quality and consistency (needs anthropic)")
+    g.addoption("--assay-all", action="store_true",
+                help="Record every test, not only those that take assay_case: pass or fail, time and outbound "
+                     "HTTP calls (or [pytest] record = \"all\" in assay.toml)")
     g.addoption("--assay-rerun", choices=["failed"],
                 help="failed: run only the tests that didn't pass last time (regressed, new failures, flaky, "
                      "couldn't be judged, known failures)")
@@ -120,6 +129,9 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "assay_rewordings: the test's cases are rewordings of one request "
                                        "(assay_sdk.testing.rewordings)")
     config._assay_session = None
+    if (config.getoption("assay", False) or os.environ.get("ASSAY_TEST_RUN")) and _record_all(config):
+        from assay_sdk import http_calls  # under pytest --assay or `assay test`: every test's outbound calls
+        http_calls.record()
     if not config.getoption("assay", False):
         return
     for stream in (sys.stdout, sys.stderr):  # the report uses → ✓ ✗: a Windows pipe would fail on them
@@ -161,6 +173,16 @@ def pytest_configure(config):
     timeout = _timeout(config)
     if timeout:
         threading.Thread(target=_watchdog, args=(config, timeout), name="assay-timeout", daemon=True).start()
+
+
+def _record_all(config) -> bool:
+    """Every test is a case: --assay-all, or [pytest] record = "all"."""
+    if config.getoption("assay_all", False):
+        return True
+    try:
+        return (_config(config) or {}).get("pytest", {}).get("record") == "all"
+    except Exception:
+        return False
 
 
 def _timeout(config) -> Optional[float]:
@@ -311,12 +333,17 @@ def pytest_terminal_summary(terminalreporter, config):
 def pytest_runtest_call(item):
     global _current_item
     _current_item = item
+    if (getattr(item, "_assay_run", None) is None and os.environ.get("ASSAY_PATH")
+            and _record_all(item.config)):  # a test without the fixture, recorded as a case of its own
+        case = _case(item)
+        next(case)
+        item._assay_opened, item._assay_plain = case, True
     try:
         out = yield  # a failing test raises here, and fails as it would anyway
     finally:
         _current_item = None
     run = getattr(item, "_assay_run", None)
-    if run is None:
+    if run is None or getattr(item, "_assay_plain", False):  # Assay's checks are for its own cases
         return out
     problems = []
     for e in run.expectations:  # expect(run): checked now that the test body is done

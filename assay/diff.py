@@ -88,17 +88,23 @@ def flows(engine, tenant: str, run_id: str) -> Dict[str, dict]:
 
 
 def flow_change(before: Tuple[str, ...], now: Tuple[str, ...]) -> Optional[dict]:
-    """How a flow changed: {"added", "removed", "reordered", "approval_moved"}; None if it didn't."""
+    """How a flow changed: {"added", "removed", "reordered", "approval_moved", "counts"}; None if it didn't.
+    counts: steps both flows have, made a different number of times ({"HTTP GET x/charges": [1, 2]}): a
+    charge sent twice isn't "another order"."""
     if before == now:
         return None
     added = sorted(set(now) - set(before))
     removed = sorted(set(before) - set(now))
-    common_before = [x for x in before if x in now]
-    common_now = [x for x in now if x in before]
-    reordered = sorted(set(common_before)) == sorted(set(common_now)) and common_before != common_now
+    # The order steps first appear in, so a repeat doesn't read as a reorder.
+    common_before = [x for x in dict.fromkeys(before) if x in now]
+    common_now = [x for x in dict.fromkeys(now) if x in before]
+    reordered = common_before != common_now
     approval_moved = reordered and any(x.startswith("approval(") and
                                        common_before.index(x) != common_now.index(x) for x in common_before)
-    return {"added": added, "removed": removed, "reordered": reordered, "approval_moved": approval_moved}
+    nb, nn = Counter(before), Counter(now)
+    counts = {x: [nb[x], nn[x]] for x in sorted(set(before) & set(now)) if nb[x] != nn[x]}
+    return {"added": added, "removed": removed, "reordered": reordered, "approval_moved": approval_moved,
+            "counts": counts}
 
 
 def _describe(ch: dict) -> str:
@@ -111,7 +117,13 @@ def _describe(ch: dict) -> str:
         parts.append(f"new: {', '.join(ch['added'])}")
     if ch["removed"]:
         parts.append(f"no longer: {', '.join(ch['removed'])}")
+    for step, (was, is_) in (ch.get("counts") or {}).items():
+        parts.append(f"{step}: {_times(is_)} instead of {_times(was)}")
     return "; ".join(parts) or "changed"
+
+
+def _times(n: int) -> str:
+    return "once" if n == 1 else "twice" if n == 2 else f"{n} times"
 
 
 # ---------- runs ----------

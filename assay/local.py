@@ -352,7 +352,8 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
             "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
             "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()},
                     "answers": bool(pii.get("answers", True)), "answer_allow": set(answer_allow)},
-            "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
+            "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True)),
+                       "record": str((cfg.get("pytest") or {}).get("record", "cases"))},
             "behavior": _behavior_config(cfg.get("behavior") or {}), "judge": _judge_config(cfg.get("judge") or {}),
             "prices": _prices_config(cfg.get("prices")), "calibrate": _calibrate_config(cfg.get("calibrate") or {}),
             "documents": _documents_config(cfg.get("documents") or {})}
@@ -654,7 +655,7 @@ def _behavior_config(b: dict) -> dict:
 
 
 DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
-                  "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True},
+                  "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True, "record": "cases"},
                   "prices": None, "acks": [], "calibrate": None, "documents": {"auto_approve": None, "target": 0.99}, "behavior": {"fail": True, "ratios": {}, "suite": behavior.SUITE_RATIO, "limits": {}},
                   "judge": {"enabled": False, "model": "claude-opus-5", "redact": True, "provider": "anthropic"}}
 
@@ -2721,6 +2722,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     from assay import weakening
     found = weakening.scan(root, weakening.base_ref(root))
     result["weakened_tests"] = found
+    _save_meta(home, run_id, {"ran_by": ran_by(root), "weakened_tests": found})
     if found:
         loose, notes = weakening.weakening(found), [f for f in found if f["kind"] == "rewritten"]
         if policy is not None:  # a PR: a weakened test loosens the checks like removing a contract
@@ -3311,7 +3313,7 @@ def upload(root: Path, run_id: Optional[str], url: Optional[str], key: Optional[
         print(f"No recording for run {run_id} in {home / 'runs'}.", file=sys.stderr)
         return 2
     events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    where = run_origin(root)
+    where = {**run_origin(root), **meta_tags(home, run_id)}
     for e in events:  # so the dashboard can say which repository and folder a run came from
         if e.get("type") == "run.start" and e.get("test"):
             e["tags"] = {**(e.get("tags") or {}), **where}
@@ -3355,6 +3357,57 @@ def project_name(root: Path) -> str:
         name = re.sub(r"\.git$", "", re.split(r"[/:]", remote)[-1]) if remote else ""
     name = name or root.resolve().name
     return re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")[:48] or "default"
+
+
+def ran_by(root: Path) -> dict:
+    """Who ran the tests, and on what: a coding agent's session (Claude Code sets CLAUDECODE and
+    CLAUDE_CODE_SESSION_ID in the shell it runs commands in), CI, or a person (no agent), and the branch
+    and commit, with whether there were uncommitted changes. Only ids: nothing from the session itself."""
+    out: Dict[str, Any] = {}
+    if os.environ.get("CLAUDECODE"):
+        out["agent"] = "Claude Code"
+        if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+            out["session"] = os.environ["CLAUDE_CODE_SESSION_ID"][:64]
+    elif os.environ.get("GITHUB_ACTIONS"):
+        out["agent"] = "GitHub Actions"
+    branch = (_git(root, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+    commit = (_git(root, "rev-parse", "--short", "HEAD") or "").strip()
+    if branch and branch != "HEAD":
+        out["branch"] = branch[:200]
+    if commit:
+        out["commit"] = commit
+        out["uncommitted"] = bool((_git(root, "status", "--porcelain", "--untracked-files=no") or "").strip())
+    return out
+
+
+META_FINDINGS = 20  # weakened tests kept with an uploaded run; the PR comment has them all
+
+
+def _save_meta(home: Path, run_id: str, meta: dict) -> None:
+    """What a run's events don't carry (who ran it, the weakened tests), beside its recording for `assay upload`."""
+    try:
+        (home / "runs" / f"{run_id}.meta.json").write_text(json.dumps(meta, default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def meta_tags(home: Path, run_id: str) -> dict:
+    """The saved meta as run tags (plain values only): ran_by_agent, agent_session, branch, commit,
+    uncommitted, and weakened_tests as JSON text."""
+    try:
+        meta = json.loads((home / "runs" / f"{run_id}.meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    by = meta.get("ran_by") or {}
+    tags = {k: by[f] for k, f in (("ran_by_agent", "agent"), ("agent_session", "session"), ("branch", "branch"),
+                                   ("commit", "commit"), ("uncommitted", "uncommitted")) if by.get(f) is not None}
+    found = meta.get("weakened_tests") or []
+    if found:
+        keep = [{k: (str(f.get(k))[:300] if isinstance(f.get(k), str) else f.get(k))
+                 for k in ("file", "test", "kind", "line", "before", "after")} for f in found[:META_FINDINGS]]
+        tags["weakened_tests"] = json.dumps(keep)
+        tags["weakened_total"] = len(found)
+    return tags
 
 
 def run_origin(root: Path) -> dict:
