@@ -323,7 +323,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def dashboard():
-        return FileResponse(STATIC / "index.html")
+        # Ask the server every time: without this, a browser guesses how long to keep the page from
+        # its age, and an upgrade's dashboard doesn't show until that runs out.
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     # ---------- single sign-on, people, and the audit log ----------
 

@@ -296,6 +296,12 @@ def test_the_dashboard_is_sent_compressed(client):
     assert r.status_code == 200 and r.headers["content-encoding"] == "gzip" and "<title>Assay</title>" in r.text
 
 
+def test_the_browser_checks_for_a_new_dashboard_on_every_load(client):
+    # Otherwise it keeps an old page by its age, and an upgrade doesn't show (seen after a local upgrade).
+    r = client.get("/")
+    assert r.headers["cache-control"] == "no-cache"
+
+
 def test_gate_takes_a_percentile_statistic(client):
     base = [1000.0 + i for i in range(200)]
     body = {
