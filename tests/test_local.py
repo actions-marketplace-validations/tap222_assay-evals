@@ -310,6 +310,8 @@ def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_p
 
 def test_an_uploaded_run_says_which_repository_and_folder_it_came_from(project, capsys, tmp_path_factory,
                                                                       monkeypatch):
+    for k in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "GITHUB_ACTIONS"):  # who ran it: nobody in particular
+        monkeypatch.delenv(k, raising=False)
     from fastapi.testclient import TestClient
     from assay.api import create_app
     from assay.config import Settings

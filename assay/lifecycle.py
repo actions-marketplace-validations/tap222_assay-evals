@@ -107,6 +107,19 @@ def pending(engine: Engine, tenant: Optional[str] = None, ids: Optional[Iterable
         return [dict(r._mapping) for r in conn.execute(q)]
 
 
+PLAIN_TAG = ("assay_record", "plain")  # a test recorded by --assay-all: not an agent, so no agent checks
+
+
+def plain_runs(engine: Engine, tenant: str, ids: List[str]) -> set:
+    """The runs among ids that are plain tests (tagged by pytest --assay-all)."""
+    if not ids:
+        return set()
+    r = store.runs
+    with engine.connect() as conn:
+        rows = conn.execute(select(r.c.run_id, r.c.tags).where(and_(r.c.tenant == tenant, r.c.run_id.in_(list(ids))))).all()
+    return {x.run_id for x in rows if (x.tags or {}).get(PLAIN_TAG[0]) == PLAIN_TAG[1]}
+
+
 def run_checks(traj: dict, rules: List[dict], abandon_minutes: float = ABANDON_MINUTES,
                abandoned_why: Optional[str] = None) -> List[dict]:
     """The checks every run gets, reference or not. [{"check", "status", "reason"}]"""
@@ -122,6 +135,8 @@ def run_checks(traj: dict, rules: List[dict], abandon_minutes: float = ABANDON_M
         f"Never finished{where}: {abandoned_why or f'no events for {abandon_minutes:g} minutes'}."
         if status == "abandoned" else
         f"Failed{where}: {traj.get('error') or 'no error given'}.")
+    if traj.get("plain"):  # a plain test: its own asserts judge it; loops and contracts are for agents
+        return out
     if rules:
         crit = [b for b in ev["safety"] if b["severity"] == "critical"]
         add("safety", not crit, "; ".join(f"Broke “{b['label']}”: {b['detail']}" for b in crit))
@@ -151,7 +166,8 @@ def _checks_for_run(tenant: str, h: dict, traj: dict, rules: List[dict], refs: d
     done_ = found[0]  # "completed", so a run that never finished shows in the test run
     case = [{"field": "completed", "status": done_["status"], "expected": "the run finishes",
              "actual": h["status"] or "completed", "reason": done_["reason"]}]
-    case += agents.checks_for(traj, refs.get(h["case_id"]), rules)
+    if not traj.get("plain"):
+        case += agents.checks_for(traj, refs.get(h["case_id"]), rules)
     # The case's safety and efficiency checks cover these two; don't report them twice.
     found = [c for c in found if c["check"] not in ("safety", "loops", "plan", "injection")]
     found += [{"check": c["field"], "status": c["status"], "reason": c["reason"]} for c in case
@@ -184,8 +200,10 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
             errors = dict(conn.execute(select(store.runs.c.run_id, store.runs.c.error).where(
                 and_(store.runs.c.tenant == tenant, store.runs.c.run_id.in_(list(trajs)),
                      store.runs.c.error.is_not(None)))).all())
+        plain = plain_runs(engine, tenant, list(trajs))
         for tid, traj in trajs.items():
             traj["error"] = errors.get(tid)
+            traj["plain"] = tid in plain
         refs = agents.references(engine, tenant, {h["case_id"] for h in hs if h["case_id"]})
         checks, results, metrics = [], [], []
         for h in hs:

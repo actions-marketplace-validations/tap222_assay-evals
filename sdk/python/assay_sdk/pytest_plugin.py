@@ -12,8 +12,9 @@ don't take the fixture are left alone. Installed with assay-evals; nothing to co
 Every test, opt-in: `pytest --assay --assay-all` (or `[pytest] record = "all"` in assay.toml) records
 each test as a case, with or without the fixture: its pass or fail, its time, and the outbound HTTP
 calls it made (assay_sdk.http_calls). The whole suite is then compared with its last passing run, so
-the behavior diff shows a test that newly fails, stopped running, or calls something new. Assay's
-checks (contracts, PII) only apply to tests that take the fixture.
+the behavior diff shows a test that newly fails, stopped running, or calls something new. Such a
+test is tagged assay_record = "plain": Assay's agent checks (contracts, loops, tool errors, PII)
+are for agents, so only its own asserts and whether it finished judge it.
 
 With assay-server installed, the test also fails when the run does: after the test body, the run
 gets the checks `assay test` makes (the case's expectations, and the contracts and PII rules in
@@ -335,7 +336,7 @@ def pytest_runtest_call(item):
     _current_item = item
     if (getattr(item, "_assay_run", None) is None and os.environ.get("ASSAY_PATH")
             and _record_all(item.config)):  # a test without the fixture, recorded as a case of its own
-        case = _case(item)
+        case = _case(item, plain=True)
         next(case)
         item._assay_opened, item._assay_plain = case, True
     try:
@@ -421,7 +422,7 @@ def pytest_runtest_teardown(item):
         next(case, None)
 
 
-def _case(node):
+def _case(node, plain: bool = False):
     """One test as an Assay case: opens its run, yields it for the test, and when resumed after the
     test, records pytest's pass or fail as a check of its own."""
     if assay._client is None:
@@ -432,7 +433,8 @@ def _case(node):
                                                        or os.path.join(".assay", "events.jsonl")))
     node.user_properties.append(("assay_case", case_id(node.nodeid)))
     with assay.run(node.originalname or node.name, test=case_id(node.nodeid),
-                   tags={"pytest": node.nodeid[:200], **_rewording_tags(node)}) as run:
+                   tags={"pytest": node.nodeid[:200], **_rewording_tags(node),
+                         **({"assay_record": "plain"} if plain else {})}) as run:
         node._assay_run = run
         yield run
     report = getattr(node, "_assay_report", None)

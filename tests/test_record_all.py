@@ -198,3 +198,20 @@ def test_upload_carries_who_ran_it_and_the_weakened_tests(plain_project, monkeyp
 def test_a_bad_weakened_tests_tag_is_dropped_not_fatal():
     o = failures._origin({"repo": "r", "weakened_tests": "{not json", "commit": "abc1234"})
     assert o == {"repo": "r", "commit": "abc1234"}
+
+
+def test_a_plain_test_isnt_held_to_agent_checks(plain_project):
+    # Polling an endpoint three times is a loop for an agent, and just a test for a test.
+    (plain_project / "tests" / "test_poll.py").write_text(textwrap.dedent('''
+        import urllib.request
+        from server import start
+
+        def test_polls_until_ready():
+            base = start()
+            for _ in range(3):
+                assert urllib.request.urlopen(base + "/status").status == 200
+    '''), encoding="utf-8")
+    out = run(plain_project, "--assay-all")
+    assert out.returncode == 0 and "Looped" not in out.stdout, out.stdout
+    events, _ = recorded(plain_project)
+    assert all(e["tags"].get("assay_record") == "plain" for e in events if e.get("type") == "run.start")

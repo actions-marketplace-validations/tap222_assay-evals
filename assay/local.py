@@ -964,10 +964,11 @@ def check_pii(engine, source, run_id: str, pii: dict) -> None:
     heads = agents.run_trajectories(engine, TENANT, run_id)
     trajs = source.trajectories([h["trajectory_id"] for h in heads])
     requests = learn._inputs(engine, TENANT, [h["trajectory_id"] for h in heads])
+    plain = lifecycle.plain_runs(engine, TENANT, list(trajs))  # plain tests (--assay-all) aren't agents
     rows = []
     for h in heads:
         traj = trajs.get(h["trajectory_id"])
-        if traj is None:
+        if traj is None or h["trajectory_id"] in plain:
             continue
         found = pii_findings(traj, pii["allow"], (requests.get(h["trajectory_id"]) or {}).get("input"),
                              pii.get("answers", True), pii.get("answer_allow"))
