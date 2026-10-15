@@ -113,7 +113,7 @@ svg.spark{width:100%;height:34px;display:block}
 /* detail */
 .detail-head{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start}
 .picker{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-svg.chart{width:100%;height:auto;max-height:340px;display:block}
+svg.chart{width:100%;height:auto;display:block}  /* with its own size (width, height, max-width): a browser can shrink it to fit, never blow it up */
 svg.chart text{fill:var(--muted);font:11px var(--mono)}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
 .legend i{display:inline-block;width:18px;height:10px;vertical-align:middle;margin-right:6px;border-radius:2px}
@@ -381,8 +381,8 @@ function chart(h,m){
   g+=`<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
   g+=pts.map((p,i)=>{const last=i===pts.length-1,out=last&&h.band&&(p.value<h.band.low||p.value>h.band.high);
     return `<circle cx="${x(p.at)}" cy="${y(p.value)}" r="${last?4.5:2.5}" fill="${out?"var(--bad)":"var(--accent)"}"><title>${esc(p.at.slice(0,16).replace("T"," "))} · ${esc(fmt(p.value,m.unit))} · n=${p.n}</title></circle>`}).join("");
-  if(m.legend===false)return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.name)} over time">${g}</svg>`;
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.name)} over time">${g}</svg>
+  if(m.legend===false)return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:${W}px" role="img" aria-label="${esc(m.name)} over time">${g}</svg>`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:${W}px" role="img" aria-label="${esc(m.name)} over time">${g}</svg>
     <div class="legend"><span><i style="background:var(--accent)"></i>value per run</span>${h.band?`<span><i style="background:var(--band)"></i>expected range from the last ${h.band.points} runs</span>`:""}${h.slo?`<span><i style="border-top:2px dashed var(--warn);height:0"></i>SLO target</span>`:""}${(h.changes||[]).length?`<span><i style="border-top:2px dashed var(--accent-ink);height:0"></i>a prompt version went live</span>`:""}</div>`;
 }
 
@@ -780,7 +780,7 @@ function stackedChart(series,points){
     COMP_KEYS.forEach(k=>{const v=series[k]?.[i]||0;if(!v)return;g+=`<rect x="${x}" y="${y(base+v)}" width="${w}" height="${y(base)-y(base+v)}" fill="${COMP_COLOR[k]}"><title>${esc(at.slice(0,10))} · ${esc(COMP_LABEL[k])} ${esc(money(v))}</title></rect>`;base+=v});
     const every=Math.ceil(n/7);
     if(i%every===0&&(n-1-i>=every/2||i===n-1)||i===n-1)g+=`<text x="${x+w/2}" y="${H-8}" text-anchor="middle">${at.slice(5,10)}</text>`});
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Cost per document by component over time">${g}</svg>`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:${W}px" role="img" aria-label="Cost per document by component over time">${g}</svg>`;
 }
 async function renderCost(){
   const days=+(store.get("assay-cost-days")||7),by=store.get("assay-cost-by")||"document_type";

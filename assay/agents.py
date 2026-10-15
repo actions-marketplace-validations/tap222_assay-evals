@@ -804,6 +804,8 @@ def detail(engine: Engine, source, tenant: str, trajectory_id: str) -> Optional[
               or (c == "tool_calls" and ev["tool_calls"] and not ev["tool_calls"]["passed"])
               or (c == "safety" and any(b["severity"] == "critical" for b in ev["safety"]))
               or (c == "efficiency" and not ev["efficiency"]["passed"])]
+    if trajectory_id in plain_runs(engine, tenant, [trajectory_id]):
+        failed = []  # a plain test: its own asserts (recorded) judge it, not agent checks
     first_bad = credit(traj, ref, rules, None, ev) if failed else None
     recorded = recorded_checks(engine, tenant, [trajectory_id]).get(trajectory_id, [])
     if recorded_status(recorded) == "fail":
@@ -848,6 +850,7 @@ def summary(engine: Engine, source, tenant: str, run_id: str, baseline: Optional
         trajs = source.trajectories([h["trajectory_id"] for h in hs])
         refs = references(engine, tenant, {h["case_id"] for h in hs if h["case_id"]})
         recorded = recorded_checks(engine, tenant, [h["trajectory_id"] for h in hs])
+        plain = plain_runs(engine, tenant, list(trajs))  # plain tests: their own asserts, no agent checks
         per, mech, by_case = [], Counter(), defaultdict(list)
         checks = defaultdict(lambda: [0, 0])
         for h in hs:
@@ -856,7 +859,7 @@ def summary(engine: Engine, source, tenant: str, run_id: str, baseline: Optional
                 continue
             ref = refs.get(h["case_id"])
             ev = evaluate_one(t, ref, rules)
-            res = checks_for(t, ref, rules)
+            res = [] if h["trajectory_id"] in plain else checks_for(t, ref, rules)
             for c in res:
                 checks[c["field"]][0] += c["status"] == "pass"
                 checks[c["field"]][1] += 1

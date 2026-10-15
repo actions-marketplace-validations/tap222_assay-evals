@@ -241,3 +241,6 @@ def test_on_the_server_a_plain_test_is_judged_by_its_asserts_and_says_who_ran_it
     (r,) = server.get("/v1/evals/runs", params={"source": source}).json()
     assert r["failed"] == 0 and r["passed"] > 0  # three calls to /status aren't a loop for a test
     assert r["origin"]["ran_by_agent"] == "Claude Code" and r["origin"]["branch"] == "main"
+    agents_tab = server.get(f"/v1/agents/runs/{r['run_id']}", params={"source": source}).json()
+    assert not any("fail" in t["checks"].values() for t in agents_tab["current"]["trajectories_list"])
+    assert "efficiency" not in agents_tab["current"]["checks"]
