@@ -74,8 +74,8 @@ on a larger app, with JavaScript and TypeScript measured.
 - **Weakened-test guard.** Today a pull request can't delete, skip or filter out the test its
   change breaks. The guard adds the quieter ways a test stops checking anything: a loosened
   assertion (`toBe(1200)` becoming `toBeGreaterThan(0)`), an expected value rewritten in the
-  same pull request as the code it checks, a snapshot updated without review. An expected value
-  that only gained entries isn't flagged.
+  same pull request as the code it checks, a snapshot updated without review. (Built: an
+  expected value that only gained entries is no longer listed as rewritten.)
 
 Done when: a real app's whole suite is recorded with no test changes, recording adds under 10%
 to test time, and the guard flags the rewritten expected value found in P0 (4a4d5a0) and not

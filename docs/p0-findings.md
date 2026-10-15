@@ -88,8 +88,8 @@ flagged two expected values rewritten in the same change as the code they check:
    requirements file, lock file, ignore file, workflow or version pin changed, and no CI job
    in the pull request built, installed or deployed from it. That rule still needs to be checked
    against these 11 changes.
-3. **The guard's rewritten-value check stays.** It should ignore an expected value that only
-   gained entries, like #32.
+3. **The guard's rewritten-value check stays,** but no longer lists an expected value that only
+   gained entries, like #32 (done). Rerun on these two changes, it lists 4a4d5a0 and not #32.
 4. **To try next:** flag changed code that reads a setting (an environment variable) that every
    test leaves unset. That would have caught the `ASSAY_URL` bug. Logic bugs like field accuracy
    need a behavior diff, which P2 already plans, and won't come from coverage.
