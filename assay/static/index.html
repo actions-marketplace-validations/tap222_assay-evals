@@ -85,6 +85,7 @@ h3{font:600 16px var(--display);margin:0}
 .chip{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;padding:2px 7px;border-radius:999px;white-space:nowrap;display:inline-block}
 .chip.good{color:var(--good);background:var(--good-bg)}.chip.warn{color:var(--warn);background:var(--warn-bg)}
 .chip.bad{color:var(--bad);background:var(--bad-bg)}.chip.neutral{color:var(--muted);background:var(--sunk)}
+.chip.new{color:#fff;background:var(--accent);margin-left:6px;font-size:9.5px;padding:1px 6px;vertical-align:middle}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:500;padding:0 10px 8px 0;border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);vertical-align:top}
@@ -421,6 +422,7 @@ function renderEmpty(msg){
 }
 
 /* ---------- views, tabs and settings ---------- */
+const NEW_TABS=["gates"];  // tabs with something added since the last release, tagged "New" in the nav
 const TAB_INFO={overview:["Overview","The latest test run against the one before it"],diff:["Behavior diff","Any two test runs side by side"],
   failures:["Failures","Failures grouped into causes"],gates:["Release gates","Advance, hold or roll back, decided in CI"],
   prompts:["Prompts","Results for each prompt version"],agents:["Agents","Agent runs, step by step"],
@@ -447,7 +449,7 @@ function buildNav(){
   const on=enabledViews(),cur=currentView(),sw=$("#viewswitch");
   sw.hidden=on.length<2;
   sw.innerHTML=on.map(v=>`<button type="button" data-v="${v}" aria-pressed="${v===cur}">${v==="agents"?"Agents":"Documents"}</button>`).join("");
-  $("#tabs").innerHTML=[...viewTabs(cur),"projects","connect","settings"].map(t=>`${t==="projects"?`<span class="spacer"></span>`:""}<a href="#${t}" data-tab="${t}">${esc(TAB_INFO[t][0])}${t==="alerts"?`<span class="badge" id="alert-badge"${S.alertCount?"":" hidden"}>${S.alertCount||""}</span>`:""}</a>`).join("");
+  $("#tabs").innerHTML=[...viewTabs(cur),"projects","connect","settings"].map(t=>`${t==="projects"?`<span class="spacer"></span>`:""}<a href="#${t}" data-tab="${t}">${esc(TAB_INFO[t][0])}${NEW_TABS.includes(t)?`<span class="chip new">New</span>`:""}${t==="alerts"?`<span class="badge" id="alert-badge"${S.alertCount?"":" hidden"}>${S.alertCount||""}</span>`:""}</a>`).join("");
   markTab();
 }
 $("#viewswitch").onclick=e=>{const b=e.target.closest("[data-v]");if(!b)return;
@@ -2156,13 +2158,29 @@ async function renderAlerts(){
 }
 
 /* ---------- gates ---------- */
+const NEW=`<span class="chip new">New</span>`;
+const gnum=v=>v==null?"—":Math.abs(v)>=100?Math.round(v).toLocaleString():(+v.toFixed(4)).toString();
+// Every slice of one decision: the statistic compared, the margin it got, and the absolute limit.
+function gateSlices(d){
+  const S=d.slices||[];if(!S.length)return"";
+  const tone=o=>o==="advance"?"good":o==="hold"?"warn":"bad";
+  return `<details><summary>${S.length} slice${S.length===1?"":"s"}</summary><div class="scroll"><table>
+    <tr><th>Measure / slice</th><th>Outcome</th><th>Statistic${NEW}</th><th>Margin${NEW}</th><th>Absolute limit${NEW}</th><th>Change (95% CI)</th><th>n</th></tr>
+    ${S.map(s=>`<tr><td><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}</td><td><span class="chip ${tone(s.outcome)}">${esc(s.outcome)}</span></td>
+      <td class="mono">${esc(s.statistic||"mean")}</td>
+      <td class="num">${s.tolerance==null?"—":gnum(s.tolerance)}${s.own_margin?` <span class="chip neutral" title="This slice set its own margin, in place of the measure's">own</span>`:""}</td>
+      <td class="num">${s.absolute_limit==null?"—":`${gnum(s.absolute_limit)}${s.candidate_value==null?"":`<br><span class="note">candidate ${gnum(s.candidate_value)}${s.candidate_ci?` (${gnum(s.candidate_ci[0])} to ${gnum(s.candidate_ci[1])})`:""}</span>`}`}</td>
+      <td class="num">${s.worsening==null?"—":`${s.worsening>0?"worse":"better"} by ${gnum(Math.abs(s.worsening))}${s.ci?`<br><span class="note">${gnum(s.ci[0])} to ${gnum(s.ci[1])}</span>`:""}`}</td>
+      <td class="num">${s.n_baseline} → ${s.n_candidate}</td></tr>
+      <tr><td></td><td colspan="6" class="note">${esc(s.reason)}</td></tr>`).join("")}</table></div></details>`}
 async function renderGates(){
   const g=await api("/v1/gates").catch(()=>[]);
-  $("#tab-gates").innerHTML=`<div class="panel"><div class="panel-head"><div><h2>Release gates</h2><p class="sub">Every promote, hold or rollback decision, with the lineage that produced it. CI submits them to <code>POST /v1/gates/evaluate</code> (<a href="/docs#/default/evaluate_gate_v1_gates_evaluate_post">API docs</a>).</p></div></div>
+  $("#tab-gates").innerHTML=`<div class="panel"><div class="panel-head"><div><h2>Release gates</h2><p class="sub">Every promote, hold or rollback decision, with the lineage that produced it. CI submits them to <code>POST /v1/gates/evaluate</code> (<a href="/docs#/default/evaluate_gate_v1_gates_evaluate_post">API docs</a>).</p>
+    <p class="sub">${NEW} A rule can compare a percentile (<code>"statistic": "p95"</code>), set an absolute limit the candidate must keep whatever the baseline did (<code>"absolute_limit"</code>), and give a high-risk slice its own margin (<code>"slices"</code>). Open a decision's slices to see each one.</p></div></div>
     ${g.length?`<div class="scroll"><table><tr><th>When</th><th>Outcome</th><th>Lineage</th><th>Deciding slices</th></tr>
     ${g.map(d=>`<tr><td class="ref">${esc(d.created_at.slice(0,16).replace("T"," "))}</td><td><span class="chip ${d.outcome==="advance"?"good":d.outcome==="hold"||d.outcome==="rerun"?"warn":"bad"}">${d.outcome}</span></td>
       <td class="ref">${Object.entries(d.lineage).map(([k,v])=>`${esc(k)}=${esc(v)}`).join("<br>")}</td>
-      <td>${d.reasons?d.reasons.map(r=>`<div>${esc(r)}</div>`).join(""):d.slices.filter(s=>s.outcome!=="advance").map(s=>`<div><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}: ${esc(s.reason)}</div>`).join("")||"All slices within limits."}</td></tr>`).join("")}</table></div>`
+      <td>${d.reasons?d.reasons.map(r=>`<div>${esc(r)}</div>`).join(""):d.slices.filter(s=>s.outcome!=="advance").map(s=>`<div><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}: ${esc(s.reason)}</div>`).join("")||"All slices within limits."}${d.reasons?"":gateSlices(d)}</td></tr>`).join("")}</table></div>`
     :`<div class="empty">No gate decisions yet. Wire <code>POST /v1/gates/evaluate</code> into CI so every prompt, model or pipeline change is judged before it ships.</div>`}</div>`;
 }
 

@@ -323,3 +323,22 @@ def test_gate_takes_an_absolute_limit(client):
     d = client.post("/v1/gates/evaluate", json=body).json()
     s = d["slices"][0]
     assert d["outcome"] == "rollback" and s["absolute_limit"] == 20000 and s["candidate_value"] == 25000
+
+
+def test_gate_takes_a_margin_per_slice(client):
+    base = [1.0] * 190 + [0.0] * 10
+    cand = [1.0] * 180 + [0.0] * 20
+    body = {
+        "lineage": {"prompt": "idx-v12", "model": "claude-sonnet-5", "build": "abc123", "corpus": "cert-2026-09"},
+        "rules": [{"measure_id": "accuracy", "tolerance": 0.1, "min_n": 100,
+                   "slices": {"high_value": {"tolerance": 0.01}}}],
+        "samples": {"accuracy": {"routine": {"baseline": base, "candidate": cand},
+                                 "high_value": {"baseline": base, "candidate": cand}}},
+        "identical_runs": {"accuracy": [base, base[::-1]]},
+    }
+    d = client.post("/v1/gates/evaluate", json=body).json()
+    by = {s["slice"]: s for s in d["slices"]}
+    assert d["outcome"] == "rollback" and by["high_value"]["own_margin"] and by["high_value"]["tolerance"] == 0.01
+    assert by["routine"]["outcome"] == "advance" and not by["routine"]["own_margin"]
+    body["rules"][0]["slices"] = {"high_value": {"tolerence": 0.01}}
+    assert client.post("/v1/gates/evaluate", json=body).status_code == 422

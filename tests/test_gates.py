@@ -181,3 +181,40 @@ def test_absolute_limit_rolls_back_before_a_baseline_or_noise_floor_exists():
     assert d.outcome == HOLD and d.reason.startswith("Slice is unmeasured")  # within the limit isn't a pass
     few = gates.evaluate_slice(rule, "overall", None, cand[:50], floor=None)
     assert few.outcome == HOLD and few.candidate_value is None  # too few to check the limit either
+
+
+def test_a_high_risk_slice_gets_its_own_margin_and_blocks_alone():
+    # Both slices drop 3 points: within the measure's 5-point margin, past high_value's 1 point.
+    rule = GateRule("accuracy", tolerance=0.05, min_n=100, slices={"high_value": {"tolerance": 0.01}})
+    base, cand = outcomes(0.95, 2000, 41), outcomes(0.92, 2000, 42)
+    samples = {"accuracy": {"routine": {"baseline": base, "candidate": cand},
+                            "high_value": {"baseline": base, "candidate": cand}}}
+    d = gates.evaluate([rule], samples, {"accuracy": 0.005})
+    by = {s.slice: s for s in d.slices}
+    assert by["routine"].outcome == ADVANCE and by["routine"].tolerance == 0.05 and not by["routine"].own_margin
+    assert by["high_value"].outcome == ROLLBACK and by["high_value"].tolerance == 0.01 and by["high_value"].own_margin
+    assert d.outcome == ROLLBACK
+    flat = GateRule("accuracy", tolerance=0.05, min_n=100)
+    assert gates.evaluate([flat], samples, {"accuracy": 0.005}).outcome == ADVANCE
+
+
+def test_a_slice_margin_can_set_severity_min_n_and_an_absolute_limit():
+    rule = GateRule("accuracy", tolerance=0.04, min_n=100,
+                    slices={"regulated": {"severity": "high", "min_n": 500, "absolute_limit": 0.97}})
+    r = rule.for_slice("regulated")
+    assert (r.effective_tolerance, r.min_n, r.absolute_limit, r.slices) == (0.02, 500, 0.97, {})
+    assert rule.for_slice("other") is rule
+    try:
+        GateRule("accuracy", slices={"regulated": {"tolerence": 0.01}})
+    except ValueError as e:
+        assert "tolerence" in str(e)
+    else:
+        raise AssertionError("a misspelt slice field was accepted")
+
+
+def test_a_slice_with_its_own_margin_must_be_measured():
+    rule = GateRule("accuracy", tolerance=0.05, min_n=100, slices={"high_value": {"tolerance": 0.01}})
+    base = outcomes(0.95, 500, 43)
+    d = gates.evaluate([rule], {"accuracy": {"routine": {"baseline": base, "candidate": base}}}, {"accuracy": 0.005})
+    missing = next(s for s in d.slices if s.slice == "high_value")
+    assert d.outcome == HOLD and missing.reason.startswith("Slice is unmeasured") and missing.own_margin

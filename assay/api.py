@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import and_, delete, desc, or_, select
 
 from assay import (agents, alerts, audit, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, lifecycle, prompts, rootcause, runner, store, trace, views, workflow)
@@ -61,6 +61,14 @@ class RunRequest(BaseModel):
     measures: Optional[List[str]] = None
 
 
+class SliceMarginIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tolerance: Optional[float] = None
+    severity: Optional[str] = None
+    min_n: Optional[int] = None
+    absolute_limit: Optional[float] = None
+
+
 class RuleIn(BaseModel):
     measure_id: str
     higher_is_better: bool = True
@@ -71,6 +79,10 @@ class RuleIn(BaseModel):
     absolute_limit: Optional[float] = Field(
         None, description="The worst value the candidate's statistic may have, whatever the baseline did: "
                           "a maximum when lower is better, a minimum when higher is better")
+    slices: Dict[str, SliceMarginIn] = Field(
+        default_factory=dict, description="A slice's own margin, in place of the measure's: "
+                                          '{"high_value": {"tolerance": 0.005, "severity": "high"}}. '
+                                          "A slice named here must be measured, or the release holds")
 
     @field_validator("statistic")
     @classmethod
@@ -1572,7 +1584,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if missing:
             raise HTTPException(422, f"Lineage must record: {', '.join(missing)}. "
                                      "Every promote or rollback has to be traceable.")
-        rules = [gates.GateRule(**r.model_dump()) for r in req.rules]
+        rules = [gates.GateRule(**{**r.model_dump(exclude={"slices"}),
+                                   "slices": {k: v.model_dump(exclude_none=True) for k, v in r.slices.items()}})
+                 for r in req.rules]
         floors = {r.key: gates.noise_floor(req.identical_runs.get(r.measure_id, []), r.statistic) for r in rules}
         decision = gates.evaluate(rules,
                                   req.samples, floors, req.required_slices)
