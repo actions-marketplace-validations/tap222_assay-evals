@@ -398,6 +398,19 @@ async function loadSources(){
   const pick=all.includes(keep)?keep:all.includes(DEMO_SOURCE)?DEMO_SOURCE:all[0];
   $("#source").innerHTML=all.length?all.map(x=>`<option ${x===pick?"selected":""}>${esc(x)}</option>`).join(""):`<option value="">No sources yet</option>`;
 }
+// A project that starts uploading while the page is open joins the menu by itself: the list is read
+// again every 30 s while the tab is visible, and on coming back to it. The selection stays.
+async function syncSources(){
+  if(document.hidden)return;
+  const s=await api("/v1/sources").catch(()=>null);if(!s)return;
+  const sel=$("#source"),had=[...sel.options].map(o=>o.value).filter(Boolean);
+  const fresh=[...new Set([...s.configured,...s.with_results])].filter(x=>!had.includes(x));
+  if(!fresh.length)return;
+  if(!had.length){await loadSources();await refresh();return}  // the menu said "No sources yet"
+  fresh.forEach(x=>sel.add(new Option(x,x)));
+}
+setInterval(syncSources,30000);
+document.addEventListener("visibilitychange",syncSources);
 // The header's "Last run": the newer of the latest measure run and the latest test run.
 async function showLastRun(){
   const s=src(),el=$("#updated");
@@ -497,6 +510,15 @@ function renderSettings(){
 /* ---------- all projects ---------- */
 // Where a test run came from: its git remote and its folder, as the upload recorded them.
 const fromWhere=o=>o?[o.repo&&`<span class="mono">${esc(o.repo)}</span>`,o.folder&&`<span class="mono">${esc(o.folder)}</span>`].filter(Boolean).join(" · "):"";
+// How to send another repository's runs here, new or already set up: it shows up in the menu on its first upload.
+const addRepo=()=>`<div class="panel stack"><div><h2>Add a repository<span class="chip new">New</span></h2>
+  <p class="sub">In the repository, new or already using Assay. Its first run shows up here and in the project menu, under the repository's name, within 30 seconds.</p></div>
+<pre class="code">pip install -U assay-server pytest
+export ASSAY_URL=${esc(location.origin)}
+export ASSAY_UPLOAD=1          # every run is sent, from any repository
+export ASSAY_BASE_REF=origin/main   # so tests a change weakened are found
+pytest --assay --assay-all tests    # every test, its HTTP calls, and who ran it</pre>
+  <p class="note">Without <code>--assay-all</code>, only tests that take the <code>assay_case</code> fixture are recorded. Put <code>[pytest] record = "all"</code> in <code>assay.toml</code> to make it the default. Run from Claude Code, the run says so, with its session.</p></div>`;
 // Every repository that sends its test runs here, filed under its name: its latest run against the one before.
 async function renderProjects(){
   const box=$("#tab-projects");
@@ -505,7 +527,7 @@ async function renderProjects(){
   if(!list.length){box.innerHTML=`<div class="panel stack"><div><h2>All projects</h2><p class="sub">Each repository that sends its test runs here gets a row, under its own name.</p></div>
 <pre class="code">export ASSAY_URL=${esc(location.origin)}
 export ASSAY_UPLOAD=1          # every run is sent, from any repository
-pytest --assay tests</pre></div>`;return}
+pytest --assay --assay-all tests</pre></div>${addRepo()}`;return}
   const worse=x=>x.counts?x.counts.regressed+x.counts.new_failures:0,bad=list.filter(worse).length;
   list=[...list.filter(worse),...list.filter(x=>!worse(x))];  // what regressed first, then by latest run
   const row=x=>{const k=x.counts,L=x.latest,w=worse(x);
@@ -521,7 +543,7 @@ pytest --assay tests</pre></div>`;return}
   </div>
   <div class="panel"><div class="panel-head"><div><h2>All projects</h2><p class="sub">Each repository's latest test run against the one before it. Open one to see what changed.</p></div></div>
     <div class="scroll"><table><tr><th>Project</th><th>Latest run</th><th class="num">Checks passed</th><th class="num">Changed</th><th class="num">Flaky</th><th class="num">Runs</th><th>When</th></tr>
-    ${list.map(row).join("")}</table></div></div>`;
+    ${list.map(row).join("")}</table></div></div>${addRepo()}`;
   box.querySelectorAll("[data-project]").forEach(r=>r.onclick=()=>{
     const s=r.dataset.project,sel=$("#source");
     if(![...sel.options].some(o=>o.value===s))sel.insertAdjacentHTML("beforeend",`<option>${esc(s)}</option>`);
@@ -543,8 +565,8 @@ async function renderTests(){
   if(!runs.length){box.innerHTML=demo+`<div class="panel stack"><div><h2>No test runs here yet</h2><p class="sub">Send your pytest runs to this server, and each run is compared with the one before it: what regressed, what changed, and what's flaky.</p></div>
 <pre class="code">pip install assay-server pytest
 export ASSAY_URL=${esc(location.origin)}
-export ASSAY_KEY=ak_...        # an API key from Connect
-pytest --assay --assay-upload tests</pre>
+export ASSAY_KEY=ak_...        # an API key from Connect (not needed in open mode)
+pytest --assay --assay-all --assay-upload tests   # --assay-all: every test, not only assay_case ones</pre>
     <p class="note"><a href="${GUIDE}" target="_blank" rel="noopener">Getting started</a> shows the two lines to add to your app and a first test.</p></div>`;return}
   const cur=runs[0],prev=runs[1];
   const NEWTAG=`<span class="chip new">New</span>`;
