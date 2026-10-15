@@ -68,6 +68,9 @@ class RuleIn(BaseModel):
     min_n: int = 30
     severity: str = "normal"
     statistic: str = Field("mean", description='"mean", or a percentile such as "p95" for latency')
+    absolute_limit: Optional[float] = Field(
+        None, description="The worst value the candidate's statistic may have, whatever the baseline did: "
+                          "a maximum when lower is better, a minimum when higher is better")
 
     @field_validator("statistic")
     @classmethod

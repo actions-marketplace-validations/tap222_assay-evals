@@ -132,3 +132,52 @@ def test_mean_and_p95_rules_on_one_measure_keep_their_own_floors():
     d = gates.evaluate(rules, samples, {"latency_ms": 5.0, "latency_ms:p95": 30.0})
     assert [s.noise_floor for s in d.slices] == [5.0, 30.0]
     assert d.outcome == ADVANCE
+
+
+def test_a_slow_baseline_doesnt_excuse_a_candidate_past_the_absolute_limit():
+    # Both versions are slow; the candidate is no worse, so only the absolute limit catches it.
+    base = latencies(400, 21, slow_share=0.1, slow_ms=25000.0)
+    rule = GateRule("latency_ms", higher_is_better=False, tolerance=500, min_n=100, statistic="p95",
+                    absolute_limit=20000.0)
+    d = gates.evaluate_slice(rule, "overall", base, base, floor=100.0)
+    assert d.outcome == ROLLBACK and d.candidate_value == 25000.0 and d.absolute_limit == 20000.0
+    assert d.reason.startswith("The candidate's p95 is 25000.0000; even the optimistic end")
+    no_limit = GateRule("latency_ms", higher_is_better=False, tolerance=500, min_n=100, statistic="p95")
+    assert gates.evaluate_slice(no_limit, "overall", base, base, floor=100.0).outcome == ADVANCE
+
+
+def test_a_candidate_within_the_absolute_limit_keeps_the_baseline_decision():
+    base = latencies(400, 22)
+    rule = GateRule("latency_ms", higher_is_better=False, tolerance=100, min_n=100, statistic="p95",
+                    absolute_limit=20000.0)
+    d = gates.evaluate_slice(rule, "overall", base, base, floor=20.0)
+    assert d.outcome == ADVANCE and "stays within the absolute maximum 20000.0000" in d.reason
+    assert d.candidate_ci[0] <= d.candidate_value <= d.candidate_ci[1] < 20000
+
+
+def test_a_candidate_whose_interval_straddles_the_absolute_limit_holds():
+    cand = latencies(400, 23)
+    p95 = gates.percentile(cand, 95)
+    rule = GateRule("latency_ms", higher_is_better=False, tolerance=100, min_n=100, statistic="p95",
+                    absolute_limit=p95)
+    d = gates.evaluate_slice(rule, "overall", cand, cand, floor=20.0)
+    assert d.outcome == HOLD and "Collect more samples" in d.reason
+
+
+def test_absolute_limit_is_a_minimum_when_higher_is_better():
+    rule = GateRule("accuracy", tolerance=0.05, min_n=100, absolute_limit=0.9)
+    low = outcomes(0.8, 500, 31)
+    assert gates.evaluate_slice(rule, "overall", low, low, floor=0.01).outcome == ROLLBACK
+    high = outcomes(0.97, 500, 32)
+    assert gates.evaluate_slice(rule, "overall", high, high, floor=0.01).outcome == ADVANCE
+
+
+def test_absolute_limit_rolls_back_before_a_baseline_or_noise_floor_exists():
+    cand = latencies(400, 24, slow_share=0.1, slow_ms=25000.0)
+    rule = GateRule("latency_ms", higher_is_better=False, min_n=100, statistic="p95", absolute_limit=20000.0)
+    assert gates.evaluate_slice(rule, "overall", None, cand, floor=None).outcome == ROLLBACK
+    fine = latencies(400, 25)
+    d = gates.evaluate_slice(rule, "overall", None, fine, floor=None)
+    assert d.outcome == HOLD and d.reason.startswith("Slice is unmeasured")  # within the limit isn't a pass
+    few = gates.evaluate_slice(rule, "overall", None, cand[:50], floor=None)
+    assert few.outcome == HOLD and few.candidate_value is None  # too few to check the limit either

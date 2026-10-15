@@ -309,3 +309,17 @@ def test_gate_takes_a_percentile_statistic(client):
     assert d["outcome"] == "rollback" and d["slices"][0]["statistic"] == "p95"
     body["rules"][0]["statistic"] = "median"
     assert client.post("/v1/gates/evaluate", json=body).status_code == 422
+
+
+def test_gate_takes_an_absolute_limit(client):
+    slow = [25000.0 if i % 10 == 0 else 1000.0 + i for i in range(200)]
+    body = {
+        "lineage": {"prompt": "idx-v12", "model": "claude-sonnet-5", "build": "abc123", "corpus": "cert-2026-09"},
+        "rules": [{"measure_id": "latency_ms", "higher_is_better": False, "tolerance": 50, "min_n": 100,
+                   "statistic": "p95", "absolute_limit": 20000}],
+        "samples": {"latency_ms": {"overall": {"baseline": slow, "candidate": slow}}},
+        "identical_runs": {"latency_ms": [slow, slow]},
+    }
+    d = client.post("/v1/gates/evaluate", json=body).json()
+    s = d["slices"][0]
+    assert d["outcome"] == "rollback" and s["absolute_limit"] == 20000 and s["candidate_value"] == 25000
