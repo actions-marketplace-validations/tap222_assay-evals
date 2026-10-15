@@ -94,8 +94,63 @@ flagged two expected values rewritten in the same change as the code they check:
    test leaves unset. That would have caught the `ASSAY_URL` bug. Logic bugs like field accuracy
    need a behavior diff, which P2 already plans, and won't come from coverage.
 
+## Second replay: a booking app, and database writes
+
+The question here was narrower: would recording what each test writes to the database
+have caught bugs the first replay couldn't? The app is a booking system in production
+(NestJS, TypeORM, Postgres, Jest), with 548 commits over ten weeks. 28 of its 185 test
+files write real rows to a test database. All 44 commits marked as fixes were read, diff
+and message; the tests were not run. Two were duplicates and one fixed only tests, which
+leaves 41.
+
+| What the bug was | Fixes | Would recording writes have shown it? |
+|---|---|---|
+| Wrong data saved | 6 | Yes |
+| A wrong write from a timed job (no-show sweep, auto-start) | 2 | Only if a test runs the job at the right time |
+| A query that errors (wrong column, missing cast, bad enum value) | 10 | No: running the query already fails |
+| A wrong response, nothing saved wrong | 7 | No: that's the response diff |
+| Access and login checks | 6 | No |
+| Outside services, deploy and config | 7 | Partly, through the HTTP recording (a welcome email never sent, a payment's currency) |
+| Input checks and messages | 3 | No |
+
+The six that saved wrong data:
+
+- Bookings kept their branch only in a metadata field, never the branch column, so they
+  landed in a hidden queue.
+- A pin given when a location was created was dropped, and the address geocoded instead.
+- Cart bookings saved the wrong price, amount paid and amount due.
+- New businesses were saved in UTC, not their country's timezone, so their hours and
+  reminders ran 5½ hours off.
+- Adding a returning customer at the desk reused their finished booking, so no new queue
+  place was written while the desk was told "Added".
+- A staff profile created without a name was saved as "Unknown".
+
+**All six were wrong from the commit that added the feature; none was a regression.** A
+diff against the base branch would have listed each write as new, with nothing to say it
+was wrong. Two simpler checks on new writes would have caught four:
+
+- **A value in the request that never reaches the row:** the branch, the pin.
+- **A column left at its default or a placeholder:** the branch (empty), the timezone
+  (`UTC`), the name (`Unknown`).
+
+The other two need a rule: an amount marked paid with no charge made, and a success
+response with nothing written.
+
+### What changes on the roadmap
+
+5. **P1 records database writes as a summary,** not raw SQL: table, operation and the
+   columns set, with reads only counted (which also covers the slow dashboard above). The
+   first driver is node-postgres under Jest, since this is the app it was proven on.
+6. **New writes are checked,** not only diffed: a request value that never reaches the row,
+   and a column left at its default, ranked money first, then times and timezones, then ids.
+   Diffing writes against the base branch stays, for regressions.
+
 ## Limits
 
 Nine bugs is a small sample, and the oldest come from a time without pull requests or CI.
-P0 should be repeated on a larger app with a longer pull-request history, and with its
-JavaScript and TypeScript code measured, before P2 starts.
+
+The second replay sorted 41 fixes from one app by reading them. It wasn't checked whether a
+test ran the code behind each of the six; where none did, recording wouldn't have helped.
+It also didn't measure report size or noise, so P0's targets still need a full replay on an
+app with a longer pull-request history, with its JavaScript and TypeScript code measured,
+before P2 starts.

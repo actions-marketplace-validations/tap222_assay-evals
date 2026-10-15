@@ -65,12 +65,21 @@ changed functions no test ran would have flagged 1 of 9 later-fixed bugs. Change
 deploy and dependency changes would flag 6 of 9. P2 below is changed to match. Next: repeat it
 on a larger app, with JavaScript and TypeScript measured.
 
+Second replay, on a booking app's 41 fixes, asked only about database writes
+([findings](p0-findings.md#second-replay-a-booking-app-and-database-writes)): 6 saved wrong
+data, all wrong from the start rather than regressions. Checks on new writes would have
+caught 4; a diff against the base branch alone, none. P1 below is changed to match.
+
 ### P1. Record every test, and guard the tests
 
 - Every existing test is recorded, AI or not, with no `assayCase()` or `assay_case` needed: a
   Jest and Vitest reporter, and the pytest plugin.
 - What the code did in each test: outside calls (HTTP), database writes, AI calls, responses
-  and time. HTTP and one database driver first; more only where they catch real bugs.
+  and time. HTTP and one database driver first (node-postgres); more only where they catch
+  real bugs.
+- Database writes as a summary, not raw SQL: table, operation and the columns set. Reads are
+  only counted. New writes are checked for a request value that never reaches the row and a
+  column left at its default, ranked money first, then times and timezones, then ids.
 - **Weakened-test guard.** Today a pull request can't delete, skip or filter out the test its
   change breaks. The guard adds the quieter ways a test stops checking anything: a loosened
   assertion (`toBe(1200)` becoming `toBeGreaterThan(0)`), an expected value rewritten in the
