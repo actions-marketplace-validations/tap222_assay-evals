@@ -2698,7 +2698,12 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     inconclusive = passed and bool(result["not_judged"] or result["summary"]["buckets"]["needs reruns"]
                                    or any(p["worse"] for p in result.get("_judge_unstable") or []))
     baseline_before = dict(state.get("baseline_cases") or {})
+    if baseline:  # read before a passing run replaces the per-case baseline with itself
+        from assay import diff
+        flows_before = diff.flows(engine, TENANT, baseline)
     if passed and not inconclusive:
+        if baseline == BASELINE and baseline_before:  # what `assay diff` compares this run with once it's the baseline
+            state["compared"] = {"run": run_id, "cases": baseline_before}
         # A pass rate that dropped within chance passes, but isn't the new bar: otherwise a few such runs
         # in a row would walk a case from 8/8 down to 4/8 without ever failing.
         state["baseline_cases"] = {**(state.get("baseline_cases") or {}),
@@ -2746,14 +2751,19 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
             state["baseline_cases"] = baseline_before
     result["policy"] = policy
     if baseline:  # what each case did, next to what its baseline did
-        from assay import diff
-        before, now = diff.flows(engine, TENANT, baseline), diff.flows(engine, TENANT, run_id)
+        before, now = flows_before, diff.flows(engine, TENANT, run_id)
         result["flows"] = {c: (before[c]["flow"], now[c]["flow"]) for c in before.keys() & now.keys()
                            if before[c]["flow"] != now[c]["flow"]}
         moved = len(result["flows"])
         if moved:
             text += "\n" + _paint(f"{_n(moved, 'case')} took a different path than {'its' if moved == 1 else 'their'} "
                                    f"baseline: `assay diff` shows what changed.", "dim")
+        wrote = sorted(c for c in before.keys() & now.keys() - result["flows"].keys()
+                       if diff.database_change(before[c]["db"], now[c]["db"]))
+        if wrote:
+            text += "\n" + _paint(f"{_n(len(wrote), 'case')} wrote to the database differently than "
+                                   f"{'its' if len(wrote) == 1 else 'their'} baseline: `assay diff` shows what changed.",
+                                   "dim")
     # What's left to rerun (`--failed`): everything that didn't simply pass.
     state["rerun"] = sorted(set().union(*(v for k, v in result["summary"]["buckets"].items() if k != "passed")))
     _save_state(home, state)

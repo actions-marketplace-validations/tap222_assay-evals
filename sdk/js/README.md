@@ -106,6 +106,37 @@ assay test --upload # also send the run to your Assay dashboard (ASSAY_URL)
 The first passing run becomes each case's baseline. Plain `npx jest` runs the same tests with
 nothing recorded: events are written only to `ASSAY_PATH`, which `assay test` sets.
 
+## Every test, and what it writes to the database
+
+Your existing Jest tests, recorded without changing them: add the setup file to Jest's config.
+
+```js
+// jest.config.js, or "jest" in package.json
+setupFilesAfterEnv: ["assay-evals/jest"]
+```
+
+Under `assay test`, each test is a case named `<file>::<test name>`, with its pass or fail and
+what it wrote to Postgres through `pg` (TypeORM, Knex and others are built on it). Each write is a
+step: the operation and table, the columns it set and the ones it left empty (DEFAULT, NULL, or a
+parameter bound to null). Values are never recorded, and reads are only counted per table.
+`assay diff` then shows what changed:
+
+```
+1. books a slot
+   DB INSERT bookings: now leaves locationId empty
+
+2. checks someone in
+   DB UPDATE bookings: twice instead of once
+
+3. lists services
+   reads of services: 12 instead of 1
+```
+
+Plain `npx jest` records nothing. These tests aren't held to the agent checks (loops, tool
+errors, PII): only their own asserts judge them. Writes in a test's own `beforeEach` and
+`afterEach` count as the test's; those in `beforeAll` and `afterAll` aren't recorded. Writes made
+inside an `assayCase()` aren't recorded yet. Needs Jest's default runner, jest-circus.
+
 ## API
 
 | | |

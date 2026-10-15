@@ -50,9 +50,13 @@ RULE = "─" * 32
 
 # ---------- flows ----------
 
+DB_READS = "DB reads"  # a run's reads per table (assay-evals/jest): counted, left out of the flow
+READS_GREW = (2, 5)  # reads of a table that at least doubled and grew by 5 or more are a change
+
+
 def _step_label(s: dict) -> Optional[str]:
     if s["kind"] == "tool":
-        return s["name"]
+        return None if s["name"] == DB_READS else s["name"]
     if s["kind"] == "approval":
         decision = (s.get("args") or {}).get("decision")
         return f"approval({s['name']})" if decision in (None, "approved") else f"approval({s['name']}: {decision})"
@@ -63,6 +67,54 @@ def _step_label(s: dict) -> Optional[str]:
 
 def flow(traj: dict) -> Tuple[str, ...]:
     return tuple(x for x in (_step_label(s) for s in traj["steps"]) if x)
+
+
+def database(traj: dict) -> dict:
+    """What a run did to the database: {"writes": {"DB INSERT bookings": {"set": [...], "empty": [...]}},
+    "reads": {table: n}}. A write made more than once sets every column any of them set, and leaves
+    empty only what all of them left empty."""
+    writes, reads = {}, {}
+    for s in traj["steps"]:
+        if s["kind"] != "tool" or not str(s.get("name") or "").startswith("DB "):
+            continue
+        a = s.get("args") or {}
+        if s["name"] == DB_READS:
+            reads = {k: v for k, v in a.items() if isinstance(v, int)}
+            continue
+        w = writes.setdefault(s["name"], {"set": set(), "empty": None})
+        w["set"] |= set(a.get("set") or [])
+        empty = set(a.get("empty") or [])
+        w["empty"] = empty if w["empty"] is None else w["empty"] & empty
+    return {"writes": {k: {"set": sorted(w["set"]), "empty": sorted(w["empty"] or [])} for k, w in writes.items()},
+            "reads": reads}
+
+
+def database_change(before: dict, now: dict) -> List[str]:
+    """How the same writes changed (a write added or dropped is in the flow), and reads that grew a lot."""
+    out = []
+    for name in sorted(set(before["writes"]) & set(now["writes"])):
+        b, n = before["writes"][name], now["writes"][name]
+        parts = []
+        dropped = [c for c in b["set"] if c not in n["set"]]
+        empty = [c for c in n["empty"] if c not in b["empty"]]
+        filled = [c for c in b["empty"] if c not in n["empty"] and c in n["set"]]
+        also = [c for c in n["set"] if c not in b["set"] and c not in n["empty"]]
+        if dropped:
+            parts.append(f"no longer sets {', '.join(dropped)}")
+        if empty:
+            parts.append(f"now leaves {', '.join(empty)} empty")
+        if filled:
+            parts.append(f"now fills {', '.join(filled)}")
+        if also:
+            parts.append(f"now also sets {', '.join(also)}")
+        if parts:
+            out.append(f"{name}: {'; '.join(parts)}")
+    times, more = READS_GREW
+    for table in sorted(set(before["reads"]) | set(now["reads"])):
+        was, is_ = before["reads"].get(table, 0), now["reads"].get(table, 0)
+        if is_ >= times * max(was, 1) and is_ - was >= more:
+            out.append(f"reads of {table}: {is_} instead of {was}")
+    return out
 
 
 def flows(engine, tenant: str, run_id: str) -> Dict[str, dict]:
@@ -83,7 +135,7 @@ def flows(engine, tenant: str, run_id: str) -> Dict[str, dict]:
             top, n = seen.most_common(1)[0]
             trace = min(d for d in ds if d in trajs and flow(trajs[d]) == top)  # one run that took it
             out[case] = {"flow": top, "distinct": len(seen), "attempts": sum(seen.values()), "top_count": n,
-                         "trace": trace}
+                         "trace": trace, "db": database(trajs[trace])}
     return out
 
 
@@ -107,6 +159,16 @@ def flow_change(before: Tuple[str, ...], now: Tuple[str, ...]) -> Optional[dict]
             "counts": counts}
 
 
+def change(before: dict, now: dict) -> Optional[dict]:
+    """How a case's behavior changed: its flow, and what it wrote to the database ("db")."""
+    ch = flow_change(before["flow"], now["flow"])
+    db = database_change(before.get("db") or {"writes": {}, "reads": {}}, now.get("db") or {"writes": {}, "reads": {}})
+    if not db:
+        return ch
+    ch = ch or {"added": [], "removed": [], "reordered": False, "approval_moved": False, "counts": {}}
+    return {**ch, "db": db}
+
+
 def _describe(ch: dict) -> str:
     parts = []
     if ch["approval_moved"]:
@@ -119,6 +181,7 @@ def _describe(ch: dict) -> str:
         parts.append(f"no longer: {', '.join(ch['removed'])}")
     for step, (was, is_) in (ch.get("counts") or {}).items():
         parts.append(f"{step}: {_times(is_)} instead of {_times(was)}")
+    parts += ch.get("db") or []
     return "; ".join(parts) or "changed"
 
 
@@ -180,7 +243,7 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
     worse = {x["case_id"]: x["changes"] for x in result.get("behavior") or []}
 
     def entry(case: str) -> dict:
-        ch = flow_change(before[case]["flow"], now[case]["flow"]) if case in before and case in now else None
+        ch = change(before[case], now[case]) if case in before and case in now else None
         checks = [(f, r) for f, r in failing_fields.get(case, [])]
         fields = [f for f, _ in checks]
         reasons = [local._tidy(f"{local._label(f)}: {r.splitlines()[0][:200]}") for f, r in checks]
@@ -214,7 +277,7 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
     regressions.sort(key=lambda e: (rank[e["severity"]], "field" in e, e["name"]))
     improved = set(s["improved"])
     changed = [entry(case) for case in b["passed"] if case not in improved and case in before and case in now
-               and before[case]["flow"] != now[case]["flow"]]
+               and change(before[case], now[case])]
     for e in changed:
         e["severity"] = None
     flaky = []
@@ -262,9 +325,10 @@ def _entry_lines(i: int, e: dict, paint) -> List[str]:
     if "field" in e:
         return out + [f"   {e['change']}", f"   Severity: {e['severity']}"]
     if e.get("flow_change"):
-        out += [f"   Expected: {' → '.join(e['expected']) or '(no calls)'}",
-                f"   Actual:   {' → '.join(e['actual']) or '(no calls)'}" + (" (varies across attempts)" if e["varies"] else ""),
-                paint(f"   {e['flow_change']['text'][:1].upper()}{e['flow_change']['text'][1:]}", "dim")]
+        if e["expected"] != e["actual"]:  # the same steps, with other columns: only the text says how
+            out += [f"   Expected: {' → '.join(e['expected']) or '(no calls)'}",
+                    f"   Actual:   {' → '.join(e['actual']) or '(no calls)'}" + (" (varies across attempts)" if e["varies"] else "")]
+        out.append(paint(f"   {e['flow_change']['text'][:1].upper()}{e['flow_change']['text'][1:]}", "dim"))
     for r in e["reasons"][:2]:
         out.append(f"   {r}")
     if len(e["reasons"]) > 2:
@@ -371,8 +435,11 @@ def markdown(d: dict) -> str:
                 continue
             out.append(f"{i}. {_code(e['name'])}{sev}")
             if e.get("flow_change"):
-                out += [f"   - Expected: {_code(' → '.join(e['expected']) or '(no calls)', 300)}",
-                        f"   - Actual: {_code(' → '.join(e['actual']) or '(no calls)', 300)}"]
+                if e["expected"] != e["actual"]:
+                    out += [f"   - Expected: {_code(' → '.join(e['expected']) or '(no calls)', 300)}",
+                            f"   - Actual: {_code(' → '.join(e['actual']) or '(no calls)', 300)}"]
+                if e["flow_change"].get("db"):  # the flow can't show a column a write stopped setting
+                    out += [f"   - {_md(x)}" for x in e["flow_change"]["db"]]
             out += [f"   - {_md(r)}" for r in e["reasons"][:2]]
             out += [f"   - Changed: {_md(x)}" for x in e.get("setup") or []]
     if d.get("judge_unstable"):
@@ -413,6 +480,14 @@ def main(root, baseline_ref: Optional[str], current_ref: Optional[str], fmt: str
     current = resolve(runs, current_ref) if current_ref else (state.get("last") or runs[0]["run_id"])
     if baseline_ref:
         baseline = resolve(runs, baseline_ref)
+    elif (state.get("compared") or {}).get("run") == current and state.get("last") == current:
+        # The run passed and became the baseline itself: compare it with the run its cases were compared with.
+        cases = Counter(state["compared"]["cases"].values())
+        known = {r["run_id"] for r in runs}
+        baseline = next((run for run, _ in cases.most_common() if run in known), None) or local.BASELINE
+        if len(cases) > 1:
+            print(f"Compared with {baseline}, the baseline of {cases[baseline]} of {sum(cases.values())} cases.",
+                  file=sys.stderr)
     elif state.get("baseline_cases"):
         baseline = local.BASELINE  # each case's last passing run, as `assay test` compares
     else:

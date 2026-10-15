@@ -87,6 +87,16 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
   `CLAUDE_CODE_SESSION_ID`), GitHub Actions, or a person, with the branch, the commit and whether
   there were uncommitted changes. With `ASSAY_BASE_REF` set, the tests the change weakened go
   with the run too, so the dashboard's Overview shows both.
+- **Every Jest test, and what it writes to the database (opt-in):** `setupFilesAfterEnv:
+  ["assay-evals/jest"]` in the Jest config records each test under `assay test` as a case, with
+  its pass or fail and what it wrote to Postgres through `pg` (so TypeORM, Knex and others built on
+  it too). Each INSERT, UPDATE and DELETE is a step named after its table (`DB INSERT bookings`)
+  with the columns it set and the ones it left empty: DEFAULT, NULL or a parameter bound to null.
+  Values are never kept. Reads are only counted per table. The behavior diff then says what
+  changed in the same write ("DB INSERT bookings: no longer sets locationId", "now leaves amount
+  empty"), a write made twice instead of once, and reads of a table that at least doubled and
+  grew by 5 or more ("reads of services: 12 instead of 1"). Writes in a test's own `beforeEach`
+  and `afterEach` count as the test's; those in `beforeAll` and `afterAll` aren't recorded.
 - **Safety rules:** go in `assay.toml` as path contracts, e.g. `never delete_order`, or
   `refund only_after get_order`. Every agent run is checked against them.
 - **PII:** personal data (email, card, IBAN, SSN, phone) in a tool's arguments fails the PII
