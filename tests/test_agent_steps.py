@@ -247,11 +247,20 @@ def test_transition_matrix_where_failures_cluster_and_what_got_worse(tmp_path):
         *[ev(1 + i, type="step", seq=i, kind="tool", name="HTTP GET testserver/v1/jobs", args={}, result={"status": 200})
           for i in range(3)], ev(9, type="run.end", status="completed")])
     m = c.get("/v1/agents/matrix", params={**SRC, "run": "r1"}).json()
-    assert (m["runs"], m["failed"]) == (5, 4) and not any("HTTP" in s for s in m["states"])
+    assert (m["runs"], m["failed"], m["plain_left_out"]) == (5, 4, 1) and not any("HTTP" in s for s in m["states"])
+    # In plain words, with every run to open, and the same failing runs the run summary counts.
+    top = next(x for x in m["cells"] if x["from"] == "gen_sql")
+    assert top["sentence"] == "gen_sql worked, then exec_sql went wrong"
+    assert sorted(r["case"] for r in top["runs"]) == ["a", "b", "c"] and "syntax error" in top["runs"][0]["detail"]
+    s = c.get("/v1/agents/runs/r1", params=SRC).json()
+    failing = {t["trajectory_id"] for t in s["current"]["trajectories_list"]
+               if any(k != "recorded" and v == "fail" for k, v in t["checks"].items())}
+    assert failing == {r["trajectory_id"] for x in m["cells"] for r in x["runs"]}
     d = c.get("/v1/agents/matrix", params={**SRC, "run": "r1", "baseline": "r0"}).json()
     assert d["worse"][0]["from"] == "gen_sql" and d["worse"][0]["change"] == 2
     txt = transitions.text(d)
-    assert "Got worse:" in txt and "gen_sql → exec_sql: 3 (+2)" in txt
+    assert "3 (+2)  gen_sql worked, then exec_sql went wrong: Tool error, not recovered 3" in txt
+    assert "plain tests left out" in txt and "last ok" not in txt
     # From the first failures people marked, in production.
     ts = (datetime.utcnow() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     ev = lambda i, **k: {"v": 1, "id": f"p-{i}", "ts": ts, "run_id": "prod-1", **k}

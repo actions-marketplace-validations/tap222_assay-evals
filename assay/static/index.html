@@ -1526,20 +1526,37 @@ function lifecyclePanel(l){
           .map(([why,checks])=>`<div><b>${esc([...new Set(checks)].join(", "))}</b> <span class="ref" title="${esc(why)}">${esc(why.length>140?why.slice(0,140)+"…":why)}</span></div>`).join("")}</td><td class="ref">${esc(r.evaluated_at.slice(0,16).replace("T"," "))}</td></tr>`).join("")}</table></div></details>`
       :`<p class="note">${l.evaluated?"No evaluated run failed a check.":"No run has ended yet."}</p>`}</div>`;
 }
-async function agentMatrix(el,run,baseline){
+// Where runs broke: one line per place, in plain words, most first. Every count opens its runs. `agree` is
+// the failing agent runs "What failed" counted: when the two disagree, the panel says so.
+async function agentMatrix(el,run,baseline,agree){
   const m=await api(`/v1/agents/matrix?${q({source:src(),run,baseline})}`).catch(()=>null);
-  if(!m||!m.cells.some(c=>c.count||c.change)){el.innerHTML="";return}
-  const at={};m.cells.forEach(c=>at[c.from+"\u0000"+c.to]=c);
-  const rows=m.states.filter(s=>m.cells.some(c=>c.from===s)),cols=m.states.filter(s=>m.cells.some(c=>c.to===s));
-  const top=Math.max(...m.cells.map(c=>c.count),1);
-  const cell=(r,k)=>{const c=at[r+"\u0000"+k];if(!c)return`<td class="ref" style="text-align:center">·</td>`;
-    const ch=m.baseline&&c.change?` <span class="${c.change>0?"worse":"better"}">${c.change>0?"+":""}${c.change}</span>`:"";
-    return`<td style="text-align:center;background:color-mix(in srgb,var(--bad) ${Math.round(c.count/top*45)}%,transparent)" title="${esc(Object.entries(c.how).map(([h,n])=>h+" "+n).join(", "))}">${c.count}${ch}</td>`};
-  const hot=(m.baseline?m.worse:m.hotspots)||[];
-  el.innerHTML=`<h3 style="margin:14px 0 6px">Transition failures</h3><p class="sub">Rows: the last step that went right. Columns: the first that failed (goal checkpoints, where a case has them). ${m.failed} of ${m.runs} runs failed${m.baseline?`; the change is against ${esc(m.baseline)}`:""}.</p>
-    <div class="scroll"><table><tr><th>last ok \\ failed</th>${cols.map(k=>`<th class="mono">${esc(k)}</th>`).join("")}</tr>
-    ${rows.map(r=>`<tr><th class="mono" style="text-align:left">${esc(r)}</th>${cols.map(k=>cell(r,k)).join("")}</tr>`).join("")}</table></div>
-    ${hot.length?`<p class="note">${m.baseline?"Got worse":"Where most fail"}: ${hot.map(c=>`<b class="mono">${esc(c.from)} → ${esc(c.to)}</b> ${c.count}${m.baseline?` (${c.change>0?"+":""}${c.change})`:""}`).join(" · ")}</p>`:""}`;
+  if(!m){el.innerHTML="";return}
+  if(!m.runs&&!m.baseline_failed){el.innerHTML=m.plain_left_out?`<h3 style="margin:14px 0 6px">Where runs broke</h3><p class="note">No agent runs here: all ${m.plain_left_out} are plain tests, judged by their own asserts (under Every run).</p>`:"";return}
+  const left=m.plain_left_out?` ${m.plain_left_out} plain test${m.plain_left_out===1?"":"s"} left out: their own asserts judge them, under Every run.`:"";
+  const now=m.cells.filter(c=>c.count).sort((a,b)=>m.baseline?(b.change||0)-(a.change||0)||b.count-a.count:b.count-a.count);
+  const gone=m.cells.filter(c=>!c.count&&c.before);
+  const open=id=>`<a href="#trace/${encodeURIComponent(id)}" class="mono">`;
+  const ex=c=>c.runs.find(r=>r.detail);
+  const row=(c,i)=>{const ch=m.baseline&&c.change?` <span class="${c.change>0?"worse":"better"}">${c.change>0?"+":""}${c.change}</span>`:"";
+    const e=ex(c),more=c.runs.length-3;
+    return`<tr><td class="num" style="white-space:nowrap"><b>${c.count}</b>${ch}</td>
+      <td><b>${esc(c.sentence)}</b> <span class="ref">${esc(Object.entries(c.how).map(([h,n])=>c.count>1?`${h} ${n}`:h).join(", "))}</span>
+        ${e?`<div class="ref">e.g. ${open(e.trajectory_id)}${esc(e.case)}</a>: ${esc(e.detail.length>200?e.detail.slice(0,200)+"…":e.detail)}</div>`:""}</td>
+      <td><span id="mx-runs-${i}">${c.runs.slice(0,3).map(r=>`${open(r.trajectory_id)}${esc(r.case)}</a>`).join(", ")}</span>${more>0?` <button type="button" class="linkish" data-more="${i}">+${more} more</button>`:""}</td></tr>`};
+  // The self-check: the runs placed here and the runs "What failed" counted are the same runs.
+  let check="";
+  if(agree){const here=new Set(now.flatMap(c=>c.runs.map(r=>r.trajectory_id))),there=new Set(agree.map(t=>t.trajectory_id));
+    const extra=[...here].filter(id=>!there.has(id)),missing=agree.filter(t=>!here.has(t.trajectory_id));
+    const list=xs=>xs.slice(0,5).map(t=>`${open(t.trajectory_id)}${esc(t.case_id||t.trajectory_id)}</a>`).join(", ")+(xs.length>5?` and ${xs.length-5} more`:"");
+    if(extra.length)check+=`<p class="flag"><span class="chip bad">numbers disagree</span>${extra.length} run${extra.length===1?" is":"s are"} counted here but passed every check under What failed: ${list(extra.map(id=>({trajectory_id:id,case_id:now.flatMap(c=>c.runs).find(r=>r.trajectory_id===id).case})))}. One of the two is wrong, and it's a bug in Assay: please open an issue.</p>`;
+    if(missing.length)check+=`<p class="note">${missing.length} failing run${missing.length===1?" has":"s have"} no line here: every checkpoint was met, or what failed (safety, a contract) isn't a step. ${list(missing)}</p>`}
+  el.innerHTML=`<h3 style="margin:14px 0 6px">Where runs broke</h3>
+    <p class="sub">Each line is a place agent runs broke: the last step that worked, then the first that went wrong (or the case's checkpoints, where it has them). ${m.failed} of ${m.runs} agent runs failed${m.baseline?`, against ${m.baseline_failed} in ${esc(m.baseline)}`:""}.${left}</p>
+    ${check}
+    ${now.length?`<div class="scroll"><table><tr><th class="num">Runs</th><th>What happened</th><th>Open one</th></tr>${now.map(row).join("")}</table></div>`:`<p class="note">No agent run failed.</p>`}
+    ${gone.length?`<p class="note">No longer breaking since ${esc(m.baseline)}: ${gone.map(c=>`${esc(c.sentence)} <span class="better">(was ${c.before})</span>`).join(" · ")}</p>`:""}`;
+  el.querySelectorAll("[data-more]").forEach(b=>b.onclick=()=>{const c=now[+b.dataset.more];
+    $(`#mx-runs-${b.dataset.more}`).innerHTML=c.runs.map(r=>`${open(r.trajectory_id)}${esc(r.case)}</a>`).join(", ");b.remove()});
 }
 async function renderAgents(){
   const box=$("#tab-agents");
@@ -1583,7 +1600,7 @@ async function renderAgents(){
       ${badCases.length>TOP?`<p class="note">${TOP} of ${badCases.length} shown, most often failing first. Every run is under Details.</p>`:""}`:""}
   </div>
   ${anyLive?live:""}
-  <details class="panel" id="agent-details"><summary><b>Details</b> <span class="note">· where runs first went wrong, transitions, efficiency, every run</span></summary>
+  <details class="panel" id="agent-details"><summary><b>Details</b> <span class="note">· where runs first went wrong, where runs broke, efficiency, every run</span></summary>
     <div class="stack" style="margin-top:12px">
     <div><h3 style="margin-bottom:6px">Where failing runs first went wrong</h3>
       ${Object.keys(c.mechanisms).length?`<div class="kindbar">${Object.entries(c.mechanisms).map(([m,n])=>`<i style="width:${n/mechTotal*100}%;background:${MECH[m][1]}" title="${esc(MECH[m][0])}: ${n}"></i>`).join("")}</div>
@@ -1615,7 +1632,7 @@ async function renderAgents(){
   bad.onchange=()=>{store.set("assay-agent-bad",bad.checked?"1":"0");page=0;drawList()};
   // Details is drawn when it's opened: the transition matrix is a request of its own.
   const det=$("#agent-details");let drawn=false;
-  const openDetails=()=>{if(drawn)return;drawn=true;drawList();agentMatrix($("#agent-matrix"),run,s.baseline||undefined)};
+  const openDetails=()=>{if(drawn)return;drawn=true;drawList();agentMatrix($("#agent-matrix"),run,s.baseline||undefined,all.filter(t=>Object.entries(t.checks).some(([k,v])=>k!=="recorded"&&v==="fail")))};
   det.ontoggle=()=>{store.set("assay-agent-details",det.open?"1":"0");if(det.open)openDetails()};
   if(store.get("assay-agent-details")==="1"){det.open=true;openDetails()}
   trendChart($("#agent-trend"));
