@@ -10,7 +10,9 @@ The decision rule:
 Samples are per-unit outcomes (e.g. 1/0 per document for "split correctly",
 or a per-document score) for baseline and candidate on the same corpus.
 A rule compares their mean by default, or a percentile ("p95") for measures
-like latency, where a slow tail can grow while the average holds.
+like latency, where a slow tail can grow while the average holds. A rule can
+also set an absolute limit ("p95 under 20 s") the candidate must keep whatever
+the baseline did.
 """
 from __future__ import annotations
 
@@ -60,6 +62,9 @@ class GateRule:
     min_n: int = 30
     severity: str = "normal"  # "high" halves the tolerance
     statistic: str = "mean"  # or a percentile, "p95"
+    # The worst value the candidate's statistic may have, whatever the baseline did: a maximum
+    # when lower is better, a minimum when higher is better. None: no absolute limit.
+    absolute_limit: Optional[float] = None
 
     def __post_init__(self) -> None:
         percentile_of(self.statistic)
@@ -86,6 +91,9 @@ class SliceDecision:
     ci: Optional[Tuple[float, float]] = None
     noise_floor: Optional[float] = None
     statistic: str = "mean"
+    absolute_limit: Optional[float] = None
+    candidate_value: Optional[float] = None  # the candidate's statistic, when checked against the limit
+    candidate_ci: Optional[Tuple[float, float]] = None
 
 
 @dataclass
@@ -157,12 +165,69 @@ def bootstrap_diff_ci(baseline: Sequence[float], candidate: Sequence[float], *,
     return point, lo, hi
 
 
+def bootstrap_ci(values: Sequence[float], *, iters: int = 2000, alpha: float = 0.05,
+                 seed: int = 7, statistic: str = "mean") -> Tuple[float, float, float]:
+    """stat(values) with a percentile bootstrap CI, resampling the units."""
+    rng = random.Random(seed)
+    stat = stat_fn(statistic)
+    n = len(values)
+    est = sorted(stat([values[rng.randrange(n)] for _ in range(n)]) for _ in range(iters))
+    return stat(values), est[int(alpha / 2 * iters)], est[min(int((1 - alpha / 2) * iters), iters - 1)]
+
+
+def _too_few(rule: GateRule, n: int) -> Optional[str]:
+    """Why n values can't be gated on this rule's statistic, or None when they can."""
+    if n < rule.min_n:
+        return f"Sample of {n} is below the minimum of {rule.min_n} for this slice."
+    q = percentile_of(rule.statistic)
+    if q is not None and n * min(q, 100 - q) / 100 < MIN_TAIL:
+        return (f"{n} values put fewer than {MIN_TAIL} beyond the {rule.statistic}, too few to measure "
+                f"it; this slice needs at least {MIN_TAIL * 100 / min(q, 100 - q):.0f}.")
+    return None
+
+
+def _against_limit(rule: GateRule, candidate: Sequence[float], d: SliceDecision) -> Optional[Tuple[str, str]]:
+    """(outcome, reason) for the candidate against the rule's absolute limit; None when it can't be checked."""
+    if rule.absolute_limit is None or not candidate or _too_few(rule, len(candidate)):
+        return None
+    value, lo, hi = bootstrap_ci(candidate, statistic=rule.statistic)
+    d.candidate_value, d.candidate_ci = value, (lo, hi)
+    limit, what = rule.absolute_limit, f"The candidate's {rule.statistic}"
+    # Past the limit is above it when lower is better, below it when higher is better.
+    best, worst = (hi, lo) if rule.higher_is_better else (lo, hi)
+    past = (lambda x: x < limit) if rule.higher_is_better else (lambda x: x > limit)
+    side = "minimum" if rule.higher_is_better else "maximum"
+    if past(best):
+        return ROLLBACK, (f"{what} is {value:.4f}; even the optimistic end of its CI ({best:.4f}) "
+                          f"is past the absolute {side} {limit:.4f}.")
+    if past(worst):
+        return HOLD, (f"{what} is {value:.4f}, but its CI reaches {worst:.4f}, past the absolute {side} "
+                      f"{limit:.4f}. Collect more samples before deciding.")
+    return ADVANCE, f"{what} is {value:.4f}; its CI stays within the absolute {side} {limit:.4f}."
+
+
 def evaluate_slice(rule: GateRule, slice_name: str, baseline: Optional[Sequence[float]],
                    candidate: Optional[Sequence[float]], floor: Optional[float],
                    paired: bool = True) -> SliceDecision:
+    """The candidate against the baseline and, when the rule sets one, against its absolute limit.
+    The worse of the two decides: a candidate past the limit rolls back even with no baseline."""
+    d = _against_baseline(rule, slice_name, baseline, candidate, floor, paired)
+    checked = _against_limit(rule, candidate or [], d)
+    if checked:
+        outcome, reason = checked
+        if _RANK[outcome] > _RANK[d.outcome]:
+            d.outcome, d.reason = outcome, f"{reason} {d.reason}"
+        else:
+            d.reason = f"{d.reason} {reason}"
+    return d
+
+
+def _against_baseline(rule: GateRule, slice_name: str, baseline: Optional[Sequence[float]],
+                      candidate: Optional[Sequence[float]], floor: Optional[float],
+                      paired: bool) -> SliceDecision:
     base = SliceDecision(rule.measure_id, slice_name, HOLD, "",
                          n_baseline=len(baseline or []), n_candidate=len(candidate or []),
-                         noise_floor=floor, statistic=rule.statistic)
+                         noise_floor=floor, statistic=rule.statistic, absolute_limit=rule.absolute_limit)
     if not baseline or not candidate:
         base.reason = "Slice is unmeasured; unmeasured never passes."
         return base
@@ -170,13 +235,9 @@ def evaluate_slice(rule: GateRule, slice_name: str, baseline: Optional[Sequence[
         base.reason = "Noise floor unknown; run the baseline at least twice first."
         return base
     n = min(len(baseline), len(candidate))
-    if n < rule.min_n:
-        base.reason = f"Sample of {n} is below the minimum of {rule.min_n} for this slice."
-        return base
-    q = percentile_of(rule.statistic)
-    if q is not None and n * min(q, 100 - q) / 100 < MIN_TAIL:
-        base.reason = (f"{n} values put fewer than {MIN_TAIL} beyond the {rule.statistic}, too few to measure "
-                       f"it; this slice needs at least {MIN_TAIL * 100 / min(q, 100 - q):.0f}.")
+    why = _too_few(rule, n)
+    if why:
+        base.reason = why
         return base
     if paired and len(baseline) != len(candidate):
         paired = False

@@ -183,11 +183,6 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 - **Code checks and judges apart in the verdict:** deterministic checks already outrank a judge
   when the two disagree. The verdict should also report them separately, code checks first, so
   a model swap has a signal no judge's noise reaches, with judged checks as the second line.
-- **Absolute ceilings in release gates:** a gate rule only limits how much worse the candidate
-  is than the baseline. A release decision also needs fixed limits that hold whatever the
-  baseline did ("p95 under 20 s", "timeouts under 1%"). Today those live only as monitoring
-  targets. A rule should take a ceiling and roll back when even the optimistic end of the
-  candidate's interval is past it.
 - **Margins per slice:** `tolerance` and `severity` are set per measure, so every slice of a
   measure gets the same margin. A high-risk slice (high-value invoices, one regulated document
   type) should have its own margin, agreed with the customer before the runs, and be able to
