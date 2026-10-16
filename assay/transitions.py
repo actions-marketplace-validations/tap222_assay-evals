@@ -77,6 +77,8 @@ def build(failures: List[dict], runs: int, positions: Dict[str, List[int]]) -> d
 def of_run(engine: Engine, source, tenant: str, run_id: str, task: Optional[str] = None) -> dict:
     heads = [h for h in agents.run_trajectories(engine, tenant, run_id) if h["status"] != "running"
              and (task is None or h["task"] == task)]
+    plain = agents.plain_runs(engine, tenant, [h["trajectory_id"] for h in heads])
+    heads = [h for h in heads if h["trajectory_id"] not in plain]  # plain tests (--assay-all) aren't agents
     trajs = source.trajectories([h["trajectory_id"] for h in heads]) if hasattr(source, "trajectories") else {}
     refs = agents.references(engine, tenant, {h["case_id"] for h in heads if h["case_id"]})
     rules = contracts_mod.load(engine, source.name)

@@ -239,6 +239,15 @@ def test_transition_matrix_where_failures_cluster_and_what_got_worse(tmp_path):
     assert top["how"] == {"Tool error, not recovered": 3}
     assert any(x["from"] == "exec_sql" and x["to"] == "answer" and x["count"] == 1 for x in m["cells"])
     assert m["states"][0] == "gen_sql" and m["states"][-1] == "answer"
+    # A plain test (pytest --assay-all) that calls one endpoint three times isn't an agent: not in the matrix.
+    ev = lambda i, **k: {"v": 1, "id": f"plain-{i}", "ts": "2026-09-01T00:00:00Z", "run_id": "r1-plain", **k}
+    c.post("/v1/ingest", headers=H, json=[
+        ev(0, type="run.start", task="tests/test_api.py", tags={"assay_record": "plain"},
+           test={"run": "r1", "case": "test_polls", "attempt": 0}),
+        *[ev(1 + i, type="step", seq=i, kind="tool", name="HTTP GET testserver/v1/jobs", args={}, result={"status": 200})
+          for i in range(3)], ev(9, type="run.end", status="completed")])
+    m = c.get("/v1/agents/matrix", params={**SRC, "run": "r1"}).json()
+    assert (m["runs"], m["failed"]) == (5, 4) and not any("HTTP" in s for s in m["states"])
     d = c.get("/v1/agents/matrix", params={**SRC, "run": "r1", "baseline": "r0"}).json()
     assert d["worse"][0]["from"] == "gen_sql" and d["worse"][0]["change"] == 2
     txt = transitions.text(d)
