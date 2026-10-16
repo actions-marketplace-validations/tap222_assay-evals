@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import and_, delete, desc, or_, select
 
 from assay import (agents, alerts, audit, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, lifecycle, prompts, rootcause, runner, store, trace, views, workflow)
@@ -67,6 +67,13 @@ class RuleIn(BaseModel):
     tolerance: float = 0.01
     min_n: int = 30
     severity: str = "normal"
+    statistic: str = Field("mean", description='"mean", or a percentile such as "p95" for latency')
+
+    @field_validator("statistic")
+    @classmethod
+    def _known_statistic(cls, v: str) -> str:
+        gates.percentile_of(v)
+        return v
 
 
 class GateRequest(BaseModel):
@@ -1562,9 +1569,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if missing:
             raise HTTPException(422, f"Lineage must record: {', '.join(missing)}. "
                                      "Every promote or rollback has to be traceable.")
-        floors = {r.measure_id: gates.noise_floor(req.identical_runs.get(r.measure_id, []))
-                  for r in req.rules}
-        decision = gates.evaluate([gates.GateRule(**r.model_dump()) for r in req.rules],
+        rules = [gates.GateRule(**r.model_dump()) for r in req.rules]
+        floors = {r.key: gates.noise_floor(req.identical_runs.get(r.measure_id, []), r.statistic) for r in rules}
+        decision = gates.evaluate(rules,
                                   req.samples, floors, req.required_slices)
         body = decision.to_dict()
         warnings = []

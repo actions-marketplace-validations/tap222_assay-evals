@@ -171,6 +171,38 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 - **SDKs for other languages:** there are SDKs for Python and for TypeScript and JavaScript.
   Other languages write the events `assay test` reads ([any language](any-language.md)), send
   them to `POST /v1/ingest` directly, or use OpenTelemetry.
+- **Judging a saved run again:** `evaluate(rejudge=)` asks the judge again during the run, but
+  there's no command that runs a frozen judge (model and prompt) on a past run's saved outputs,
+  with no calls to the AI. That would measure the judge's own variance apart from a model swap,
+  and test a new judge or rubric on the same answers before switching to it.
+- **Paired pass and fail counts for every run:** the run-level change is a paired interval on
+  pass rates. It should also count the cases that went from pass to fail and from fail to pass,
+  with an exact McNemar test on those two numbers, as document runs already do per slice. A
+  case with repeats needs a rule to count as one pass or fail (most attempts passing, by
+  default), shown in the report.
+- **Code checks and judges apart in the verdict:** deterministic checks already outrank a judge
+  when the two disagree. The verdict should also report them separately, code checks first, so
+  a model swap has a signal no judge's noise reaches, with judged checks as the second line.
+- **Absolute ceilings in release gates:** a gate rule only limits how much worse the candidate
+  is than the baseline. A release decision also needs fixed limits that hold whatever the
+  baseline did ("p95 under 20 s", "timeouts under 1%"). Today those live only as monitoring
+  targets. A rule should take a ceiling and roll back when even the optimistic end of the
+  candidate's interval is past it.
+- **Margins per slice:** `tolerance` and `severity` are set per measure, so every slice of a
+  measure gets the same margin. A high-risk slice (high-value invoices, one regulated document
+  type) should have its own margin, agreed with the customer before the runs, and be able to
+  block the release on its own. The workaround today is a separate measure per slice.
+- **One release decision across both gates:** the slice gate (`/v1/gates/evaluate`) and the
+  stability gate (`/v1/evals/runs/{run}/stability`) answer different questions and are called
+  separately. A release should get one decision table: every gate as a row (quality per slice,
+  latency, timeouts, fallbacks, stability), each with its value, limit and verdict, then one
+  call: advance, advance with conditions ("p95 up 8%, under the ceiling: watch it in canary"),
+  hold or roll back. Quality and operations stay separate rows and are never blended into one
+  score.
+- **Small high-risk slices:** a slice under `min_n` (30 by default) always holds, so a
+  20-case high-risk slice can never advance on the slice gate. For those slices the gate should
+  fall back to the stability gate's per-case rules: no case that passed reliably may now fail,
+  and any collapse blocks.
 - **Accuracy from eval runs:** evaluation results are grouped into causes, but the accuracy
   measures don't read them yet.
 - **Naming causes:** cause names come from templates. An LLM could write better one-line names
