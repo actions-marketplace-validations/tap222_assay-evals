@@ -119,6 +119,42 @@ def test_how_a_flow_changed():
     assert ch["approval_moved"] and not ch["added"]
     ch = diff.flow_change(("search", "refund"), ("search", "escalate"))
     assert (ch["added"], ch["removed"], ch["reordered"]) == (["escalate"], ["refund"], False)
+    twice = diff.flow_change(("search", "HTTP POST api.x.com/charges"),
+                             ("search", "HTTP POST api.x.com/charges", "HTTP POST api.x.com/charges"))
+    assert not twice["reordered"] and twice["counts"] == {"HTTP POST api.x.com/charges": [1, 2]}
+    assert diff._describe(twice) == "HTTP POST api.x.com/charges: twice instead of once"
+
+
+def _db(*steps, reads=None):
+    out = [{"kind": "tool", "name": n, "args": {"set": st, "empty": em}} for n, st, em in steps]
+    if reads is not None:
+        out.append({"kind": "tool", "name": "DB reads", "args": reads})
+    return {"steps": out}
+
+
+def test_what_a_run_wrote_to_the_database():
+    traj = _db(("DB INSERT bookings", ["amount", "locationId"], ["locationId"]),
+               ("DB INSERT bookings", ["amount", "locationId", "note"], []), reads={"services": 3})
+    assert diff.database(traj) == {"writes": {"DB INSERT bookings": {"set": ["amount", "locationId", "note"],
+                                                                     "empty": []}},
+                                   "reads": {"services": 3}}
+    assert diff.flow(traj) == ("DB INSERT bookings", "DB INSERT bookings")  # reads aren't steps of the flow
+
+
+def test_how_the_database_writes_changed():
+    before = diff.database(_db(("DB INSERT bookings", ["amount", "locationId", "status"], []), reads={"services": 1}))
+    now = diff.database(_db(("DB INSERT bookings", ["amount", "status", "note"], ["amount"]), reads={"services": 12}))
+    assert diff.database_change(before, now) == [
+        "DB INSERT bookings: no longer sets locationId; now leaves amount empty; now also sets note",
+        "reads of services: 12 instead of 1"]
+    assert diff.database_change(before, before) == []
+    small = diff.database(_db(reads={"services": 3}))  # a few more reads isn't a change
+    assert diff.database_change(before, small) == []
+    filled = diff.database(_db(("DB INSERT bookings", ["amount", "locationId", "status"], ["locationId"])))
+    assert diff.database_change(filled, before) == ["DB INSERT bookings: now fills locationId"]
+    ch = diff.change({"flow": ("DB INSERT bookings",), "db": before}, {"flow": ("DB INSERT bookings",), "db": now})
+    assert not ch["added"] and diff._describe(ch).startswith("DB INSERT bookings: no longer sets locationId")
+    assert diff.change({"flow": ("a",), "db": before}, {"flow": ("a",), "db": before}) is None
 
 
 # ---------- on the server ----------

@@ -20,6 +20,19 @@ function currentRun() {
   return storage.getStore();
 }
 
+// The plain test running now, when every test is recorded (assay-evals/jest). Jest runs a file's
+// tests one at a time, so one slot is enough; an assayCase() inside it has a run of its own.
+let plain;
+
+function setPlainRun(run) {
+  plain = run || undefined;
+}
+
+/** The plain test running now, or undefined, also when the code runs inside an assayCase(). */
+function plainRun() {
+  return storage.getStore() ? undefined : plain;
+}
+
 function record(run, read, params, started, error) {
   try {
     const p = params || {};
@@ -109,4 +122,4 @@ function assayMiddleware() {
   };
 }
 
-module.exports = { instrument, assayMiddleware, currentRun, storage };
+module.exports = { setPlainRun, plainRun, instrument, assayMiddleware, currentRun, storage };

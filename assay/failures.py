@@ -33,6 +33,7 @@ Nothing here asks an LLM. Every kind comes from rules whose evidence is shown.
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import Counter, defaultdict
@@ -670,6 +671,22 @@ def _release_notes(engine: Engine, source_name: str) -> Dict[str, str]:
             if r.get("note")}
 
 
+ORIGIN_TAGS = ("repo", "folder", "ran_by_agent", "agent_session", "branch", "commit", "uncommitted", "weakened_total")
+
+
+def _origin(tags: dict) -> dict:
+    """Where a test run came from and who ran it, from its run tags (assay upload adds them), with the
+    weakened tests it found decoded from their JSON text."""
+    out = {k: tags[k] for k in ORIGIN_TAGS if tags.get(k) not in (None, "")}
+    try:
+        found = json.loads(tags["weakened_tests"]) if tags.get("weakened_tests") else []
+    except (TypeError, ValueError):
+        found = []
+    if isinstance(found, list) and found:
+        out["weakened_tests"] = [f for f in found if isinstance(f, dict)]
+    return out
+
+
 def eval_runs(engine: Engine, tenant: str) -> List[dict]:
     t = store.eval_results
     with engine.connect() as conn:
@@ -680,7 +697,7 @@ def eval_runs(engine: Engine, tenant: str) -> List[dict]:
                                                                          r.c.test_run.is_not(None)))):
             tags = row.tags or {}
             if row.test_run not in origins and (tags.get("repo") or tags.get("folder")):
-                origins[row.test_run] = {k: tags[k] for k in ("repo", "folder") if tags.get(k)}
+                origins[row.test_run] = _origin(tags)
     runs = defaultdict(lambda: {"results": 0, "pass": 0, "fail": 0, "error": 0, "start": None, "end": None,
                                 "lineage": Counter()})
     for r in rows:

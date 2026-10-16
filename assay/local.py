@@ -352,7 +352,8 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
             "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
             "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()},
                     "answers": bool(pii.get("answers", True)), "answer_allow": set(answer_allow)},
-            "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
+            "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True)),
+                       "record": str((cfg.get("pytest") or {}).get("record", "cases"))},
             "behavior": _behavior_config(cfg.get("behavior") or {}), "judge": _judge_config(cfg.get("judge") or {}),
             "prices": _prices_config(cfg.get("prices")), "calibrate": _calibrate_config(cfg.get("calibrate") or {}),
             "documents": _documents_config(cfg.get("documents") or {})}
@@ -593,9 +594,11 @@ def policy_lines(policy: Optional[dict]) -> List[str]:
                 "change, add the assay-policy-change label (ASSAY_POLICY_CHANGE=accepted):")
     elif policy["accepted"]:
         head = "This PR changes the checks, and the change is accepted: its own checks are used."
+    elif all(c.get("note") for c in policy["changes"]):
+        head = "This PR changes expected values in its tests; check they're the change you meant:"
     else:
         head = "This PR tightens the checks; they apply to this run:"
-    return [head, *(f"  {'- ' if c['weakens'] else '+ '}{c['text']}" for c in policy["changes"])]
+    return [head, *(f"  {'- ' if c['weakens'] else '~ ' if c.get('note') else '+ '}{c['text']}" for c in policy["changes"])]
 
 
 def judge_cost(judged: dict) -> str:
@@ -652,7 +655,7 @@ def _behavior_config(b: dict) -> dict:
 
 
 DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
-                  "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True},
+                  "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True, "record": "cases"},
                   "prices": None, "acks": [], "calibrate": None, "documents": {"auto_approve": None, "target": 0.99}, "behavior": {"fail": True, "ratios": {}, "suite": behavior.SUITE_RATIO, "limits": {}},
                   "judge": {"enabled": False, "model": "claude-opus-5", "redact": True, "provider": "anthropic"}}
 
@@ -961,10 +964,11 @@ def check_pii(engine, source, run_id: str, pii: dict) -> None:
     heads = agents.run_trajectories(engine, TENANT, run_id)
     trajs = source.trajectories([h["trajectory_id"] for h in heads])
     requests = learn._inputs(engine, TENANT, [h["trajectory_id"] for h in heads])
+    plain = agents.plain_runs(engine, TENANT, list(trajs))  # plain tests (--assay-all) aren't agents
     rows = []
     for h in heads:
         traj = trajs.get(h["trajectory_id"])
-        if traj is None:
+        if traj is None or h["trajectory_id"] in plain:
             continue
         found = pii_findings(traj, pii["allow"], (requests.get(h["trajectory_id"]) or {}).get("input"),
                              pii.get("answers", True), pii.get("answer_allow"))
@@ -2259,8 +2263,12 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
         HEADLINES.get(code, "AI regression detected")
     out = [MARKER, f"## {head}", "", " · ".join(counts), ""]
     if policy and policy["changes"]:
-        out += [f"**{'Policy changes (not applied: add the `assay-policy-change` label to accept them)' if policy['weakened'] else 'Policy changes (accepted)' if policy['accepted'] else 'Policy changes (applied)'}**",
-                "", *(f"- {'loosens' if c['weakens'] else 'tightens'}: {_md(c['text'])}" for c in policy["changes"]), ""]
+        title = ('Policy changes (not applied: add the `assay-policy-change` label to accept them)' if policy['weakened']
+                 else 'Policy changes (accepted)' if policy['accepted']
+                 else 'Expected values changed (check they\'re the change you meant)' if all(c.get('note') for c in policy['changes'])
+                 else 'Policy changes (applied)')
+        out += [f"**{title}**", "", *(f"- {'loosens' if c['weakens'] else 'changes' if c.get('note') else 'tightens'}: "
+                                      f"{_md(c['text'])}" for c in policy["changes"]), ""]
     if changes:  # a change is its "- " line and the Expected/Actual lines under it
         starts = [i for i, x in enumerate(changes) if x.startswith("- ")]
         cut = starts[30] if len(starts) > 30 else len(changes)
@@ -2524,8 +2532,9 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
          send: Optional[dict] = None, junit: Optional[str] = None, timeout: Optional[float] = None,
          failed: bool = False, judge: bool = False) -> int:
     """`assay test`. Prints the report; returns the exit code."""
-    try:
-        cfg = load_config(root)
+    try:  # no assay.toml: the defaults, still held to a pull request's trusted policy
+        cfg = load_config(root) if (root / CONFIG).exists() else with_trusted_policy(
+            __import__("copy").deepcopy(DEFAULT_CONFIG))
     except SetupError as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -2535,10 +2544,24 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     if problem:
         print(problem, file=sys.stderr)
         return 2
+    from assay import workspace
     command = command or cfg["command"]
+    if not command and not (root / CONFIG).exists():  # no assay.toml: run what the project's runner would
+        command = workspace.detected_command(root)
+        if command:
+            print(f"No {CONFIG} here: running `{command}`. `assay init` writes one to change it.", file=sys.stderr)
     if not command:
-        print(f"Give a command to run: set command under [test] in {CONFIG}, or `assay test -- <command>`.",
+        print(f"No {CONFIG} here, and no test runner found. Run `assay init` first, or `assay test -- <command>`."
+              if not (root / CONFIG).exists() else
+              f"Give a command to run: set command under [test] in {CONFIG}, or `assay test -- <command>`.",
               file=sys.stderr)
+        return 2
+    # npx with the runner missing would download another version of it: a worktree with nothing installed
+    # uses the main checkout's dependencies instead, or says what to install.
+    ready, note = workspace.dependencies(root) if command.lstrip().startswith("npx ") else (True, None)
+    if note:
+        print(note, file=sys.stderr)
+    if not ready:
         return 2
     repeat = repeat or cfg["repeat"]
     home = ensure_home(root)
@@ -2562,7 +2585,40 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
     if not events.exists():
         print(f"\n`{command}` recorded nothing. Does it record its cases: with the assay_case fixture or "
               "assay.run(..., test=\"<case>\") in Python, assayCase() in JavaScript?", file=sys.stderr)
+        return guard_only(root, home)
+    return _finish_test(root, cfg, run_id, repeat, codes, baseline, junit, timeout, failed, command, send)
+
+
+def guard_only(root: Path, home: Path) -> int:
+    """No Assay test ran. With a base branch to compare with (a pull request), the tests are still
+    checked for weakened assertions, and that's the result: 0, or 1 when one was weakened (unless the
+    policy label accepts it). With none, 2: nothing was checked."""
+    from assay import weakening
+    ref = weakening.base_ref(root)
+    if not ref:
         return 2
+    code, text = weakening.guard(root, ref)
+    accepted = code == 1 and os.environ.get(POLICY_ACCEPT_ENV) == "accepted"
+    found = weakening.scan(root, ref)
+    print("\n" + text + ("\nThe change is accepted (assay-policy-change)." if accepted else ""))
+    head = ("Checks weakened: this PR loosens the tests that judge it" if code == 1 and not accepted
+            else "Tests weakened, and accepted" if accepted else "No test weakened")
+    md = [MARKER, f"## {head}", "", "No Assay tests ran here, so the tests' assertions were checked against the "
+          f"base branch ({_md(ref)}).", ""]
+    for f in found:
+        verb = "changes" if f["kind"] == "rewritten" else "loosens"
+        md.append(f"- {verb}: {_md(weakening.describe(f))}")
+    if code == 1 and not accepted:
+        md += ["", "Fix the test, or add the `assay-policy-change` label to accept the change."]
+    out = "\n".join(md).rstrip() + "\n"
+    (home / "summary.md").write_text(out, encoding="utf-8")
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+            fh.write(out + "\n")
+    return 0 if accepted else code
+
+
+def _finish_test(root, cfg, run_id, repeat, codes, baseline, junit, timeout, failed, command, send) -> int:
     why = f"the command timed out after {timeout:g}s" if TIMED_OUT in codes else None
     code, text = finish(root, cfg, run_id, repeat, codes, baseline, junit, why, subset=failed)
     print("\n" + text, file=sys.stderr if code == 2 else sys.stdout)
@@ -2642,7 +2698,12 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     inconclusive = passed and bool(result["not_judged"] or result["summary"]["buckets"]["needs reruns"]
                                    or any(p["worse"] for p in result.get("_judge_unstable") or []))
     baseline_before = dict(state.get("baseline_cases") or {})
+    if baseline:  # read before a passing run replaces the per-case baseline with itself
+        from assay import diff
+        flows_before = diff.flows(engine, TENANT, baseline)
     if passed and not inconclusive:
+        if baseline == BASELINE and baseline_before:  # what `assay diff` compares this run with once it's the baseline
+            state["compared"] = {"run": run_id, "cases": baseline_before}
         # A pass rate that dropped within chance passes, but isn't the new bar: otherwise a few such runs
         # in a row would walk a case from 8/8 down to 4/8 without ever failing.
         state["baseline_cases"] = {**(state.get("baseline_cases") or {}),
@@ -2663,6 +2724,23 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
             policy["weakened"] = policy["weakened"] or not policy["accepted"]
         else:
             text += "\n" + _paint(f"{_n(len(missing), 'case')} that ran last time didn't run now: {names}.", "dim")
+    # Assertions a change removed or loosened, against the base branch: the quieter way to make a test pass.
+    from assay import weakening
+    found = weakening.scan(root, weakening.base_ref(root))
+    result["weakened_tests"] = found
+    _save_meta(home, run_id, {"ran_by": ran_by(root), "weakened_tests": found})
+    if found:
+        loose, notes = weakening.weakening(found), [f for f in found if f["kind"] == "rewritten"]
+        if policy is not None:  # a PR: a weakened test loosens the checks like removing a contract
+            policy = {**policy, "changes": [*policy["changes"],
+                                            *({"text": weakening.describe(f), "weakens": True} for f in loose),
+                                            *({"text": weakening.describe(f), "weakens": False, "note": True} for f in notes)]}
+            if loose:
+                policy["weakened"] = policy["weakened"] or not policy["accepted"]
+        else:
+            lines = [*(f"Weakened against {os.environ.get(weakening.BASE_ENV)}: {weakening.describe(f)}" for f in loose),
+                     *(f"Expected value changed: {weakening.describe(f)}" for f in notes)]
+            text += "\n" + _paint("\n".join(lines), "yellow" if loose else "dim")
     if not policy and not subset and abandoned_why is None:
         state["suite"] = sorted(ran_all)
     if policy_lines(policy):
@@ -2673,14 +2751,19 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
             state["baseline_cases"] = baseline_before
     result["policy"] = policy
     if baseline:  # what each case did, next to what its baseline did
-        from assay import diff
-        before, now = diff.flows(engine, TENANT, baseline), diff.flows(engine, TENANT, run_id)
+        before, now = flows_before, diff.flows(engine, TENANT, run_id)
         result["flows"] = {c: (before[c]["flow"], now[c]["flow"]) for c in before.keys() & now.keys()
                            if before[c]["flow"] != now[c]["flow"]}
         moved = len(result["flows"])
         if moved:
             text += "\n" + _paint(f"{_n(moved, 'case')} took a different path than {'its' if moved == 1 else 'their'} "
                                    f"baseline: `assay diff` shows what changed.", "dim")
+        wrote = sorted(c for c in before.keys() & now.keys() - result["flows"].keys()
+                       if diff.database_change(before[c]["db"], now[c]["db"]))
+        if wrote:
+            text += "\n" + _paint(f"{_n(len(wrote), 'case')} wrote to the database differently than "
+                                   f"{'its' if len(wrote) == 1 else 'their'} baseline: `assay diff` shows what changed.",
+                                   "dim")
     # What's left to rerun (`--failed`): everything that didn't simply pass.
     state["rerun"] = sorted(set().union(*(v for k, v in result["summary"]["buckets"].items() if k != "passed")))
     _save_state(home, state)
@@ -3241,7 +3324,7 @@ def upload(root: Path, run_id: Optional[str], url: Optional[str], key: Optional[
         print(f"No recording for run {run_id} in {home / 'runs'}.", file=sys.stderr)
         return 2
     events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    where = run_origin(root)
+    where = {**run_origin(root), **meta_tags(home, run_id)}
     for e in events:  # so the dashboard can say which repository and folder a run came from
         if e.get("type") == "run.start" and e.get("test"):
             e["tags"] = {**(e.get("tags") or {}), **where}
@@ -3285,6 +3368,57 @@ def project_name(root: Path) -> str:
         name = re.sub(r"\.git$", "", re.split(r"[/:]", remote)[-1]) if remote else ""
     name = name or root.resolve().name
     return re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")[:48] or "default"
+
+
+def ran_by(root: Path) -> dict:
+    """Who ran the tests, and on what: a coding agent's session (Claude Code sets CLAUDECODE and
+    CLAUDE_CODE_SESSION_ID in the shell it runs commands in), CI, or a person (no agent), and the branch
+    and commit, with whether there were uncommitted changes. Only ids: nothing from the session itself."""
+    out: Dict[str, Any] = {}
+    if os.environ.get("CLAUDECODE"):
+        out["agent"] = "Claude Code"
+        if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+            out["session"] = os.environ["CLAUDE_CODE_SESSION_ID"][:64]
+    elif os.environ.get("GITHUB_ACTIONS"):
+        out["agent"] = "GitHub Actions"
+    branch = (_git(root, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+    commit = (_git(root, "rev-parse", "--short", "HEAD") or "").strip()
+    if branch and branch != "HEAD":
+        out["branch"] = branch[:200]
+    if commit:
+        out["commit"] = commit
+        out["uncommitted"] = bool((_git(root, "status", "--porcelain", "--untracked-files=no") or "").strip())
+    return out
+
+
+META_FINDINGS = 20  # weakened tests kept with an uploaded run; the PR comment has them all
+
+
+def _save_meta(home: Path, run_id: str, meta: dict) -> None:
+    """What a run's events don't carry (who ran it, the weakened tests), beside its recording for `assay upload`."""
+    try:
+        (home / "runs" / f"{run_id}.meta.json").write_text(json.dumps(meta, default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def meta_tags(home: Path, run_id: str) -> dict:
+    """The saved meta as run tags (plain values only): ran_by_agent, agent_session, branch, commit,
+    uncommitted, and weakened_tests as JSON text."""
+    try:
+        meta = json.loads((home / "runs" / f"{run_id}.meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    by = meta.get("ran_by") or {}
+    tags = {k: by[f] for k, f in (("ran_by_agent", "agent"), ("agent_session", "session"), ("branch", "branch"),
+                                   ("commit", "commit"), ("uncommitted", "uncommitted")) if by.get(f) is not None}
+    found = meta.get("weakened_tests") or []
+    if found:
+        keep = [{k: (str(f.get(k))[:300] if isinstance(f.get(k), str) else f.get(k))
+                 for k in ("file", "test", "kind", "line", "before", "after")} for f in found[:META_FINDINGS]]
+        tags["weakened_tests"] = json.dumps(keep)
+        tags["weakened_total"] = len(found)
+    return tags
 
 
 def run_origin(root: Path) -> dict:

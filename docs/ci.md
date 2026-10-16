@@ -110,6 +110,14 @@ skipped with a warning and the job doesn't fail over it. Outside the action,
   runs (deleted, skipped, or filtered out of the command) counts as loosening the checks, until
   the `assay-policy-change` label accepts it ([Security](security.md)). A rerun of what failed
   doesn't count.
+- **Weakened tests fail the PR.** An assertion the pull request removed or loosened
+  (`assert total == 1200` becoming `assert total > 0`, `toBe` becoming `toBeDefined`) counts as
+  loosening the checks too, and the same label accepts it. An expected value that changed is
+  listed to confirm, not failed. The action compares with the base branch on its own; elsewhere,
+  set `ASSAY_BASE_REF` to the branch a PR merges into ([Security](security.md)). A repository with
+  no Assay tests yet still gets this: when nothing recorded, `assay test` checks the tests against
+  the base branch on its own, and the PR comment says so. So `command: assay test` is worth adding
+  to any repository's workflow on day one.
 - **Timeouts: a hung run doesn't hang CI.** An async evaluation that runs every case and then
   never returns shouldn't keep a job running until GitHub kills it at six hours.
   `timeout = 900` in `assay.toml` (or `assay test --timeout 900`, `pytest --assay

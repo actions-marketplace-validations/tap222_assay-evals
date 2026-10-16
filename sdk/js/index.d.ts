@@ -152,3 +152,13 @@ export function assayMiddleware(): {
 
 /** The run of the assayCase() or track() the calling code runs inside, or undefined. */
 export function currentRun(): Run | undefined;
+
+/** What a SQL statement does: its operation, table, the columns it sets and the ones it leaves empty
+ * (DEFAULT, NULL, or a parameter bound to null). null for anything that isn't a read or a write. */
+export function summarizeSql(sql: string, values?: unknown[]): {
+  op: "INSERT" | "UPDATE" | "DELETE" | "SELECT"; table: string; set: string[]; empty: string[];
+} | null;
+
+/** Records what plain tests write to Postgres through pg (assay-evals/jest calls it). Pass pg itself, or
+ * leave it out for the project's own. Returns whether pg was found. */
+export function recordPg(pg?: unknown): boolean;

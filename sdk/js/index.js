@@ -25,11 +25,13 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { instrument, assayMiddleware, currentRun, storage } = require("./instrument");
+const { instrument, assayMiddleware, currentRun, storage, setPlainRun, plainRun } = require("./instrument");
+const { summarize: summarizeSql } = require("./sql");
 const { costOf } = require("./llm");
 const { sender } = require("./send");
 
 const MAX_TEXT = 20000;
+const DB_READS = "DB reads"; // one step per run: reads per table, left out of the flow
 const EXPECT = "assay.expect@1";
 
 function id() {
@@ -258,6 +260,19 @@ class Run {
     this._step("answer", { text });
   }
 
+  /** A database write, from summarize() in sql.js: recorded as the step "DB INSERT bookings" with the
+   * columns it set and the ones it left empty, never the values. */
+  dbWrite({ op, table, set, empty }, error) {
+    this.tool(`DB ${op} ${table}`.slice(0, 128), { set, empty }, undefined,
+              { error: error ? `${error.code ? `${error.code} ` : ""}${error.message || error}`.slice(0, 500) : undefined });
+  }
+
+  /** A database read: only counted per table, and recorded once as "DB reads" when the run ends. */
+  dbRead(table) {
+    this._reads = this._reads || {};
+    this._reads[table] = (this._reads[table] || 0) + 1;
+  }
+
   /** "resolved", "unresolved" or "escalated". */
   outcome(value) {
     this.outcomeValue = value;
@@ -279,6 +294,7 @@ class Run {
   end(status = "completed", error) {
     if (this._ended) return;
     this._ended = true;
+    if (this._reads) this.tool(DB_READS, this._reads, undefined);
     emit({ type: "run.end", run_id: this.id, status, ...(this.outcomeValue ? { outcome: this.outcomeValue } : {}),
            ...(error ? { error: clean(error) } : {}) });
   }
@@ -358,5 +374,6 @@ async function assayCase(name, fn, { tags } = {}) {
   return result;
 }
 
-module.exports = { assayCase, startRun, track, flush, prompt, caseIdOf, toolSchemas, instrument, assayMiddleware, currentRun,
-                   Run, Expectations };
+module.exports = { assayCase, startRun, track, flush, prompt, caseIdOf, toolSchemas, instrument, assayMiddleware,
+                   currentRun, Run, Expectations, currentTest, setPlainRun, plainRun, summarizeSql,
+                   recordPg: (...a) => require("./pg").recordPg(...a) };

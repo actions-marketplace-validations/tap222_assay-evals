@@ -27,6 +27,8 @@ def utf8_output() -> None:
 def main(argv=None) -> int:
     utf8_output()
     p = argparse.ArgumentParser(prog="assay", description="Regression testing for AI apps and agents: what changed, and whether it's real.")
+    from assay import __version__
+    p.add_argument("--version", action="version", version=f"assay {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="Run the API and dashboard")
@@ -88,6 +90,8 @@ def main(argv=None) -> int:
                    help="Also add a Claude Code skill: Claude runs these tests after it changes a prompt or the agent")
     i.add_argument("--global", dest="global_", action="store_true",
                    help="With --claude-code: install the skill for every project (~/.claude), and nothing here")
+    i.add_argument("--hook", action="store_true",
+                   help="Also install a git pre-push hook: every push is checked for weakened tests and regressions")
     i.add_argument("--lang", choices=["python", "ts", "js"],
                    help="The example's language (default: a package.json and no Python packaging means JavaScript, "
                         "TypeScript when the project uses it)")
@@ -103,7 +107,14 @@ def main(argv=None) -> int:
     t.add_argument("--failed", action="store_true", help="Run only the cases that didn't pass last time (pytest)")
     t.add_argument("--judge", action="store_true", help="Also have an LLM judge plan quality and consistency "
                                                         "(needs `pip install anthropic`; a model call per run)")
+    t.add_argument("--base", metavar="REF", help="Also check the tests against this branch: assertions the change "
+                                                  "removed or loosened (default: ASSAY_BASE_REF)")
     t.add_argument("command", nargs=argparse.REMAINDER, help="-- <command> (overrides assay.toml)")
+    sub.add_parser("doctor", help="Is everything in place for the checks to run? What's missing, and the fix")
+    gd = sub.add_parser("guard", help="Assertions a change removed or loosened, against the base branch "
+                                      "(pytest, Jest, Vitest; no Assay tests needed)")
+    gd.add_argument("--base", metavar="REF", help="The branch to compare with (default: ASSAY_BASE_REF, else "
+                                                  "origin's default branch)")
     u = sub.add_parser("upload", help="Send a test run (the latest, by default) to an Assay server")
     u.add_argument("run", nargs="?", help="A run id instead of the latest")
     for q in (t, u):
@@ -306,6 +317,26 @@ def main(argv=None) -> int:
         from pathlib import Path
         from assay import synth
         return synth.cli(Path.cwd(), args)
+    if args.cmd == "doctor":
+        from pathlib import Path
+        from assay import workspace
+        code, text = workspace.doctor(Path.cwd())
+        print(text)
+        return code
+    if args.cmd == "guard":
+        from os import environ
+        from pathlib import Path
+        from assay import weakening
+        root = Path.cwd()
+        given = args.base or None
+        ref = weakening.base_ref(root, given) if given or environ.get(weakening.BASE_ENV) \
+            else weakening.default_base(root)
+        if given and not ref:
+            print(f"There's no {given} here to compare with.", file=sys.stderr)
+            return 2
+        code, text = weakening.guard(root, ref)
+        print(text, file=sys.stderr if code == 2 else sys.stdout)
+        return code
     if args.cmd in ("init", "test", "accept", "upload", "ack", "acks", "golden", "calibrate", "report", "log"):
         from pathlib import Path
         from assay import local
@@ -348,6 +379,9 @@ def main(argv=None) -> int:
                 print(exc, file=sys.stderr)
                 return 2
         if args.cmd == "test":
+            if args.base:  # read where the run is finished, by assay test and pytest --assay alike
+                from os import environ
+                environ["ASSAY_BASE_REF"] = args.base
             send = ({"url": args.url, "key": args.key, "tenant": args.send_tenant}
                     if local.upload_wanted(args.upload) else None)
             return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,
@@ -364,6 +398,9 @@ def main(argv=None) -> int:
             return 0
         made = local.init(root, args.claude_code, args.lang)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
+        if args.hook:
+            from assay import workspace
+            print(workspace.install_hook(root)[1])
         js = local.js_project(root, args.lang)
         if local.CLAUDE_SKILL in made:
             print(f"Claude Code now runs {'`assay test`' if js else '`pytest --assay`'} after changing a prompt or the "
