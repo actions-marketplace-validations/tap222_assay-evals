@@ -71,6 +71,14 @@ have been flagged, and fewer than 1 in 5 flagged items is noise. The findings ar
   assertion (`toBe(1200)` becoming `toBeGreaterThan(0)`), an expected value rewritten in the
   same pull request as the code it checks, a snapshot updated without review.
 
+Started before P0's targets were met: the first replay found the report short but the signal
+weak, and recording more of what the code did is what the signal needs. First step: every pytest
+test with its outbound HTTP calls (`--assay-all`, opt-in), who ran it, and the weakened tests a
+run found, in the CLI, the PR comment and the dashboard. Second step: every Jest test with what it
+writes to Postgres through `pg` (`assay-evals/jest`, opt-in), as table, operation and the columns
+set or left empty, compared with its last passing run. Next: checking new writes for a column
+left at its default, which the booking-app replay showed matters more than the diff.
+
 Done when: a real app's whole suite is recorded with no test changes, recording adds under 10%
 to test time, and the guard catches the weakened tests found in P0.
 

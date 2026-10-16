@@ -310,6 +310,8 @@ def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_p
 
 def test_an_uploaded_run_says_which_repository_and_folder_it_came_from(project, capsys, tmp_path_factory,
                                                                       monkeypatch):
+    for k in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "GITHUB_ACTIONS"):  # who ran it: nobody in particular
+        monkeypatch.delenv(k, raising=False)
     from fastapi.testclient import TestClient
     from assay.api import create_app
     from assay.config import Settings
@@ -710,6 +712,58 @@ def test_a_node_project_is_tested_and_a_regression_caught(project, capsys, monke
     out = capsys.readouterr().out
     assert "2 regressed" in out and "No longer: approval" in out
     assert "expect.must_call_before(approval, refund)" in out
+
+
+# --- what a plain JavaScript test writes to the database ----------------------------------------
+
+JS_DB = """
+const assay = require({sdk});
+const {{ recordPg }} = require({pg});
+class Client {{ query() {{ return Promise.resolve({{ rows: [] }}); }} }}  // pg's Client, as pg.js sees it
+recordPg({{ Client }});
+const db = new Client();
+const drop = process.env.DROP_BRANCH;
+async function plainTest(name, body) {{  // what assay-evals/jest does around each test
+  const run = new assay.Run(name, {{ caseId: `bookings.test.js::${{name}}`, tags: {{ assay_record: "plain" }} }});
+  assay.setPlainRun(run);
+  await body();
+  run.check("test", true);
+  run.end("completed");
+  assay.setPlainRun(null);
+}}
+(async () => {{
+  await plainTest("books a slot", async () => {{
+    await db.query('INSERT INTO "bookings"("amount", "locationId") VALUES ($1, $2)', [500, drop ? null : "b-1"]);
+    for (let i = 0; i < (process.env.N_PLUS_ONE ? 12 : 1); i++) await db.query("SELECT * FROM services WHERE id = $1", [i]);
+  }});
+  await plainTest("seeds three slots", async () => {{  // three identical writes: not an agent's loop
+    for (let i = 0; i < 3; i++) await db.query("INSERT INTO slots (starts_at) VALUES ($1)", [i]);
+  }});
+}})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
+def test_a_plain_js_tests_database_writes_are_compared(project, capsys, monkeypatch):
+    (project / "db.js").write_text(JS_DB.format(sdk=json.dumps(str(JS_SDK)), pg=json.dumps(str(JS_SDK / "pg.js"))),
+                                   encoding="utf-8")
+    config(project, "node db.js")
+    assert main(["test"]) == 0
+    out = capsys.readouterr().out
+    assert "Looped" not in out  # plain tests aren't held to agent checks
+
+    monkeypatch.setenv("DROP_BRANCH", "1")
+    monkeypatch.setenv("N_PLUS_ONE", "1")
+    assert main(["test"]) == 0  # still passing: the diff says what changed
+    out = capsys.readouterr().out
+    assert "1 case wrote to the database differently than its baseline" in out
+    main(["diff"])
+    out = capsys.readouterr().out
+    assert "DB INSERT bookings: now leaves locationId empty" in out
+    assert "reads of services: 12 instead of 1" in out
+    assert "seeds three slots" not in out
+    main(["diff", "--format", "markdown"])
+    assert "now leaves locationId empty" in capsys.readouterr().out
 
 
 # --- a tool's definition changed: what the model reads to choose it ---------------------------
