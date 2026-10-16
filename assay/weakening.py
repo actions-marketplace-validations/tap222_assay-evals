@@ -13,7 +13,9 @@ Each test file the change touched is compared with its version at the merge base
   removed    a test has fewer assertions than before, and the ones gone check something no
              remaining assertion does
   rewritten  an exact check stayed exact, but its expected value changed. Often that's the
-             change you meant; it's listed to confirm, never a failure
+             change you meant; it's listed to confirm, never a failure. An expected dict, list,
+             tuple or set that kept every entry and only gained more checks more, not less, so
+             it isn't listed
 
 pytest files are read with Python's own parser. Jest and Vitest files are read by a scanner
 that follows `expect(...)` chains: a parser for every TypeScript dialect isn't worth a
@@ -281,6 +283,39 @@ def js_tests(source: str) -> Dict[str, List[Check]]:
 
 # ---------- comparing ----------
 
+def _entries(text: Optional[str]) -> Optional[Tuple[str, list]]:
+    """An expected value written as a dict, list, tuple or set literal: (its kind, its entries as
+    comparable text). None for anything else. JS literals parse too, once normalized."""
+    try:
+        node = ast.parse(text or "", mode="eval").body
+    except (SyntaxError, ValueError):
+        return None
+    if isinstance(node, ast.Dict):
+        if any(k is None for k in node.keys):
+            return None  # {**other}: what it holds isn't written here
+        return "dict", [(ast.dump(k), ast.dump(v)) for k, v in zip(node.keys, node.values)]
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        if any(isinstance(e, ast.Starred) for e in node.elts):
+            return None
+        return type(node).__name__.lower(), [ast.dump(e) for e in node.elts]
+    return None
+
+
+def only_gained(before: Optional[str], after: Optional[str]) -> bool:
+    """The new expected value keeps every old entry unchanged and adds more: a dict with new keys,
+    a list or tuple with new items (the old ones still in order), a set with new members."""
+    b, a = _entries(before), _entries(after)
+    if not b or not a or b[0] != a[0] or len(a[1]) <= len(b[1]):
+        return False
+    kind, old, new = b[0], b[1], a[1]
+    if kind == "dict":
+        return dict(old).items() <= dict(new).items()
+    if kind == "set":
+        return set(old) <= set(new)
+    rest = iter(new)
+    return all(any(x == y for y in rest) for x in old)  # a subsequence: the old items, in order
+
+
 def compare(before: Dict[str, List[Check]], after: Dict[str, List[Check]]) -> List[dict]:
     """What weakened, test by test: [{"test", "kind", "line", "before", "after"}]."""
     out = []
@@ -297,9 +332,9 @@ def compare(before: Dict[str, List[Check]], after: Dict[str, List[Check]]) -> Li
                 if tol is not None and c[5] is not None:  # approximate: what matters is the tolerance
                     if c[5] > tol:
                         out.append({"test": name, "kind": "loosened", "line": c[3], "before": text, "after": c[4]})
-                    elif c[5] == tol and c[2] != exp:
+                    elif c[5] == tol and c[2] != exp and not only_gained(exp, c[2]):
                         out.append({"test": name, "kind": "rewritten", "line": c[3], "before": text, "after": c[4]})
-                elif c[2] != exp:
+                elif c[2] != exp and not only_gained(exp, c[2]):
                     out.append({"test": name, "kind": "rewritten", "line": c[3], "before": text, "after": c[4]})
                 continue
             looser = [c for c in left if c[0] == tgt and not c[1]]

@@ -146,6 +146,25 @@ def test_unchanged_js_tests_and_equivalent_matchers_are_not_weakening():
     assert compare(js_tests(JS_BEFORE), js_tests(requoted)) == []
 
 
+def test_an_expected_value_that_only_gained_entries_is_not_listed():
+    # A new verdict added to an expected count checks more, not less (seen in this repo's history, #32).
+    before = 'def test_counts():\n    assert out["counts"] == {"PASS": 14, "FAIL": 1}\n'
+    gained = before.replace('"FAIL": 1}', '"FLAKY": 0, "FAIL": 1}')
+    assert compare(py_tests(before), py_tests(gained)) == []
+    js = 'it("counts", () => { expect(out.counts).toEqual({ PASS: 14, FAIL: 1 }); });\n'
+    assert compare(js_tests(js), js_tests(js.replace("FAIL: 1 }", "FAIL: 1, FLAKY: 0 }"))) == []
+    items = 'def test_steps():\n    assert steps() == ["plan", "pay"]\n'
+    assert compare(py_tests(items), py_tests(items.replace('"pay"]', '"check", "pay"]'))) == []
+    # Still listed: an old entry changed, one went, the order changed, or it isn't a collection.
+    for after in (before.replace('"FAIL": 1}', '"FAIL": 2, "FLAKY": 0}'),
+                  before.replace('"PASS": 14, ', '"FLAKY": 0, "OTHER": 1, '),
+                  items.replace('["plan", "pay"]', '["pay", "plan", "check"]'),
+                  before.replace('{"PASS": 14, "FAIL": 1}', '{**base, "FAIL": 1, "X": 0}')):
+        old = before if "counts" in after else items
+        assert kinds(compare(py_tests(old), py_tests(after))) == [(next(iter(py_tests(old))), "rewritten")]
+    assert weakening.only_gained('"ab"', '"abc"') is False
+
+
 # ---------- against the base branch, in git ----------
 
 def git(root, *args):

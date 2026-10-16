@@ -47,7 +47,7 @@ Who it's for, and what each person needs: [user stories](user-stories.md).
 
 Each phase starts when the one before has met its "done when".
 
-### P0. Prove it on a real app (next)
+### P0. Prove it on a real app (first replay done)
 
 Before building, replay the history of a real production app offline and see whether a
 per-PR report would be short and right.
@@ -60,16 +60,31 @@ per-PR report would be short and right.
 Done when: most reports have 3 items or fewer, at least half the bugs later fixed by hand would
 have been flagged, and fewer than 1 in 5 flagged items is noise. The findings are published here.
 
+First replay, on Assay's own history ([findings](p0-findings.md)): reports were short, but
+changed functions no test ran would have flagged 1 of 9 later-fixed bugs. Changed lines plus
+deploy and dependency changes would flag 6 of 9. P2 below is changed to match. Next: repeat it
+on a larger app, with JavaScript and TypeScript measured.
+
+Second replay, on a booking app's 41 fixes, asked only about database writes
+([findings](p0-findings.md#second-replay-a-booking-app-and-database-writes)): 6 saved wrong
+data, all wrong from the start rather than regressions. Checks on new writes would have
+caught 4; a diff against the base branch alone, none. P1 below is changed to match.
+
 ### P1. Record every test, and guard the tests
 
 - Every existing test is recorded, AI or not, with no `assayCase()` or `assay_case` needed: a
   Jest and Vitest reporter, and the pytest plugin.
 - What the code did in each test: outside calls (HTTP), database writes, AI calls, responses
-  and time. HTTP and one database driver first; more only where they catch real bugs.
+  and time. HTTP and one database driver first (node-postgres); more only where they catch
+  real bugs.
+- Database writes as a summary, not raw SQL: table, operation and the columns set. Reads are
+  only counted. New writes are checked for a request value that never reaches the row and a
+  column left at its default, ranked money first, then times and timezones, then ids.
 - **Weakened-test guard.** Today a pull request can't delete, skip or filter out the test its
   change breaks. The guard adds the quieter ways a test stops checking anything: a loosened
   assertion (`toBe(1200)` becoming `toBeGreaterThan(0)`), an expected value rewritten in the
-  same pull request as the code it checks, a snapshot updated without review.
+  same pull request as the code it checks, a snapshot updated without review. (Built: an
+  expected value that only gained entries is no longer listed as rewritten.)
 
 Started before P0's targets were met: the first replay found the report short but the signal
 weak, and recording more of what the code did is what the signal needs. First step: every pytest
@@ -80,7 +95,8 @@ set or left empty, compared with its last passing run. Next: checking new writes
 left at its default, which the booking-app replay showed matters more than the diff.
 
 Done when: a real app's whole suite is recorded with no test changes, recording adds under 10%
-to test time, and the guard catches the weakened tests found in P0.
+to test time, and the guard flags the rewritten expected value found in P0 (4a4d5a0) and not
+the one that only gained an entry (#32).
 
 User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
 
@@ -90,8 +106,11 @@ User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
   item, grouped into causes.
 - The likely cause of each change: the file, commit, package or config next to it, or "nothing
   on your side changed" when an outside service did.
-- Changed code that no test ran, ranked by risk: money, messages, logins and database writes
-  first.
+- Changed lines that no test ran, grouped by function and ranked by risk: money, messages,
+  logins, database writes and outside calls first.
+- Deploy and dependency changes no CI job checked: a requirements, lock or ignore file, a
+  workflow or a version pin changed, and nothing in the pull request built, installed or
+  deployed from it. In P0 these were 4 of 9 bugs, which coverage can't see.
 - Flaky or real for every test, with the existing repeat statistics.
 - Mark a change intended once.
 - The same report as the PR comment, and as JSON a coding agent can act on.

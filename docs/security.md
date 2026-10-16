@@ -42,7 +42,8 @@ them, as with any test suite. What Assay adds:
   checks: "loosens an assertion in test_total (tests/test_cart.py:12): assert total == 1200 →
   assert total > 0, while cart.py changed". The same label accepts it. An exact check whose
   expected value changed (`== 1200` to `== 1350`) is often the change you meant, so it's listed
-  to confirm, not failed. pytest and unittest files are read with Python's parser, Jest and
+  to confirm, not failed; an expected dict, list or set that only gained entries isn't listed,
+  since it checks more than before. pytest and unittest files are read with Python's parser, Jest and
   Vitest files by following `expect(...)` chains; reformatting, renaming a test or switching
   between equivalent matchers isn't a change. The action compares with the base branch on its
   own. Elsewhere, set `ASSAY_BASE_REF` (or `assay test --base main`); outside a pull request
