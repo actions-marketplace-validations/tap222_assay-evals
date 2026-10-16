@@ -41,6 +41,21 @@ otherwise keeps the decision against the baseline: the worse of the two decides.
 past the limit rolls back even before there's a baseline or a noise floor; one within it still
 needs both to advance. Each slice reports `candidate_value` and `candidate_ci`.
 
+**A margin per slice.** `tolerance`, `severity`, `min_n` and `absolute_limit` apply to every
+slice of a measure. A high-risk slice (high-value invoices, one regulated document type) can
+have its own, agreed with the customer before the runs:
+
+```json
+{"measure_id": "field_accuracy", "tolerance": 0.05, "min_n": 100,
+ "slices": {"high_value": {"tolerance": 0.01, "severity": "high"}}}
+```
+
+Here a 3-point drop advances on routine documents and rolls back on high-value ones, and the
+worst slice decides, so that slice blocks the release on its own. A slice named in `slices`
+has to be measured: a missing one holds the release, as if it were in `required_slices`. A
+slice can set only those four fields; a misspelt one is rejected. Each slice reports the
+`tolerance` it got, after severity, and `own_margin`.
+
 **The noise floor** is how far apart two runs of the same version on the same corpus usually
 land. With two baseline runs, it's their difference. With three or more, it's 1.96 × √2 × the
 standard deviation of the run means, which is the 95% range of the gap between two runs. It

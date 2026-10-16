@@ -202,10 +202,6 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 - **Code checks and judges apart in the verdict:** deterministic checks already outrank a judge
   when the two disagree. The verdict should also report them separately, code checks first, so
   a model swap has a signal no judge's noise reaches, with judged checks as the second line.
-- **Margins per slice:** `tolerance` and `severity` are set per measure, so every slice of a
-  measure gets the same margin. A high-risk slice (high-value invoices, one regulated document
-  type) should have its own margin, agreed with the customer before the runs, and be able to
-  block the release on its own. The workaround today is a separate measure per slice.
 - **One release decision across both gates:** the slice gate (`/v1/gates/evaluate`) and the
   stability gate (`/v1/evals/runs/{run}/stability`) answer different questions and are called
   separately. A release should get one decision table: every gate as a row (quality per slice,

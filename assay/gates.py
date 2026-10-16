@@ -12,19 +12,21 @@ or a per-document score) for baseline and candidate on the same corpus.
 A rule compares their mean by default, or a percentile ("p95") for measures
 like latency, where a slow tail can grow while the average holds. A rule can
 also set an absolute limit ("p95 under 20 s") the candidate must keep whatever
-the baseline did.
+the baseline did, and give a high-risk slice its own margin.
 """
 from __future__ import annotations
 
 import random
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from statistics import fmean, stdev
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 ADVANCE, HOLD, ROLLBACK = "advance", "hold", "rollback"
 _RANK = {ADVANCE: 0, HOLD: 1, ROLLBACK: 2}
 # A percentile rests on the values beyond it: p99 of 100 values is one value.
 MIN_TAIL = 5
+# What a slice can set for itself, in place of the measure's value.
+SLICE_FIELDS = ("tolerance", "severity", "min_n", "absolute_limit")
 
 
 def percentile_of(statistic: str) -> Optional[float]:
@@ -65,9 +67,21 @@ class GateRule:
     # The worst value the candidate's statistic may have, whatever the baseline did: a maximum
     # when lower is better, a minimum when higher is better. None: no absolute limit.
     absolute_limit: Optional[float] = None
+    # A slice's own margin, agreed before the runs: {"high_value": {"tolerance": 0.005}}. A slice
+    # named here must be measured, or the release holds.
+    slices: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         percentile_of(self.statistic)
+        for name, own in self.slices.items():
+            unknown = set(own) - set(SLICE_FIELDS)
+            if unknown:
+                raise ValueError(f"Slice {name!r} can set {', '.join(SLICE_FIELDS)}, not {', '.join(sorted(unknown))}")
+
+    def for_slice(self, name: str) -> "GateRule":
+        """The rule as it applies to one slice: the measure's values, with that slice's own on top."""
+        own = self.slices.get(name)
+        return replace(self, **own, slices={}) if own else self
 
     @property
     def key(self) -> str:
@@ -92,6 +106,8 @@ class SliceDecision:
     noise_floor: Optional[float] = None
     statistic: str = "mean"
     absolute_limit: Optional[float] = None
+    tolerance: Optional[float] = None  # the margin applied, after severity
+    own_margin: bool = False  # the slice set its own margin, in place of the measure's
     candidate_value: Optional[float] = None  # the candidate's statistic, when checked against the limit
     candidate_ci: Optional[Tuple[float, float]] = None
 
@@ -227,7 +243,8 @@ def _against_baseline(rule: GateRule, slice_name: str, baseline: Optional[Sequen
                       paired: bool) -> SliceDecision:
     base = SliceDecision(rule.measure_id, slice_name, HOLD, "",
                          n_baseline=len(baseline or []), n_candidate=len(candidate or []),
-                         noise_floor=floor, statistic=rule.statistic, absolute_limit=rule.absolute_limit)
+                         noise_floor=floor, statistic=rule.statistic, absolute_limit=rule.absolute_limit,
+                         tolerance=rule.effective_tolerance)
     if not baseline or not candidate:
         base.reason = "Slice is unmeasured; unmeasured never passes."
         return base
@@ -274,18 +291,21 @@ def evaluate(rules: Sequence[GateRule],
     noise_floors is keyed by GateRule.key ("latency_ms:p95" for a percentile rule),
     falling back to the measure id.
     required_slices[measure_id] lists slices that must be present; a missing
-    one is reported as unmeasured and holds the release.
+    one is reported as unmeasured and holds the release. So is a slice with its
+    own margin in the rule.
     """
     decisions: List[SliceDecision] = []
     for rule in rules:
         by_slice = dict(samples.get(rule.measure_id, {}))
-        for s in (required_slices or {}).get(rule.measure_id, []):
+        for s in [*(required_slices or {}).get(rule.measure_id, []), *rule.slices]:
             by_slice.setdefault(s, {})
         if not by_slice:
             by_slice = {"overall": {}}
         for slice_name, pair in sorted(by_slice.items()):
-            decisions.append(evaluate_slice(rule, slice_name, pair.get("baseline"),
-                                            pair.get("candidate"),
-                                            noise_floors.get(rule.key, noise_floors.get(rule.measure_id))))
+            d = evaluate_slice(rule.for_slice(slice_name), slice_name, pair.get("baseline"),
+                               pair.get("candidate"),
+                               noise_floors.get(rule.key, noise_floors.get(rule.measure_id)))
+            d.own_margin = slice_name in rule.slices
+            decisions.append(d)
     outcome = max((d.outcome for d in decisions), key=_RANK.__getitem__, default=HOLD)
     return GateDecision(outcome, decisions)
