@@ -382,6 +382,10 @@ run.mcp_prompt("refund_policy_check", {"order": "O-17"}, messages, server="docs"
 A resource's contents count as what the agent retrieved, so a judge given that policy as its
 context passes the context check.
 
+An MCP tool is named by its server and its name in the flow and the diff (`shop.refund`). Two
+servers can both offer `search`, so a call that moved from one server to the other is a change,
+though the tool's name is the same.
+
 An MCP server's tools change under the agent: a description reworded, an argument made required.
 Offer the model the server's `tools/list` as it is, and record it with the call:
 

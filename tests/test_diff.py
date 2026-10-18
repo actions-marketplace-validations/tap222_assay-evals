@@ -125,6 +125,15 @@ def test_how_a_flow_changed():
     assert diff._describe(twice) == "HTTP POST api.x.com/charges: twice instead of once"
 
 
+def test_a_tool_call_that_moved_to_another_mcp_server_is_a_change():
+    before = {"steps": [{"kind": "tool", "name": "search", "server": "db"}, {"kind": "tool", "name": "refund"}]}
+    now = {"steps": [{"kind": "tool", "name": "search", "server": "github"}, {"kind": "tool", "name": "refund"}]}
+    assert diff.flow(before) == ("db.search", "refund") and diff.flow(now) == ("github.search", "refund")
+    ch = diff.flow_change(diff.flow(before), diff.flow(now))
+    assert ch["added"] == ["github.search"] and ch["removed"] == ["db.search"]
+    assert diff.flow_change(diff.flow(before), diff.flow(before)) is None
+
+
 def _db(*steps, reads=None):
     out = [{"kind": "tool", "name": n, "args": {"set": st, "empty": em}} for n, st, em in steps]
     if reads is not None:

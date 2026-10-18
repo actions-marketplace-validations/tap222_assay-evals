@@ -50,6 +50,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime
 from statistics import mean, median
@@ -144,11 +145,25 @@ INJECTION = [re.compile(p, re.I | re.M) for p in (
     r"\b(you must|you should|now|instead)\s+(call|run|invoke|execute|use)\s+(the\s+)?`?\w+`?")]
 
 
+# Letters from other scripts that look like Latin ones: "іgnore" with a Cyrillic і reads the same.
+LOOKALIKE = str.maketrans("аеорсухіјѕԁԍһӏоԛѵԝАВЕКМНОРСТХІЈЅԌӀοαεικνρτυχΑΒΕΗΙΚΜΝΟΡΤΥΧ",
+                          "aeopcyxijsdghloqvwABEKMHOPCTXIJSGIoaeikvptuxABEHIKMNOPTYX")
+
+
+def plain(text: str) -> str:
+    """text as a reader sees it: Unicode compatibility forms folded (full-width letters, ligatures),
+    zero-width and other invisible characters removed, look-alike letters made Latin. An instruction
+    split by a zero-width space, or spelled in full-width letters, is still found."""
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf" and (c in "\n\t" or c >= " "))
+    return text.translate(LOOKALIKE)
+
+
 def _injected(s: dict) -> Optional[str]:
     """The injected instruction in a tool or resource result, or None."""
     if s["kind"] not in ("tool", "resource") or s.get("error") or s.get("result") is None:
         return None
-    text = s["result"] if isinstance(s["result"], str) else json.dumps(s["result"], ensure_ascii=False, default=str)
+    text = plain(s["result"] if isinstance(s["result"], str) else json.dumps(s["result"], ensure_ascii=False, default=str))
     m = next((m for rx in INJECTION for m in [rx.search(text)] if m), None)
     return None if m is None else text[max(0, m.start() - 40):m.end() + 80]
 
