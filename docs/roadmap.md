@@ -123,7 +123,13 @@ User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
   deployed from it. In P0 these were 4 of 9 bugs, which coverage can't see.
 - Flaky or real for every test, with the existing repeat statistics.
 - Mark a change intended once.
-- The same report as the PR comment, and as JSON a coding agent can act on.
+- The same report as the PR comment, and as JSON a coding agent can act on. Also as an MCP server,
+  so Claude Code, Cursor or any other agent can ask mid-session what its change did, and fix it
+  before a pull request exists.
+- Fragile code ranked higher: lines and functions that later fixes kept changing, from the
+  repository's own history (a fix commit's blame, as the P0 replay did). An untested change in a
+  function fixed four times this quarter outranks one in code nobody has touched in a year. No
+  model is involved, and the history is read once and kept.
 - Mechanical edits apart from behavior changes: a rename, a moved function or a reformat that
   leaves the parsed code the same is grouped as mechanical and left out of untested lines, so the
   short list of behavior changes is what gets read. A behavior change hidden in a mechanical
