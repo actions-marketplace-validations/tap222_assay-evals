@@ -260,6 +260,27 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   unchanged answer is a finding, not a pass. Fragments take a version and a date, so evidence that
   was superseded shows as such. This is also the provenance for a decision: which policy version
   and which records supported it.
+- **Retrieval on its own: two retrievers or rerankers, compared query by query:** swapping an
+  embedding model, a chunk size or a reranker changes what's retrieved before any answer changes.
+  Assay records each fragment a run retrieved but doesn't score retrieval against relevance
+  labels. It should:
+  - **Score each query** with recall@k, MRR and nDCG against labels (which documents answer which
+    query), read from a qrels or CSV file or given per case, and split by slice.
+  - **Compare two configurations on the same queries:** regressions (found before, missed now),
+    recoveries, and shared failures (missed by both), the way `assay diff` does for answers. A
+    paired test says whether the overall change is real, and the report names the queries behind it.
+  - **Check the labels before the scores:** a retrieved document with no label (a missing judgment
+    counted as wrong drags a better retriever down), the same document labelled two ways for one
+    query, and labels on different scales. Each says how many results it affects, so a team fixes
+    the labels instead of reading noise.
+  - **Keep the evidence:** each finding links the query, both result lists and the labels, so
+    someone else can rerun it and get the same numbers.
+  - **Make the losses into tests:** each regression becomes a case with its success criterion
+    ("kb-12 in the top 5"), so the next change is held to it.
+  - **A handoff page:** the comparison, label problems and open regressions as one page for a
+    client, or a reviewer who approves the change. Rerun after a fix, it shows what moved.
+  It works from saved results, so a team can compare runs it already has without sharing its
+  index or rerunning anything.
 - **Outdated and conflicting sources (RAG):** a policy has a 2024 and a 2025 version, both are
   retrieved, and the answer follows the old one. Or two sources disagree and the answer blends
   them. Teams handle it with version metadata, a filter and a prompt rule ("use the latest
