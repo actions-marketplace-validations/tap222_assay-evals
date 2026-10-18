@@ -37,6 +37,12 @@ inputs:
   policy-label:
     description: The PR label that accepts a change that loosens the checks.
     default: assay-policy-change
+  changes:
+    description: >-
+      On a pull request, add what nothing checked to the comment: changed lines no test ran (from
+      the coverage your command leaves, e.g. `pytest --cov --cov-report=json` or `jest --coverage`)
+      and deploy or dependency files no CI job used. Never fails the job.
+    default: "false"
 
 outputs:
   result:
@@ -106,6 +112,19 @@ runs:
         esac
         echo "code=$code" >> "$GITHUB_OUTPUT"
         echo "result=$result" >> "$GITHUB_OUTPUT"
+
+    - if: github.event_name == 'pull_request' && inputs.changes == 'true'
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        if [ -z "$ASSAY_BASE_REF" ] && git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF" >/dev/null 2>&1; then
+          export ASSAY_BASE_REF=$(git rev-parse FETCH_HEAD)
+        fi
+        mkdir -p .assay
+        assay changes --format markdown > .assay/changes.md || exit 0
+        { echo; cat .assay/changes.md; } >> .assay/summary.md
+        if [ -n "$GITHUB_STEP_SUMMARY" ]; then cat .assay/changes.md >> "$GITHUB_STEP_SUMMARY"; fi
 
     - if: github.event_name == 'pull_request' && inputs.comment == 'true'
       shell: bash

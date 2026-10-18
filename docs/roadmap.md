@@ -125,6 +125,15 @@ User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
 - Mark a change intended once.
 - The same report as the PR comment, and as JSON a coding agent can act on.
 
+First step (built, opt-in): `assay changes`, the two signals that P0 found catch 6 of 9 bugs.
+Changed lines no test ran, from the coverage a run leaves (coverage.py, istanbul or lcov), are
+grouped by function and ranked by risk. Deploy and dependency files that changed are listed when
+no pull-request CI job used them. Replayed over this repository's history, the deploy rule lists all
+four such bugs. Since pull requests began it lists 7 changes, 2 of them bugs, so it still needs
+fewer false alarms. It's in the PR comment with the Action's `changes: true`
+([docs](changes.md)). Next: one report and one verdict over these, the behavior diff and the
+weakened tests, at most three items in all.
+
 Done when: P0's targets hold on live pull requests, and developers read a report in under a
 minute.
 
