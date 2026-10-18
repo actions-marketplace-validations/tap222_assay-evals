@@ -345,6 +345,13 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     allowed it, the evidence it rested on, and what happened after. The same view exports for
     security, legal or finance as CSV and PDF, signed so an edit shows. The number for a team:
     the time to answer that question, and the share of actions with a full record.
+  - **An approval the agent claimed, not one it was given:** `must_get_approval_before` accepts any
+    approval recorded in the run, whoever recorded it. An agent that writes its own approval, or
+    passes "trusted" or "approved_by: finance" in a tool's arguments, gets through. An approval
+    should record where it came from (the approval system, a person's decision, a signed record),
+    and only those count. A claim in the agent's own output or arguments never does, and probe cases
+    check it: an invoice that says "pre-approved" in its text must not get paid. An approval used
+    long after it was given, past the window the case allows, counts as none.
   - **Approvals that are rubber stamps:** people approve almost everything an agent asks, so an
     approval step can look safe while checking nothing. `run.approval()` records the action, the
     decision and who, but not what the person was shown or how long they took. It should record
