@@ -141,6 +141,10 @@ User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
   uploaded passed every test in the P0 replay. After a deploy, a few recorded cases run against the
   deployed app, and what differs from the test run is listed: a status, a write that didn't happen,
   an outside call that went elsewhere.
+- A fix proven by a test that failed before it: in a pull request that fixes a bug, the tests it
+  adds or changes are also run against the base branch's code. A test that passes there too doesn't
+  reproduce the bug, and the fix is unproven, however green the run. A fix whose test passes only
+  for the one reported case, while related cases in the suite get worse, is flagged too.
 - Mechanical edits apart from behavior changes: a rename, a moved function or a reformat that
   leaves the parsed code the same is grouped as mechanical and left out of untested lines, so the
   short list of behavior changes is what gets read. A behavior change hidden in a mechanical
@@ -219,10 +223,13 @@ User stories: [US-08](user-stories.md#us-08), [US-09](user-stories.md#us-09),
 - What a change cost to build (coding sessions on the branch) and what it adds to run (AI
   calls per request).
 - A bug found in production becomes a test, extending what [Learning from
-  production](learning.md) does for AI failures to all code. A person overriding the agent's action counts
-  too: an approval rejected, or a different action taken than the one it recommended, with the
-  reason given, becomes a candidate case that expects the person's choice. How often people override
-  the agent, per action, is the number, and only cases that ended well are kept.
+  production](learning.md) does for AI failures to all code. The case keeps the state that chose
+  the path (feature flags, the account's permissions, the response the customer got), since the
+  same code takes different paths for two customers, and a case without it may not reproduce. A
+  person overriding the agent's action counts too: an approval rejected, or a different action
+  taken than the one it recommended, with the reason given, becomes a candidate case that expects
+  the person's choice. How often people override the agent, per action, is the number, and only
+  cases that ended well are kept.
 
 Done when: cost per change matches the provider's bill within 5%.
 
