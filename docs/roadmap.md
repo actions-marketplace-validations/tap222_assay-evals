@@ -117,7 +117,9 @@ User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
 - The likely cause of each change: the file, commit, package or config next to it, or "nothing
   on your side changed" when an outside service did.
 - Changed lines that no test ran, grouped by function and ranked by risk: money, messages,
-  logins, database writes and outside calls first.
+  logins, database writes and outside calls first. A changed helper takes the risk of what calls it: an untested
+  change to `format_amount` used only by `refund()` ranks with money, not with the rest. The
+  callers come from the code itself (the parser, or the language's own tooling), never a model.
 - Deploy and dependency changes no CI job checked: a requirements, lock or ignore file, a
   workflow or a version pin changed, and nothing in the pull request built, installed or
   deployed from it. In P0 these were 4 of 9 bugs, which coverage can't see.
