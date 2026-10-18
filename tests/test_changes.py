@@ -82,9 +82,8 @@ def test_unrun_lines_are_grouped_by_function_and_ranked_by_risk(tmp_path):
         ("app.py", "upload", "10-11", "outside calls"),
         ("helpers.py", None, "1-2", "")]  # Python coverage, and no test loaded it
     assert u["items"][2]["unloaded"] and (u["ran"], u["measured"]) == (2, 7)
-    lines = changes.text({"base": "main", "files": 4, "untested": u, "deploy": []}, limit=2).splitlines()
-    assert lines[3] == "  1. app.py: Billing.refund, line 17 (money)"
-    assert lines[-1] == "  (+1 more: --all lists them)"
+    assert changes._item(u["items"][0]) == "app.py: Billing.refund, line 17 (money)"
+    assert changes._item(u["items"][2]) == "helpers.py: no test loaded this file, lines 1-2"
 
 
 def test_a_file_none_of_whose_lines_ran_is_one_item(tmp_path):
@@ -205,13 +204,103 @@ def test_the_command_reports_against_the_base_branch(tmp_path, monkeypatch, caps
     (tmp_path / "coverage.json").write_text(json.dumps({"files": {"app.py": {
         "executed_lines": [1, 4, 5, 8, 14, 15], "missing_lines": [9, 10, 11, 17]}}}), encoding="utf-8")
     assert main(["changes", "--base", "main"]) == 0
-    out = capsys.readouterr().out
-    assert "1. app.py: Billing.refund, line 17 (money)" in out
-    assert "2. app.py: upload, lines 9-11 (outside calls)" in out
-    assert "requirements.txt: no job on pull requests installs or builds from it" in out
+    out = capsys.readouterr().out.splitlines()
+    assert out[:4] == ["Check 3 things before merging",
+                       "  1. not run by any test: app.py: Billing.refund, line 17 (money)",
+                       "  2. not run by any test: app.py: upload, lines 9-11 (outside calls)",
+                       "  3. requirements.txt: no job on pull requests installs or builds from it"]
+    assert out[-1] == "(against main, 3 changed files; 4 of 8 changed lines ran in a test)"
+    assert not (tmp_path / ".assay").exists()  # nothing written in a repository that doesn't use Assay
     assert main(["changes", "--base", "main", "--format", "json"]) == 0
-    d = json.loads(capsys.readouterr().out)
-    assert d["untested"]["ran"] == 4 and [x["file"] for x in d["deploy"]] == ["requirements.txt"]
+    r = json.loads(capsys.readouterr().out)
+    assert r["changes"]["untested"]["ran"] == 4 and [x["file"] for x in r["changes"]["deploy"]] == ["requirements.txt"]
     assert main(["changes", "--base", "main", "--format", "markdown"]) == 0
-    assert "**Changed, not run by any test** (4 of 8 changed lines ran)" in capsys.readouterr().out
+    md = capsys.readouterr().out
+    assert md.startswith("### Check 3 things before merging\n\n1. not run by any test:")
+    assert "4 of 8 changed lines ran in a test" in md
     assert main(["changes", "--base", "nope"]) == 2
+
+
+# ---------- the change report: one verdict, three items ----------
+
+RUN = {"regressions": [{"name": "refund_flow", "severity": "HIGH", "reasons": ["refund ran before its approval"],
+                        "setup": ["prompt refund@3 → refund@4"]}],
+       "new_failures": [], "flaky": [{"name": "greets"}, {"name": "books"}],
+       "changed": [{"name": "search", "flow_change": {"text": "new: HTTP GET maps"}}],
+       "write_checks": [{"kind": "placeholder", "write": "INSERT clinics", "field": "timezone",
+                         "text": "INSERT clinics sets timezone to \"UTC\"", "cases": ["t.py::creates"],
+                         "names": ["creates"]}]}
+LOOSE = {"file": "tests/test_pay.py", "line": 4, "test": "test_total", "kind": "loosened",
+         "before": "== 1200", "after": "> 0"}
+NOTE = {**LOOSE, "kind": "rewritten", "before": "== 1200", "after": "== 1350"}
+CHANGES = {"base": "main", "files": 5, "deploy": [{"file": "requirements.txt", "why": "no job installs it"}],
+           "untested": {"ran": 3, "measured": 9, "items": [
+               {"file": "app.py", "function": "refund", "lines": [9], "spans": "9", "risk": "money"},
+               {"file": "app.py", "function": "fmt", "lines": [20], "spans": "20", "risk": ""}]}}
+
+
+def test_the_report_ranks_what_broke_first_then_what_looks_wrong_then_what_nothing_checked():
+    found = changes.items(CHANGES, RUN, [LOOSE, NOTE])
+    assert [x["kind"] for x in found] == ["regressed", "weakened", "new write", "untested, risky", "deploy",
+                                         "changed", "untested", "expected value"]
+    assert found[0]["text"] == "refund_flow: refund ran before its approval"
+    assert found[2]["text"] == 'INSERT clinics sets timezone to "UTC" (creates)'
+    assert found[0]["detail"] == "HIGH · changed: prompt refund@3 → refund@4"  # the likely cause, next to it
+    assert changes.verdict(found) == "Not safe to merge: 2 things broke or stopped being checked"
+    assert changes.verdict(found[2:]) == "Check 3 things before merging"
+    assert changes.verdict(found[-1:]) == "Check 1 thing before merging"
+    assert changes.verdict([]).startswith("Nothing to check")
+
+
+def test_the_report_shows_three_items_and_counts_the_rest(monkeypatch, tmp_path):
+    from assay import weakening
+    monkeypatch.setattr(weakening, "scan", lambda root, ref: [LOOSE, NOTE])
+    r = changes.report(tmp_path, CHANGES)
+    assert r["run"] is None and r["rest"] == {"untested": 1, "expected value": 1}  # no test results here
+    assert changes.report_text(r).splitlines()[:2] == [
+        "NOT SAFE TO MERGE: 1 THING BROKE OR STOPPED BEING CHECKED",
+        "  1. loosens an assertion in test_total (tests/test_pay.py:4): == 1200 → > 0"]
+    r["items"] = changes.items(CHANGES, RUN, [LOOSE, NOTE])
+    r["verdict"], r["flaky"] = changes.verdict(r["items"]), 2
+    r["rest"] = {"new write": 1, "untested, risky": 1, "deploy": 1, "changed": 1, "untested": 1, "expected value": 1}
+    text = changes.report_text(r).splitlines()
+    assert text[0] == "NOT SAFE TO MERGE: 2 THINGS BROKE OR STOPPED BEING CHECKED"
+    assert text[1:3] == ["  1. refund_flow: refund ran before its approval (HIGH · changed: prompt refund@3 → refund@4)",
+                         "  2. loosens an assertion in test_total (tests/test_pay.py:4): == 1200 → > 0"]
+    assert text[4] == ("Also: 1 more new write to check, 2 more untested changes, 1 more unchecked deploy change, "
+                       "1 more behavior change, still passing, 1 more rewritten expected value; 2 flaky, as before. "
+                       "`assay changes --all` lists everything.")
+    every = changes.report_text(r, limit=10 ** 9).splitlines()  # --all: every item, and only the flaky count
+    assert len(every) == 11 and every[9] == "Also: 2 flaky, as before."
+
+
+def test_one_change_in_many_cases_is_one_item():
+    run = {"regressions": [{"name": n, "severity": "HIGH", "reasons": ["refund ran before its approval"]}
+                           for n in ("refund_a", "refund_b", "refund_c")],
+           "changed": [{"name": "search", "flow_change": {"text": "new: HTTP GET maps"}}]}
+    found = changes.items({"untested": None, "deploy": []}, run, [])
+    assert [x["text"] for x in found] == ["refund ran before its approval (refund_a, and 2 more cases)",
+                                         "search: new: HTTP GET maps"]
+
+
+def test_an_item_marked_intended_is_left_out_until_it_changes(tmp_path, monkeypatch, capsys):
+    from assay import weakening
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(weakening, "scan", lambda root, ref: [])
+    monkeypatch.setattr(changes, "compute", lambda root, ref, cov: json.loads(json.dumps(CHANGES)))
+    monkeypatch.setattr(weakening, "base_ref", lambda root, given=None: "main")
+    assert main(["changes", "--base", "main", "--intended", "2"]) == 2  # a reason is needed
+    assert "--reason" in capsys.readouterr().err
+    assert main(["changes", "--base", "main", "--intended", "2", "--reason", "an old pin, checked by hand"]) == 0
+    assert "Marked intended in assay.intended.toml: requirements.txt: no job installs it" in capsys.readouterr().out
+    saved = changes.load_intended(tmp_path)
+    assert saved[0]["key"] == "deploy:requirements.txt:" and saved[0]["reason"] == "an old pin, checked by hand"
+    assert main(["changes", "--base", "main"]) == 0
+    out = capsys.readouterr().out
+    assert "requirements.txt" not in out.splitlines()[1] and "1 marked intended in assay.intended.toml" in out
+    changed = json.loads(json.dumps(CHANGES))
+    changed["deploy"][0]["digest"] = "different"  # the file changed again: news again
+    monkeypatch.setattr(changes, "compute", lambda root, ref, cov: changed)
+    assert main(["changes", "--base", "main", "--all"]) == 0
+    assert "requirements.txt: no job installs it" in capsys.readouterr().out
+    assert main(["changes", "--base", "main", "--intended", "9", "--reason", "x"]) == 2

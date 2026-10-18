@@ -1,30 +1,64 @@
 [Assay](../README.md) › [Documentation](README.md)
 
-# What nothing checked: `assay changes`
+# The change report: `assay changes`
 
-A pull request can pass every test and still ship code no test ran, or a change to a
-requirements file, a workflow or a Dockerfile that no CI job used. `assay changes` lists both,
-against the base branch. It works on any repository, with or without Assay tests.
+The question a pull request needs answered: what did this change actually do, and is it safe to
+merge? `assay changes` answers with one verdict and at most three things to look at, against the
+base branch. It works on any repository; with Assay tests, their results are part of it.
 
 ```bash
-pytest --cov=myapp --cov-report=json     # or: npx jest --coverage, or anything that writes lcov
+pytest --assay --cov=myapp --cov-report=json     # or: assay test, with jest --coverage
 assay changes --base main
 ```
 
 ```
-Against main: 6 changed files.
-
-CHANGED, NOT RUN BY ANY TEST (9 lines, 3 places; 41 of 50 changed lines ran)
-  1. app/billing.py: Billing.refund, line 88 (money)
-  2. app/client.py: upload_run, lines 120-126 (outside calls)
-  3. app/demo.py: no test loaded this file, line 12
-
-DEPLOY AND DEPENDENCY CHANGES NO CI JOB CHECKED
-  - .github/workflows/release.yml: doesn't run on pull requests, only on push, tags: its first run is after the merge
-  - requirements.txt: no job on pull requests installs or builds from it
+NOT SAFE TO MERGE: 1 THING BROKE OR STOPPED BEING CHECKED
+  1. refund_flow: refund ran before its approval (HIGH · changed: prompt refund@3 → refund@4)
+  2. not run by any test: app/client.py: upload_run, lines 120-126 (outside calls)
+  3. .github/workflows/release.yml: doesn't run on pull requests, only on push, tags: its first run is after the merge
+Also: 2 more untested changes, 1 more new write to check; 1 flaky, as before. `assay changes --all` lists everything.
+(against main, 6 changed files; tests: run 20261018-1 vs each case's last passing run; 41 of 50 changed lines ran in a test)
 ```
 
-Nothing here fails the run: it's what to look at before merging.
+The verdict is one of three:
+
+- **Not safe to merge:** a test regressed, or a test was weakened so it checks less.
+- **Check N things before merging:** nothing broke, but something wasn't checked or looks wrong.
+- **Nothing to check:** every changed line ran in a test, and CI used every deploy change.
+
+Everything found is ranked into one list, and the first three are shown:
+
+1. **Regressed:** a case that passed on its baseline and fails now, from the last `assay test`
+   or `pytest --assay` run, with what changed next to it (a prompt, a model, a tool's definition).
+2. **Weakened:** an assertion loosened or removed ([the guard](security.md)).
+3. **New writes to check:** a placeholder saved, money left empty, a sent value that never reached
+   a row ([database writes](../sdk/js/README.md#new-writes-checked)).
+4. **Changed lines no test ran**, money, messages, logins, database writes and outside calls first.
+5. **Deploy and dependency changes no CI job checked.**
+6. **Changed, still passing:** a case that takes another path now, though its checks pass.
+7. **The rest:** untested lines of lower risk, and expected values the change rewrote.
+
+One change seen in many cases is one item: "refund ran before its approval (refund_a, and 4 more
+cases)". Flaky tests are a count, not items: they did what they did before. Test results from a run on
+another commit are left out, and the report says so: results from other code would mislead.
+`--format json` gives the whole report for a coding agent to act on, and `--format markdown` the
+pull-request version. Nothing here fails the run: `assay test` still decides that.
+
+## Marking an item intended
+
+Some items are the change you meant: a release workflow you'll run by hand, a debug branch no
+test needs. Mark one once, with a reason, and it's left out of later reports:
+
+```bash
+assay changes --all                                         # every item, numbered
+assay changes --intended 4 --reason "release workflow, run by hand before tagging"
+```
+
+The mark goes in `assay.intended.toml` next to `assay.toml`. Commit it with the change, so CI
+sees it and a reviewer reads the reason in the pull request. Each mark matches only what was
+flagged: the same unrun lines, the same file contents, the same behavior change. If that changes
+again, the item comes back. Regressions and weakened tests can't be marked here: `assay accept`,
+`assay ack` and the policy label are for those.
 
 ## Changed lines no test ran
 
@@ -79,7 +113,8 @@ release workflows, which only run after a merge.
 
 ## In the pull request
 
-With the GitHub Action, `changes: true` adds this section to the PR comment and the job summary.
+With the GitHub Action, `changes: true` opens the PR comment with the change report, above the
+test run's details, and adds it to the job summary.
 Run your tests under coverage in `command`, and check out with `fetch-depth: 0` so the merge
 base is known:
 
@@ -94,5 +129,4 @@ base is known:
     changes: true
 ```
 
-`--format markdown` prints the same section for any other CI, and `--format json` gives everything
-for a coding agent to act on.
+For any other CI, `assay changes --format markdown` prints the same report.

@@ -164,7 +164,7 @@ worse with a judge that disagrees with itself).
 | **Database writes, checked** | Every Jest test recorded with what it writes to Postgres, no test changes. A new write that looks wrong is flagged: a placeholder saved ("Unknown", a timezone of UTC), money left empty, a value the test sent that never reached a row. Names only, never values. | [Every test](sdk/js/README.md#every-test-and-what-it-writes-to-the-database) |
 | **Real change or noise** | Run each case several times and Assay separates chance (8/8 → 7/8, passes) from too few attempts to tell (inconclusive) from a regression (8/8 → 0/8, fails), corrected for the number of checks. A result that couldn't be judged is kept apart, never scored as 0. `--rerun-unsure` gives more attempts only to the cases that could be worse, until each is clear. | [Repeated attempts](docs/repeats.md) |
 | **The AI or the judge** | Ask the judge again about the same answer (`evaluate(..., rejudge=3)`). A case that varies because the judge splits on it is reported as judge unstable, not flaky: more attempts won't settle it, a steadier judge will. `assay rejudge` asks a judge about a saved run's answers again, with no AI calls, to measure its own noise or try a new rubric. The report puts code checks first and judged checks second, and counts cases that broke against cases that were fixed (exact McNemar test). | [AI or judge](docs/repeats.md#is-it-the-ai-or-the-judge) |
-| **What nothing checked** | Changed lines no test ran, grouped by function and ranked money first, then messages, logins, database writes and outside calls; and a requirements file, workflow or Dockerfile that changed with no CI job using it. From the coverage you already have, any language. | [Changes](docs/changes.md) |
+| **The change report** | One verdict per pull request and at most three things to look at: regressions with what changed next to them, weakened tests, new writes that look wrong, changed lines no test ran (ranked money, messages, logins, database writes, outside calls), and a requirements file, workflow or Dockerfile that changed with no CI job using it. | [Change report](docs/changes.md) |
 | **Checks can't be loosened** | A PR that removes a contract, raises a limit, deletes, skips or filters out the test its change breaks, or removes or loosens an assertion (`== 1200` to `> 0`, `toBe` to `toBeDefined`) fails the run until a maintainer accepts it with a label. `assay guard` checks any repository's pytest, Jest and Vitest tests this way, Assay tests or not. | [Security](docs/security.md) |
 | **Document extraction** | Field, line-item, table, OCR, splitting and confidence metrics, with per-field gates. See [below](#document-extraction). | [Documents](docs/documents.md) |
 | **Agents and workflows** | Trajectories, path and claim contracts, plan adherence, multi-turn conversations, simulated users, tools that fail or whose state changes mid-run (an approval that's stale by the time the agent acts), a retry that charges twice after a lost reply, and [rewordings](docs/testing.md#rewordings-the-same-request-in-other-words): the same request in other words must get the same behavior. | [Agents](docs/agents.md) |
@@ -337,7 +337,7 @@ at a time) is under **Details**, and loads when you open it.
 | `assay ack` | Acknowledge a failing check until it gets worse |
 | `assay pr-comment` | Post the latest run's summary on the pull request |
 | `assay guard` | Assertions a change removed or loosened, against the base branch (`--base main`); works on any pytest, Jest or Vitest suite |
-| `assay changes` | What nothing checked: changed lines no test ran, grouped by function and ranked by risk, and deploy or dependency files no CI job used (`--base main`, `--coverage FILE`) |
+| `assay changes` | The change report: one verdict and at most three things to look at, from the test run, weakened tests, changed lines no test ran and deploy changes no CI job used (`--base main`, `--coverage FILE`, `--all`, `--intended N` to mark an item intended) |
 | `assay connect` | Attach Assay to an existing pipeline |
 | `assay synth` | Generate synthetic queries from dimensions you define |
 | `assay golden` | Manage the golden set a judge is calibrated against |
@@ -358,7 +358,7 @@ Run `assay --help` for every command and option.
 | [TypeScript and JavaScript](sdk/js/README.md) | `assayCase()` in Jest or Vitest, `run.expect()`, `assay test`, `track()` for the live app |
 | [Any language](docs/any-language.md) | Go, Java, Ruby, Rust: a small recorder and `assay test` |
 | [Behavior diff](docs/diff.md) | What changed between two versions, with a severity |
-| [What nothing checked](docs/changes.md) | `assay changes`: changed lines no test ran, and deploy or dependency changes no CI job used |
+| [Change report](docs/changes.md) | `assay changes`: one verdict per pull request, and what to look at before merging |
 | [Repeated attempts](docs/repeats.md) | Chance, too few attempts, or a regression |
 | [CI](docs/ci.md) | The GitHub Action, GitLab and any other CI, PR comments, reruns, timeouts |
 | [Security](docs/security.md) | What the checks catch, and what a PR can't do to the evaluation |

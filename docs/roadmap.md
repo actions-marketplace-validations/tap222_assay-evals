@@ -19,7 +19,7 @@ Who it's for, and what each person needs: [user stories](user-stories.md).
 
 ![A mockup of the change report for one pull request: a verdict, "Check 3 things before merging", over a weakened test, a changed function no test runs, and a checkout that now runs 21 database queries instead of 3](assets/roadmap/change-report.png)
 
-*A mockup with sample data: the change report P2 builds. Nothing on this page is built yet.*
+*A mockup with sample data: the change report P2 builds. Its first version is built, as `assay changes`; the query counts are P4.*
 
 ## Where Assay fits
 
@@ -125,14 +125,20 @@ User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
 - Mark a change intended once.
 - The same report as the PR comment, and as JSON a coding agent can act on.
 
-First step (built, opt-in): `assay changes`, the two signals that P0 found catch 6 of 9 bugs.
-Changed lines no test ran, from the coverage a run leaves (coverage.py, istanbul or lcov), are
-grouped by function and ranked by risk. Deploy and dependency files that changed are listed when
-no pull-request CI job used them. Replayed over this repository's history, the deploy rule lists all
-four such bugs. Since pull requests began it lists 7 changes, 2 of them bugs, so it still needs
-fewer false alarms. It's in the PR comment with the Action's `changes: true`
-([docs](changes.md)). Next: one report and one verdict over these, the behavior diff and the
-weakened tests, at most three items in all.
+Built, opt-in: `assay changes`, the change report. It gives one verdict (not safe to merge, check
+N things, or nothing to check) and at most three items, ranked from every signal: regressions with
+the change next to them, weakened tests, new writes that look wrong, changed lines no test ran,
+and deploy and dependency changes no CI job checked. Then come behavior changed but still passing,
+and rewritten expected values. Flaky tests are a count. It's the top of the PR comment with the
+Action's `changes: true`, and JSON for a coding agent ([docs](changes.md)).
+
+Changed lines no test ran come from the coverage a run leaves (coverage.py, istanbul or lcov), are
+grouped by function, and are ranked by risk. Replayed over this repository's history, the deploy rule
+lists all four such bugs, but since pull requests began it lists 7 changes, only 2 of them bugs:
+it still needs fewer false alarms. One change seen in many cases is one item. Any item other than a
+regression or a weakened test can be marked intended once, with a reason, in
+`assay.intended.toml`, and it comes back if what was flagged changes. Next: live pull requests, to
+measure P0's targets and reading time.
 
 Done when: P0's targets hold on live pull requests, and developers read a report in under a
 minute.

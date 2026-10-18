@@ -9,7 +9,7 @@
 | [TypeScript and JavaScript](../sdk/js/README.md) | `assayCase()` in Jest, Vitest or `node:test`, `instrument(client)`, `assay init` |
 | [Any language](any-language.md) | Go, Java, Ruby, Rust: the events `assay test` reads, and a recorder in a few dozen lines |
 | [Behavior diff](diff.md) | `assay diff`: what changed between two versions, with the flow before and after and a severity |
-| [What nothing checked](changes.md) | `assay changes`: changed lines no test ran, ranked by risk, and deploy or dependency changes no CI job used |
+| [Change report](changes.md) | `assay changes`: one verdict per pull request, and at most three things to look at before merging |
 | [Repeated attempts](repeats.md) | Chance, too few attempts to tell, or a regression: two gates, corrected for the number of checks, and what they can't tell you |
 | [CI and pull requests](ci.md) | The GitHub Action, GitLab and any other CI, the PR comment, rerunning what failed, timeouts |
 | [Security](security.md) | What the checks catch in the agent, and what a pull request can and can't do to the evaluation |

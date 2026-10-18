@@ -1,24 +1,28 @@
-"""`assay changes`: what a change did that nothing checked, against the base branch.
+"""`assay changes`: the change report. What a change did, whether it's safe to merge, and at most
+three things to look at, against the base branch.
 
-    CHANGED, NOT RUN BY ANY TEST
-      1. assay/client.py: upload_run, lines 88-92 (outside calls)
-      2. assay/demo.py: main, line 40
-    DEPLOY AND DEPENDENCY CHANGES NO CI JOB CHECKED
-      - .github/workflows/release.yml: runs on push (tags), not on pull requests
+    NOT SAFE TO MERGE: 1 THING BROKE OR STOPPED BEING CHECKED
+      1. refund_flow: refund ran before its approval (HIGH · changed: prompt refund@3 → refund@4)
+      2. not run by any test: app/client.py: upload_run, lines 88-92 (outside calls)
+      3. .github/workflows/release.yml: doesn't run on pull requests, only on push, tags: ...
+    Also: 2 more untested changes; 1 flaky, as before. `assay changes --all` lists everything.
 
-Two signals, from replaying this repository's history (docs/p0-findings.md): of nine bugs later
-fixed by hand, changed lines no test ran would have flagged two, and deploy and dependency
-changes four. A whole function no test ran would have flagged one, so it's lines, grouped by the
-function they're in.
+The items come from every signal, ranked into one list: regressions from the last `assay test`
+run (with what changed next to each), weakened tests, new database writes that look wrong, changed
+lines no test ran, deploy and dependency changes no CI job checked, behavior that changed but still
+passes, and rewritten expected values. Test results from a run on another commit are left out.
+
+Two of those signals are this module's own, from replaying this repository's history
+(docs/p0-findings.md): of nine bugs later fixed by hand, changed lines no test ran would have
+flagged two, and deploy and dependency changes four. A whole function no test ran would have
+flagged one, so it's lines, grouped by the function they're in.
 
 Changed lines come from `git diff` against the merge base. Whether a test ran them comes from the
 coverage the test run left behind: coverage.py (`coverage.json` or `.coverage`), Jest or Vitest
 (`coverage/coverage-final.json`), or lcov (`lcov.info`, which most languages can write). Lines
 coverage doesn't count (comments, blank lines) are left out. A changed code file no test loaded
-at all is one item.
-
-Each function is ranked by what its unrun lines do: money first, then messages, logins, database
-writes and outside calls, then the rest.
+at all is one item. Each function is ranked by what its unrun lines do: money first, then messages,
+logins, database writes and outside calls, then the rest.
 
 A deploy or dependency file (a requirements or lock file, a workflow, a Dockerfile, deploy config)
 is listed only when no job in a workflow that runs on pull requests installs, builds or deploys
@@ -27,6 +31,7 @@ from it: a change CI already exercised isn't news. Nothing here fails the run.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -289,6 +294,11 @@ def _spans(lines: List[int]) -> str:
     return f"{len(lines)} lines in {lo}-{hi}"
 
 
+def _digest(*parts) -> str:
+    """A short fingerprint of what was flagged: a mark of "intended" matches only the same thing."""
+    return hashlib.sha256("\x00".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:12]
+
+
 def _test_file(path: str) -> bool:
     return bool(PY_TEST.search(path) or JS_TEST.search(path))
 
@@ -314,7 +324,8 @@ def untested(root: Path, changed: Dict[str, Set[int]], coverage: Dict[str, FileC
             if body:
                 measured += len(body)
                 items.append({"file": path, "function": None, "lines": body, "spans": _spans(body),
-                              "risk": risk(source[n - 1] for n in body), "unloaded": True})
+                              "risk": risk(source[n - 1] for n in body), "unloaded": True,
+                              "digest": _digest(*(source[n - 1].strip() for n in body))})
             continue
         counted = lines & cov.measured
         measured += len(counted)
@@ -324,7 +335,8 @@ def untested(root: Path, changed: Dict[str, Set[int]], coverage: Dict[str, FileC
             continue
         if not cov.ran:  # nothing in the file ran: one item, not one per function
             items.append({"file": path, "function": None, "lines": missed, "spans": _spans(missed),
-                          "risk": risk(source[n - 1] for n in missed if n <= len(source)), "unloaded": True})
+                          "risk": risk(source[n - 1] for n in missed if n <= len(source)), "unloaded": True,
+                          "digest": _digest(*(source[n - 1].strip() for n in missed if n <= len(source)))})
             continue
         functions = cov.functions or (_py_functions("\n".join(source)) if path.endswith(".py") else [])
         groups: Dict[Optional[str], List[int]] = {}
@@ -332,7 +344,8 @@ def untested(root: Path, changed: Dict[str, Set[int]], coverage: Dict[str, FileC
             groups.setdefault(function_of(n, functions, source, scan=not path.endswith(".py")), []).append(n)
         for fn, ns in groups.items():
             items.append({"file": path, "function": fn, "lines": ns, "spans": _spans(ns),
-                          "risk": risk(source[n - 1] for n in ns if n <= len(source))})
+                          "risk": risk(source[n - 1] for n in ns if n <= len(source)),
+                          "digest": _digest(*(source[n - 1].strip() for n in ns if n <= len(source)))})
     items.sort(key=lambda x: (RANK.get(x["risk"], OTHER), -len(x["lines"]), x["file"], x["function"] or ""))
     return {"items": items, "ran": ran, "measured": measured}
 
@@ -442,7 +455,7 @@ def unchecked(changed: Iterable[str], read: Callable[[str], Optional[str]], file
             if not any(p.search(blob) for p in DEPLOY_RUN.values()):
                 why = "no job on pull requests deploys with it (a preview deploy outside CI isn't seen here)"
         if why:
-            out.append({"file": path, "why": why})
+            out.append({"file": path, "why": why, "digest": _digest(read(path) or "")})
     return out
 
 
@@ -472,57 +485,213 @@ def _item(x: dict) -> str:
     return f"{where}, {lines}" + (f" ({x['risk']})" if x["risk"] else "")
 
 
-def text(d: dict, limit: int = SHOW) -> str:
-    out = [f"Against {d['base']}: {d['files']} changed file{'s' * (d['files'] != 1)}."]
-    u = d["untested"]
-    if u is None:
-        out.append("No coverage found, so changed lines no test ran aren't checked: run the tests under coverage "
-                   "(pytest --cov --cov-report=json, jest --coverage) or pass --coverage.")
-    elif u["items"]:
-        n = sum(len(x["lines"]) for x in u["items"])
-        out += ["", f"CHANGED, NOT RUN BY ANY TEST ({n} line{'s' * (n != 1)}, {len(u['items'])} place"
-                    f"{'s' * (len(u['items']) != 1)}; {u['ran']} of {u['measured']} changed lines ran)"]
-        out += [f"  {i}. {_item(x)}" for i, x in enumerate(u["items"][:limit], 1)]
-        if len(u["items"]) > limit:
-            out.append(f"  (+{len(u['items']) - limit} more: --all lists them)")
+# ---------- one report: a verdict and at most three things to look at ----------
+#
+# Everything a change did that a reviewer should see, from every signal there is, ranked into one
+# list: what broke first, then what looks wrong, then what nothing checked. The verdict says
+# whether to merge; the first three items say what to look at; the rest is one line of counts.
+
+ORDER = ["regressed", "weakened", "new write", "untested, risky", "deploy", "changed", "untested", "expected value"]
+STOPS = {"regressed", "weakened"}  # what makes the verdict "not safe to merge"
+NOUN = {"regressed": ("regression", "regressions"), "weakened": ("weakened test", "weakened tests"),
+        "new write": ("new write to check", "new writes to check"),
+        "untested, risky": ("untested change", "untested changes"), "untested": ("untested change", "untested changes"),
+        "deploy": ("unchecked deploy change", "unchecked deploy changes"),
+        "changed": ("behavior change, still passing", "behavior changes, still passing"),
+        "expected value": ("rewritten expected value", "rewritten expected values")}
+
+
+def items(d: dict, run: Optional[dict], weakened: List[dict]) -> List[dict]:
+    """Every finding as {"kind", "text", "detail", "key"}, ranked by ORDER, then by each signal's own
+    rank. One change seen in many cases is one item ("refund ran before its approval (refund_flow,
+    and 4 more cases)"). key names exactly what was flagged, for marking it intended."""
+    from assay import weakening as w
+    out = []
+
+    def add(kind, text, detail="", key=None, case=None):
+        out.append({"kind": kind, "text": text, "detail": detail, "key": key, "cases": [case] if case else []})
+
+    for e in (run or {}).get("regressions", []) + (run or {}).get("new_failures", []):
+        if "field" in e:
+            add("regressed", f"{e['name']}: {e['change']}", e["severity"])
+            continue
+        why = (e.get("reasons") or [""])[0] or (e.get("flow_change") or {}).get("text") or "failing now"
+        cause = "; ".join(e.get("setup") or [])
+        add("regressed", why, " · ".join(x for x in (e.get("severity") or "", f"changed: {cause}" if cause else "") if x),
+            case=e["name"])
+    for f in w.weakening(weakened):
+        add("weakened", w.describe(f))
+    for c in (run or {}).get("write_checks") or []:
+        names = c.get("names") or c.get("cases") or []
+        add("new write", c["text"], key=f"write:{c['kind']}:{c['write']}:{c['field']}")
+        out[-1]["cases"] = list(names)
+    for x in (d.get("untested") or {}).get("items", []):
+        add("untested, risky" if x["risk"] else "untested", f"not run by any test: {_item(x)}",
+            key=f"untested:{x['file']}:{x['function'] or ''}:{x.get('digest', '')}")
+    for x in d.get("deploy") or []:
+        add("deploy", f"{x['file']}: {x['why']}", key=f"deploy:{x['file']}:{x.get('digest', '')}")
+    for e in (run or {}).get("changed", []):
+        what = (e.get("flow_change") or {}).get("text") or "changed"
+        add("changed", what, "still passing", key=f"changed:{e.get('case') or e['name']}:{what}", case=e["name"])
+    for f in weakened:
+        if f["kind"] == "rewritten":
+            add("expected value", w.describe(f), "the change you meant?",
+                key=f"expected:{f['file']}:{f['test']}:{f['after']}")
+    grouped: Dict[tuple, dict] = {}
+    for x in out:  # the same change in many cases: one item
+        if x["kind"] in ("regressed", "changed"):
+            g = grouped.setdefault((x["kind"], x["text"], x["detail"]), {**x, "cases": [], "keys": []})
+            g["cases"] += x["cases"]
+            g["keys"].append(x["key"])
+        else:
+            grouped[(id(x),)] = x
+    found = []
+    for x in grouped.values():
+        n = len(x["cases"])
+        if x["kind"] in ("regressed", "changed") and n:
+            x["text"] = f"{x['cases'][0]}: {x['text']}" if n == 1 else \
+                f"{x['text']} ({x['cases'][0]}, and {n - 1} more case{'s' * (n > 2)})"
+        elif x["kind"] == "new write" and n:
+            x["text"] += f" ({x['cases'][0]}" + (f", and {n - 1} more test{'s' * (n > 2)})" if n > 1 else ")")
+        if x["kind"] == "changed":
+            x["key"] = "|".join(sorted(k for k in x.pop("keys") if k))
+        else:
+            x.pop("keys", None)
+        found.append(x)
+    return sorted(found, key=lambda x: ORDER.index(x["kind"]))  # stable: each signal keeps its own order
+
+
+# ---------- marking an item intended ----------
+
+INTENDED = "assay.intended.toml"
+CAN_INTEND = {"new write", "untested, risky", "untested", "deploy", "changed", "expected value"}
+
+
+def load_intended(root: Path) -> List[dict]:
+    from assay.local import tomllib
+    path = root / INTENDED
+    if not path.exists():
+        return []
+    return list(tomllib.loads(path.read_text(encoding="utf-8")).get("intended") or [])
+
+
+def mark_intended(root: Path, item: dict, reason: str) -> Path:
+    """Adds item to assay.intended.toml, in the repository, so CI sees it and a reviewer reads it."""
+    from datetime import date
+    from assay.acks import who
+    q = lambda v: json.dumps(str(v), ensure_ascii=False)
+    path = root / INTENDED
+    head = "" if path.exists() else ("# Change-report items marked intended (`assay changes --intended N`). Each matches\n"
+                                     "# only what was flagged then; a different change in the same place shows again.\n")
+    entry = (f"\n[[intended]]\nkey = {q(item['key'])}\nwhat = {q(item['text'])}\nby = {q(who())}\n"
+             f"reason = {q(reason)}\non = {q(date.today().isoformat())}\n")
+    with path.open("a", encoding="utf-8") as f:
+        f.write(head + entry)
+    return path
+
+
+def verdict(found: List[dict]) -> str:
+    stops = sum(x["kind"] in STOPS for x in found)
+    if stops:
+        return f"Not safe to merge: {stops} {'thing' if stops == 1 else 'things'} broke or stopped being checked"
+    if found:
+        n = min(len(found), SHOW)
+        return f"Check {n} {'thing' if n == 1 else 'things'} before merging"
+    return "Nothing to check: everything changed ran in a test, and CI used every deploy change"
+
+
+def report(root: Path, d: dict) -> dict:
+    """The change report: {"verdict", "items", "rest" (counts by kind past the first three), "flaky",
+    "run"} over `assay changes`' own findings (d), the latest test run and the weakened tests."""
+    from assay import diff as behavior, weakening
+    from assay.local import HOME
+    if (root / HOME / "assay.db").exists():  # never create .assay/ in a repository that doesn't use Assay
+        run, why = behavior.latest(root, quiet=True)
     else:
-        out.append(f"Every changed line coverage counts ran in a test ({u['measured']}).")
-    if d["deploy"]:
-        out += ["", "DEPLOY AND DEPENDENCY CHANGES NO CI JOB CHECKED"]
-        out += [f"  - {x['file']}: {x['why']}" for x in d["deploy"][:limit]]
-        if len(d["deploy"]) > limit:
-            out.append(f"  (+{len(d['deploy']) - limit} more: --all lists them)")
+        run, why = None, None
+    if run is not None:
+        from assay import local
+        commit = ((local._state(local.ensure_home(root)).get("revisions") or {}).get(run["current"]["run_id"]) or {}) \
+            .get("commit")
+        head = os.environ.get("GITHUB_SHA") or (_git(root, "rev-parse", "HEAD") or "").strip()  # as revision() records it
+        if commit and head and commit != head:  # results from other code would mislead
+            run, why = None, f"the last test run was on {commit[:7]}, not this commit: run `assay test` to include it"
+    weakened = weakening.scan(root, d["base"])
+    marked = {m.get("key") for m in load_intended(root)}
+    everything = items(d, run, weakened)
+    found = [x for x in everything if not (x["key"] and x["key"] in marked)]
+    rest: Dict[str, int] = {}
+    for x in found[SHOW:]:
+        rest[x["kind"]] = rest.get(x["kind"], 0) + 1
+    flaky = len((run or {}).get("flaky") or [])
+    return {"verdict": verdict(found), "items": found, "rest": rest, "flaky": flaky,
+            "intended": len(everything) - len(found),
+            "run": None if run is None else {"current": run["current"]["label"], "baseline": run["baseline"]["label"],
+                                             "scenarios": run["scenarios"]},
+            "no_run": why if run is None else None, "changes": d}
+
+
+def _rest_text(rest: Dict[str, int]) -> str:
+    by_noun: Dict[tuple, int] = {}
+    for k in sorted(rest, key=ORDER.index):  # risky and other untested changes are counted together
+        by_noun[NOUN[k]] = by_noun.get(NOUN[k], 0) + rest[k]
+    return ", ".join(f"{n} more {noun[n != 1]}" for noun, n in by_noun.items())
+
+
+def report_text(r: dict, limit: int = SHOW) -> str:
+    out = [r["verdict"].upper() if r["verdict"].startswith("Not safe") else r["verdict"]]
+    for i, x in enumerate(r["items"][:limit], 1):
+        out.append(f"  {i}. {x['text']}" + (f" ({x['detail']})" if x["detail"] else ""))
+    rest = {} if limit > SHOW else r["rest"]
+    extra = [s for s in (_rest_text(rest), f"{r['flaky']} flaky, as before" if r["flaky"] else "") if s]
+    if extra:
+        out.append(f"Also: {'; '.join(extra)}." + (" `assay changes --all` lists everything." if rest else ""))
+    d = r["changes"]
+    where = [f"against {d['base']}, {d['files']} changed file{'s' * (d['files'] != 1)}"]
+    if r["run"]:
+        where.append(f"tests: {r['run']['current']} vs {r['run']['baseline']}")
+    elif r["no_run"]:
+        where.append(f"no test results: {r['no_run'][:1].lower()}{r['no_run'][1:].rstrip('.')}")
+    if r.get("intended"):
+        where.append(f"{r['intended']} marked intended in {INTENDED}")
+    if d["untested"] is None:
+        where.append("no coverage found, so untested lines weren't checked")
+    else:
+        u = d["untested"]
+        where.append(f"{u['ran']} of {u['measured']} changed lines ran in a test")
+    out.append(f"({'; '.join(where)})")
     return "\n".join(out) + "\n"
 
 
-def markdown(d: dict, limit: int = SHOW) -> str:
-    from assay.local import _code, _md
-    u = d["untested"]
-    out = ["### What no test or CI job checked", ""]
-    if u and u["items"]:
-        out.append(f"**Changed, not run by any test** ({u['ran']} of {u['measured']} changed lines ran)")
+def report_markdown(r: dict, limit: int = SHOW) -> str:
+    from assay.local import _md
+    out = [f"### {_md(r['verdict'])}", ""]
+    for i, x in enumerate(r["items"][:limit], 1):
+        out.append(f"{i}. {_md(x['text'])}" + (f" · {_md(x['detail'])}" if x["detail"] else ""))
+    if r["items"]:
         out.append("")
-        for x in u["items"][:limit]:
-            out.append(f"- {_code(x['file'])} " + (_md("no test loaded this file") if x.get("unloaded") else
-                       _code(x["function"] or "(top level)")) + f", {_md(x['spans'] if ' in ' in x['spans'] else 'lines ' + x['spans'])}"
-                       + (f" · {_md(x['risk'])}" if x["risk"] else ""))
-        if len(u["items"]) > limit:
-            out.append(f"- …and {len(u['items']) - limit} more")
-        out.append("")
-    if d["deploy"]:
-        out += ["**Deploy and dependency changes no CI job checked**", ""]
-        out += [f"- {_code(x['file'])}: {_md(x['why'])}" for x in d["deploy"][:limit]]
-        if len(d["deploy"]) > limit:
-            out.append(f"- …and {len(d['deploy']) - limit} more")
-        out.append("")
-    if len(out) == 2:
-        out.append("Every changed line coverage counts ran in a test, and CI used every deploy and dependency "
-                   "file that changed." if u is not None else "No deploy or dependency file changed unchecked.")
+    rest = r["rest"] if limit <= SHOW else {}
+    extra = [s for s in (_rest_text(rest), f"{r['flaky']} flaky, as before" if r["flaky"] else "") if s]
+    if extra:
+        out += [f"Also: {_md('; '.join(extra))}." + (" `assay changes --all` lists everything." if rest else ""), ""]
+    d = r["changes"]
+    note = f"Against `{_md(d['base'])}`, {d['files']} changed files"
+    if d["untested"] is not None:
+        note += f"; {d['untested']['ran']} of {d['untested']['measured']} changed lines ran in a test"
+    else:
+        note += "; no coverage, so untested lines weren't checked"
+    if r.get("intended"):
+        note += f"; {r['intended']} marked intended in `{INTENDED}`"
+    if r["no_run"]:
+        note += f"; no test results: {r['no_run'][:1].lower()}{r['no_run'][1:].rstrip('.')}"
+    out += [f"<sub>{note}.</sub>", ""]
     return "\n".join(out) + "\n"
 
 
-def main(root: Path, base: Optional[str], coverage: Optional[str], fmt: str, show_all: bool) -> int:
-    """`assay changes`: 0 with a report (nothing here fails), 2 when it can't run."""
+def main(root: Path, base: Optional[str], coverage: Optional[str], fmt: str, show_all: bool,
+         intended: Optional[int] = None, reason: Optional[str] = None) -> int:
+    """`assay changes`: 0 with a report (nothing here fails), 2 when it can't run. With intended,
+    marks that item of the report (as `--all` numbers them) intended instead."""
     import sys
     from assay import weakening
     ref = weakening.base_ref(root, base) if base or os.environ.get(weakening.BASE_ENV) else weakening.default_base(root)
@@ -540,6 +709,23 @@ def main(root: Path, base: Optional[str], coverage: Optional[str], fmt: str, sho
         print(f"Couldn't read the coverage in {path}: {exc}", file=sys.stderr)
         return 2
     limit = 10 ** 9 if show_all else SHOW
-    print(json.dumps(d, indent=1) if fmt == "json" else markdown(d, limit) if fmt == "markdown" else text(d, limit),
-          end="")
+    r = report(root, d)
+    if intended is not None:
+        if not 1 <= intended <= len(r["items"]):
+            print(f"There's no item {intended}: the report has {len(r['items'])} (`assay changes --all` numbers "
+                  f"them).", file=sys.stderr)
+            return 2
+        item = r["items"][intended - 1]
+        if item["kind"] not in CAN_INTEND or not item["key"]:
+            print("A regression or a weakened test can't be marked intended here: accept the run (`assay accept`), "
+                  "acknowledge the check (`assay ack`), or label the pull request.", file=sys.stderr)
+            return 2
+        if not reason:
+            print("Say why with --reason: a reviewer reads it in the pull request.", file=sys.stderr)
+            return 2
+        path = mark_intended(root, item, reason)
+        print(f"Marked intended in {path.name}: {item['text']}. Commit it with the change.")
+        return 0
+    print(json.dumps(r, indent=1, default=str) if fmt == "json" else
+          report_markdown(r, limit) if fmt == "markdown" else report_text(r, limit), end="")
     return 0

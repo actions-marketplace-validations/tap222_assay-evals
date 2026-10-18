@@ -39,9 +39,10 @@ inputs:
     default: assay-policy-change
   changes:
     description: >-
-      On a pull request, add what nothing checked to the comment: changed lines no test ran (from
-      the coverage your command leaves, e.g. `pytest --cov --cov-report=json` or `jest --coverage`)
-      and deploy or dependency files no CI job used. Never fails the job.
+      On a pull request, open the comment with the change report: one verdict and at most three
+      things to look at, from the test run, weakened tests, changed lines no test ran (from the
+      coverage your command leaves, e.g. `pytest --cov --cov-report=json` or `jest --coverage`)
+      and deploy or dependency files no CI job used. The report itself never fails the job.
     default: "false"
 
 outputs:
@@ -123,7 +124,13 @@ runs:
         fi
         mkdir -p .assay
         assay changes --format markdown > .assay/changes.md || exit 0
-        { echo; cat .assay/changes.md; } >> .assay/summary.md
+        # The change report goes first: one verdict and what to look at, then the test run's details.
+        if [ -f .assay/summary.md ]; then
+          { head -n 1 .assay/summary.md; echo; cat .assay/changes.md; tail -n +2 .assay/summary.md; } > .assay/summary.new
+          mv .assay/summary.new .assay/summary.md
+        else
+          { echo "<!-- assay-regression -->"; cat .assay/changes.md; } > .assay/summary.md
+        fi
         if [ -n "$GITHUB_STEP_SUMMARY" ]; then cat .assay/changes.md >> "$GITHUB_STEP_SUMMARY"; fi
 
     - if: github.event_name == 'pull_request' && inputs.comment == 'true'

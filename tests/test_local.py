@@ -902,6 +902,36 @@ def test_a_node_project_is_tested_and_a_regression_caught(project, capsys, monke
     assert "expect.must_call_before(approval, refund)" in out
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
+def test_the_change_report_leads_with_a_regression_from_the_last_run(project, capsys, monkeypatch):
+    import subprocess
+    git = lambda *a: subprocess.run(["git", *a], cwd=project, check=True, capture_output=True)
+    (project / "agent.js").write_text(JS_AGENT.format(sdk=json.dumps(str(JS_SDK))), encoding="utf-8")
+    config(project, "node agent.js")
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    git("add", "agent.js", "assay.toml")
+    git("commit", "-q", "-m", "base")
+    git("checkout", "-q", "-b", "feature")
+    monkeypatch.delenv("ASSAY_BASE_REF", raising=False)
+    assert main(["test"]) == 0
+    monkeypatch.setenv("SKIP_APPROVAL", "1")  # the refund no longer waits for approval
+    assert main(["test"]) == 1
+    capsys.readouterr()
+    assert main(["changes", "--base", "main"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "NOT SAFE TO MERGE: 1 THING BROKE OR STOPPED BEING CHECKED"  # two cases, one cause: one item
+    assert out[1] == ("  1. expect.must_call_before(approval, refund): refund() ran before approval() "
+                      "(refund O-17, and 1 more case) (MEDIUM)")
+    assert "tests: " in out[-1]
+    (project / "agent.js").write_text("// changed after the run\n", encoding="utf-8")
+    git("commit", "-qam", "later")
+    assert main(["changes", "--base", "main"]) == 0  # the run was on another commit: left out, and said so
+    out = capsys.readouterr().out
+    assert "NOT SAFE" not in out and "the last test run was on" in out
+
+
 # --- what a plain JavaScript test writes to the database ----------------------------------------
 
 JS_DB = """
