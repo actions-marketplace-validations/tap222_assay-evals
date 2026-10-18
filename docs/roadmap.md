@@ -124,6 +124,19 @@ User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
 - Flaky or real for every test, with the existing repeat statistics.
 - Mark a change intended once.
 - The same report as the PR comment, and as JSON a coding agent can act on.
+- Mechanical edits apart from behavior changes: a rename, a moved function or a reformat that
+  leaves the parsed code the same is grouped as mechanical and left out of untested lines, so the
+  short list of behavior changes is what gets read. A behavior change hidden in a mechanical
+  commit is still listed.
+- A pass that only holds in this workspace: a test run with untracked or uncommitted files the
+  pull request doesn't include, or setup a test didn't make itself (a directory, a local
+  database), is marked. `assay test --clean` runs the changed tests from a fresh checkout of the
+  commit, so "passed" means it passes for everyone.
+- A score that improved while its evaluation changed: when a pull request changes the test
+  cases, their inputs, expected values, evaluation data or the eval script, an improvement in
+  that same pull request is reported as not comparable, with what changed, until it's run on
+  the old evaluation too. An agent that reports better accuracy has to show it wasn't the test
+  that got easier.
 
 Built, opt-in: `assay changes`, the change report. It gives one verdict (not safe to merge, check
 N things, or nothing to check) and at most three items, ranked from every signal: regressions with
@@ -157,7 +170,8 @@ User stories: [US-01](user-stories.md#us-01), [US-03](user-stories.md#us-03),
 - Nothing becomes a rule without a yes. A confirmed rule is written to `CLAUDE.md` (or
   `AGENTS.md`) and checked on every pull request; at most one suggestion per report.
 - Claim check: when the coding agent says "all tests pass" or "fixed", check it against what
-  actually ran. This extends the existing claim contracts.
+  actually ran. Each run gives a receipt (the command, its exit code, the commit, how many tests
+  ran and passed), and a claim without a matching receipt is flagged before anyone reads the diff. This extends the existing claim contracts.
 
 Done when: at least 3 of 4 proposed rules are confirmed, with no more than 1 false alarm per 10
 pull requests.
