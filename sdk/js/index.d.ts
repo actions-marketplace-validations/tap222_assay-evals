@@ -80,6 +80,8 @@ export class Run {
   /** A decision to allow an action; contracts (requires_approval) and mustGetApprovalBefore() check it. */
   approval(action: string, decision?: "approved" | "rejected" | "pending", options?: { by?: string; reason?: string }): void;
   answer(text: string): void;
+  /** What the test gave the code under test; see sent(). */
+  sent(input: unknown, label?: string): void;
   outcome(value: "resolved" | "unresolved" | "escalated"): void;
   /** A check of the run's own: a domain rule, or a test's assert. */
   check(field: string, passed: boolean, reason?: string, evaluator?: string): void;
@@ -154,10 +156,17 @@ export function assayMiddleware(): {
 export function currentRun(): Run | undefined;
 
 /** What a SQL statement does: its operation, table, the columns it sets and the ones it leaves empty
- * (DEFAULT, NULL, or a parameter bound to null). null for anything that isn't a read or a write. */
+ * (DEFAULT, NULL, or a parameter bound to null), and those set to a placeholder ("Unknown", "N/A", a
+ * timezone of UTC). null for anything that isn't a read or a write. */
 export function summarizeSql(sql: string, values?: unknown[]): {
   op: "INSERT" | "UPDATE" | "DELETE" | "SELECT"; table: string; set: string[]; empty: string[];
+  placeholder?: Record<string, string>;
 } | null;
+
+/** What the test gave the code under test, e.g. a service's input: sent(dto). Inside a recorded test,
+ * a value in it that no later query used is reported by field name ("DB unwritten"), never by value.
+ * A JSON request to the app in the same process (supertest) needs no call. */
+export function sent(input: unknown, label?: string): void;
 
 /** Records what plain tests write to Postgres through pg (assay-evals/jest calls it). Pass pg itself, or
  * leave it out for the project's own. Returns whether pg was found. */

@@ -27,11 +27,13 @@ const path = require("path");
 const crypto = require("crypto");
 const { instrument, assayMiddleware, currentRun, storage, setPlainRun, plainRun } = require("./instrument");
 const { summarize: summarizeSql } = require("./sql");
+const { Tracker } = require("./writes");
 const { costOf } = require("./llm");
 const { sender } = require("./send");
 
 const MAX_TEXT = 20000;
 const DB_READS = "DB reads"; // one step per run: reads per table, left out of the flow
+const DB_UNWRITTEN = "DB unwritten"; // one step per run: sent values no query used (writes.js)
 const EXPECT = "assay.expect@1";
 
 function id() {
@@ -261,9 +263,10 @@ class Run {
   }
 
   /** A database write, from summarize() in sql.js: recorded as the step "DB INSERT bookings" with the
-   * columns it set and the ones it left empty, never the values. */
-  dbWrite({ op, table, set, empty }, error) {
-    this.tool(`DB ${op} ${table}`.slice(0, 128), { set, empty }, undefined,
+   * columns it set, the ones it left empty and those set to a placeholder ("Unknown"), never the values.
+   * fixture: the test wrote it itself, not the app. */
+  dbWrite({ op, table, set, empty, placeholder, fixture }, error) {
+    this.tool(`DB ${op} ${table}`.slice(0, 128), { set, empty, placeholder, fixture: fixture || undefined }, undefined,
               { error: error ? `${error.code ? `${error.code} ` : ""}${error.message || error}`.slice(0, 500) : undefined });
   }
 
@@ -271,6 +274,22 @@ class Run {
   dbRead(table) {
     this._reads = this._reads || {};
     this._reads[table] = (this._reads[table] || 0) + 1;
+  }
+
+  /** A query's values, kept in memory to check against what the test sent (writes.js). */
+  dbUsed(summary, values) {
+    if (this._sent) this._sent.query(summary, values);
+  }
+
+  /** What the test gave the code under test: a request body, a service's input. When the run ends,
+   * a value in it that no later query used is recorded by name (never by value) as "DB unwritten". */
+  sent(input, label = "input") {
+    try {
+      this._sent = this._sent || new Tracker();
+      this._sent.send(input, String(label).slice(0, 128));
+    } catch {
+      // recording must never break the test
+    }
   }
 
   /** "resolved", "unresolved" or "escalated". */
@@ -295,6 +314,8 @@ class Run {
     if (this._ended) return;
     this._ended = true;
     if (this._reads) this.tool(DB_READS, this._reads, undefined);
+    const unwritten = this._sent && this._sent.unwritten();
+    if (unwritten) this.tool(DB_UNWRITTEN, unwritten, undefined);
     emit({ type: "run.end", run_id: this.id, status, ...(this.outcomeValue ? { outcome: this.outcomeValue } : {}),
            ...(error ? { error: clean(error) } : {}) });
   }
@@ -374,6 +395,14 @@ async function assayCase(name, fn, { tags } = {}) {
   return result;
 }
 
-module.exports = { assayCase, startRun, track, flush, prompt, caseIdOf, toolSchemas, instrument, assayMiddleware,
+/** What the test gave the code under test, e.g. a service's input: assay.sent(dto). Inside a recorded
+ * test (assay-evals/jest, or an assayCase), a value in it that no later query used is reported by
+ * name; elsewhere it does nothing. A JSON request to the app in the same process needs no call. */
+function sent(input, label) {
+  const run = currentRun() || plainRun();
+  if (run) run.sent(input, label);
+}
+
+module.exports = { assayCase, sent, startRun, track, flush, prompt, caseIdOf, toolSchemas, instrument, assayMiddleware,
                    currentRun, Run, Expectations, currentTest, setPlainRun, plainRun, summarizeSql,
                    recordPg: (...a) => require("./pg").recordPg(...a) };

@@ -2284,6 +2284,11 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     if result.get("documents"):
         from assay import documents
         out += [f"**Documents:** {_md(documents.markdown(result['documents'], result.get('documents_before'), result.get('documents_cfg')))}", ""]
+    if result.get("write_checks"):  # new writes that look wrong (assay/diff.py)
+        from assay.diff import write_checks_lines
+        wc = result["write_checks"]
+        out += [f"**New writes to check ({len(wc)})**", "",
+                *(f"- {_md(x)}" for x in write_checks_lines(wc, _short)), ""]
     if result.get("kinds"):
         out += [f"**Failures by kind:** {_md(kinds_text(result['kinds']))}", ""]
     if result.get("fixed_context"):
@@ -2750,8 +2755,16 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
         if passed:
             state["baseline_cases"] = baseline_before
     result["policy"] = policy
+    from assay import diff
+    flows_now = diff.flows(engine, TENANT, run_id)
+    # New writes, checked on their own: wrong data is usually wrong from the commit that added the write.
+    checks = diff.all_write_checks(flows_before if baseline else {}, flows_now)
+    result["write_checks"] = checks
+    if checks:
+        text += "\n" + _paint("\n".join([f"New writes to check ({len(checks)}):",
+                                          *(f"  {x}" for x in diff.write_checks_lines(checks, _short))]), "yellow")
     if baseline:  # what each case did, next to what its baseline did
-        before, now = flows_before, diff.flows(engine, TENANT, run_id)
+        before, now = flows_before, flows_now
         result["flows"] = {c: (before[c]["flow"], now[c]["flow"]) for c in before.keys() & now.keys()
                            if before[c]["flow"] != now[c]["flow"]}
         moved = len(result["flows"])

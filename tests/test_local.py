@@ -766,6 +766,41 @@ def test_a_plain_js_tests_database_writes_are_compared(project, capsys, monkeypa
     assert "now leaves locationId empty" in capsys.readouterr().out
 
 
+JS_NEW_WRITES = """
+const assay = require({sdk});
+const {{ recordPg }} = require({pg});
+class Client {{ query() {{ return Promise.resolve({{ rows: [] }}); }} }}
+recordPg({{ Client }});
+const db = new Client();
+(async () => {{
+  const run = new assay.Run("creates a clinic", {{ caseId: "clinics.test.js::creates a clinic", tags: {{ assay_record: "plain" }} }});
+  assay.setPlainRun(run);
+  assay.sent({{ name: "Salon", country: "IN", branchId: "branch-9" }}, "createClinic");
+  await db.query('INSERT INTO "clinics"("name", "timezone", "branchId") VALUES ($1, $2, DEFAULT)', ["Salon", "UTC"]);
+  run.check("test", true);
+  run.end("completed");
+  assay.setPlainRun(null);
+}})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
+def test_a_new_write_that_looks_wrong_is_shown_once(project, capsys):
+    (project / "db.js").write_text(JS_NEW_WRITES.format(sdk=json.dumps(str(JS_SDK)),
+                                                        pg=json.dumps(str(JS_SDK / "pg.js"))), encoding="utf-8")
+    config(project, "node db.js")
+    assert main(["test"]) == 0  # passing: these are to look at, not failures
+    out = capsys.readouterr().out
+    assert "New writes to check (3):" in out
+    assert 'INSERT clinics sets timezone to "UTC" (creates a clinic)' in out
+    assert "createClinic sent branchId, but INSERT clinics left branchId empty" in out
+    assert "createClinic sent country; no query used it" in out
+    assert "branch-9" not in (project / ".assay" / "assay.db").read_bytes().decode("latin-1")  # names, never values
+    assert "New writes to check (3)" in (project / ".assay" / "summary.md").read_text(encoding="utf-8")
+    assert main(["test"]) == 0  # the same writes again: nothing new to check
+    assert "New writes to check" not in capsys.readouterr().out
+
+
 # --- a tool's definition changed: what the model reads to choose it ---------------------------
 
 MCP_AGENT = '''
