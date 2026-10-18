@@ -206,7 +206,10 @@ User stories: [US-08](user-stories.md#us-08), [US-09](user-stories.md#us-09),
 - What a change cost to build (coding sessions on the branch) and what it adds to run (AI
   calls per request).
 - A bug found in production becomes a test, extending what [Learning from
-  production](learning.md) does for AI failures to all code.
+  production](learning.md) does for AI failures to all code. A person overriding the agent's action counts
+  too: an approval rejected, or a different action taken than the one it recommended, with the
+  reason given, becomes a candidate case that expects the person's choice. How often people override
+  the agent, per action, is the number, and only cases that ended well are kept.
 
 Done when: cost per change matches the provider's bill within 5%.
 
