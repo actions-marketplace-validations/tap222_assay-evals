@@ -404,6 +404,19 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 - **The same request sent twice:** `faults(tool="lost")` and `expect(run).at_most_once()` catch an
   agent that pays again after a lost reply. A client that sends the whole request again (a
   double click, a webhook delivered twice) isn't simulated yet.
+- **Half-finished work: a failure or a crash in the middle:** an agent books the slot, charges
+  the card, then fails to send the confirmation, or its process dies after the charge. The first
+  steps took effect and nothing undid them. `faults()` fails one call, and `at_most_once()` catches
+  a repeat, but nothing checks what a failed or interrupted run leaves behind. It should:
+  - **Fail a later step and check the earlier ones were undone:** a case says which action
+    compensates which (a refund for a charge, a release for a hold), and a run that failed after an
+    effect either compensated it or says plainly what's still in place. A charge left standing for
+    a booking that failed is a finding.
+  - **Stop the run after any step and start it again:** `faults()` gets a crash point, and the case
+    is rerun from the agent's saved state. The resumed run doesn't repeat what took effect, and
+    finishes or escalates instead of leaving a job half done.
+  - **Count it in production:** runs that ended after an effect without completing or compensating
+    it, per agent, so orphaned work is found before a customer finds it.
 - **One release decision across both gates:** the slice gate (`/v1/gates/evaluate`) and the
   stability gate (`/v1/evals/runs/{run}/stability`) answer different questions and are called
   separately. A release should get one decision table: every gate as a row (quality per slice,
