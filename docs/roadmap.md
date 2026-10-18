@@ -262,7 +262,9 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   the tools. Production alerts watch rates over runs, which suits quality and is too slow for this.
   - **A scope per case:** the tools an agent may call and the argument values they may take (this
     customer's account, not any account), checked against the actual operation and parameters.
-    Anything else fails, including an HTTP call to a protected host made another way.
+    Anything else fails, including an HTTP call to a protected host made another way. Values are
+    compared after they're resolved, so `/reports/q3/../payroll`, a symlink or a glob can't pass for
+    the path the scope allows.
   - **Fails closed:** `faults()` on the permission check (error, timeout) and a check that the
     protected action didn't run anyway.
   - **Probes:** cases that ask, or inject an instruction, for an out-of-scope action, so the
@@ -381,7 +383,8 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     accepted or finished is flagged, not lost.
   - **No permission by message:** a request from another agent grants nothing a person didn't.
     The receiving agent's actions are held to the scope and approvals the person gave the first
-    agent, and an approval doesn't carry over to a task it wasn't given for.
+    agent, narrowed to the task it was handed, never wider, and an approval doesn't carry over to a
+    task it wasn't given for.
   - **What was handed over:** the facts the task needs (the customer, the constraint, the deadline)
     are in what the first agent passed on, so a handoff that drops one is a finding, not a guess.
   The diff shows a run with its sub-agents as one tree, so a change in who did what is visible.
