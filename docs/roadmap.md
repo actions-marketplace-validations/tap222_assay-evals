@@ -519,6 +519,13 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   bootstrap error estimate.
 - **Migrations beyond adding:** on start, Assay adds new tables and columns to an existing
   database. Renaming or removing columns would need a real migration tool (Alembic).
+- **Secrets in what's recorded:** redaction and `assay redact check` look for personal data (email,
+  card, IBAN, phone), not credentials. An API key, token or private key that passes through a tool's
+  arguments, its result or a model's text is stored, and sent with `--upload`. Known key formats
+  (provider keys, cloud access keys, GitHub and Slack tokens, private key blocks, JWTs) and long
+  random strings in fields named like a secret should be masked before anything is written, with
+  the same pattern list as Gitleaks-style scanners so a team's existing allow-list carries over.
+  `assay redact check` reports any that got through.
 - **Secrets at rest:** Slack, Jira and Linear tokens are masked in the API but stored as
   plain text in Assay's database. Protect the database, or add encryption with a server key.
 
