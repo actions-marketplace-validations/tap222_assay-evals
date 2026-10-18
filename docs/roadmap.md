@@ -369,6 +369,14 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     one.
   Each failed call is a case that can be run again, and the diff says what changed between
   versions: "stopped reading the time back", "now answers during hold".
+- **The same tool name on two MCP servers:** with many MCP servers behind one agent or gateway,
+  two of them can both offer `search`, and the client picks one without saying so. Assay records the
+  server of each tool call, but the flow and the diff name a call by its tool alone, so a `search`
+  that moved from the database server to the GitHub server shows as the same step before and after.
+  A wrong tool can return a perfectly valid answer, so nothing else fails either. A tool should be
+  named by its server and name together in the flow, the diff and the contracts (`db.search`). A
+  name offered by two servers in one model call is flagged as a collision, and a call that moved
+  to another server is a change of its own.
 - **Handoffs between agents: advice or a transfer:** one agent asks another either for a second
   opinion or to take over the next task. These are different promises, and a run records only
   that a sub-agent ran (`parent_run_id`), not which was asked or what it was allowed to do. A
