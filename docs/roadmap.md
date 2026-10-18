@@ -323,6 +323,22 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     an approval that doesn't match what then ran (approved a $40 refund, $400 went out), and
     approved runs that broke a security rule anyway. In tests, a case where the person says no
     checks the agent stops. The number for a team: the share of approvals that were real reviews.
+- **Voice and phone agents: the call, not just the booking:** most phone agents book the slot
+  when the caller plays along. They differ on what happens around it: hold, silence, being
+  interrupted, a caller who changes an answer. Simulated users (`simulate()`) test a conversation,
+  but only as text taking turns. They should be able to act like callers:
+  - **Caller moves:** go silent or put the agent on hold for a while, interrupt it mid-sentence,
+    correct an earlier answer ("actually, Thursday"), give two answers at once, ask for a person.
+  - **Checks on the outcome, not the transcript:** the booking holds the final, corrected
+    details, not the first ones. The agent read the time back. "Next Tuesday" resolved to the
+    right date against a fixed clock. Nothing from its instructions was spoken that the caller
+    shouldn't hear ("3:30 Pacific"). A handoff to a person carried the summary.
+  - **Timing, from the platform's own call record:** time to first response, gaps after a hold,
+    how often it talked over the caller, read from the transcript timings a voice platform gives
+    (Retell, Vapi and others send them), so the same cases compare two agents or two versions of
+    one.
+  Each failed call is a case that can be run again, and the diff says what changed between
+  versions: "stopped reading the time back", "now answers during hold".
 - **Handoffs between agents: advice or a transfer:** one agent asks another either for a second
   opinion or to take over the next task. These are different promises, and a run records only
   that a sub-agent ran (`parent_run_id`), not which was asked or what it was allowed to do. A
