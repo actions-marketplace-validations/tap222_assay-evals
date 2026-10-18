@@ -25,6 +25,10 @@ in a run and in its baseline:
   stable_pass / stable_fail
   errored       every attempt errored, so nothing was judged
 
+Rerunning only the checks that need it (assay test --rerun-unsure) looks at the
+same check more than once. Each look is a chance of a false alarm, so the bar for
+got_worse and improved is split across the looks: Q_LEVEL / looks.
+
 A flaky check also says what varies: the output itself (the model or
 pipeline is nondeterministic), only the verdict on the same output (the
 evaluator: the same answer judged again got another verdict, or every attempt
@@ -37,8 +41,10 @@ separate identical baseline runs are needed.
 """
 from __future__ import annotations
 
+import contextvars
 import math
 from collections import defaultdict
+from contextlib import contextmanager
 from statistics import fmean, stdev
 from typing import Dict, List, Optional, Tuple
 
@@ -46,6 +52,18 @@ MAX_ATTEMPTS = 20  # stop asking for reruns past this many attempts per check
 Q_LEVEL = 0.05  # false-discovery rate for "got worse" / "improved"
 PLAUSIBLE = 0.25  # a drop with q up to this is worth rerunning rather than ignoring
 COLLAPSE = 3  # attempts on each side for all-passed → all-failing to count as got worse on its own
+
+_looks: "contextvars.ContextVar[int]" = contextvars.ContextVar("assay_looks", default=1)
+
+
+@contextmanager
+def looks(n: int):
+    """The checks were looked at n times as attempts were added: Q_LEVEL is split across the looks."""
+    token = _looks.set(max(1, n))
+    try:
+        yield
+    finally:
+        _looks.reset(token)
 
 
 # ---------- exact statistics, no dependencies ----------
@@ -94,6 +112,31 @@ def fisher_lower(a: int, b: int, c: int, d: int) -> float:
         return 1.0
     denom = math.comb(n, k)
     return min(1.0, sum(math.comb(n2, x) * math.comb(n1, k - x) for x in range(max(0, k - n1), c + 1)) / denom)
+
+
+def mcnemar(lost: int, gained: int) -> float:
+    """Exact one-sided McNemar p that more went from pass to fail (lost) than the reverse (gained)
+    by chance: P(X >= lost) for X ~ Binomial(lost + gained, 1/2). Cases that didn't change say nothing."""
+    n = lost + gained
+    return sum(math.comb(n, k) for k in range(lost, n + 1)) / 2 ** n
+
+
+def paired_cases(now: Dict[tuple, List[bool]], before: Dict[tuple, List[bool]]) -> Optional[dict]:
+    """Each case in both runs as one pass or fail: every check passing on most of its attempts
+    (more than half). Then the cases that went from pass to fail and from fail to pass, with an
+    exact McNemar test on those two numbers. None when no case is in both runs."""
+    def by_case(att):
+        out: Dict[str, bool] = {}
+        for (case, _), a in att.items():
+            out[case] = out.get(case, True) and 2 * sum(a) > len(a)
+        return out
+    a, b = by_case(now), by_case(before)
+    common = sorted(set(a) & set(b))
+    if not common:
+        return None
+    lost = [c for c in common if b[c] and not a[c]]
+    gained = [c for c in common if a[c] and not b[c]]
+    return {"cases": len(common), "lost": lost, "gained": gained, "p": mcnemar(len(lost), len(gained))}
 
 
 def bh(pvalues: List[float]) -> List[float]:
@@ -202,14 +245,15 @@ def assess(candidate: Dict[tuple, List], baseline: Dict[tuple, List]) -> Dict[tu
         ps = [out[k][p] for k in keys]
         for k, qv in zip(keys, bh(ps + [1.0] * (m - len(ps)))):
             out[k][q] = qv
+    q_level = Q_LEVEL / _looks.get()
     for key, x in out.items():
         n = x["attempts"]
         if not n:
             x["state"] = "errored"
-        elif x.get("q_worse") is not None and (x["q_worse"] <= Q_LEVEL or (
+        elif x.get("q_worse") is not None and (x["q_worse"] <= q_level or (
                 x["passed"] == 0 and x["base_passed"] == x["base_attempts"] and min(n, x["base_attempts"]) >= COLLAPSE)):
             x["state"] = "got_worse"
-        elif x.get("q_better") is not None and x["q_better"] <= Q_LEVEL:
+        elif x.get("q_better") is not None and x["q_better"] <= q_level:
             x["state"] = "improved"
         elif x.get("q_worse") is not None and n < MAX_ATTEMPTS and (
                 x["q_worse"] <= PLAUSIBLE or (x["passed"] == 0 and x["base_passed"] == x["base_attempts"])):

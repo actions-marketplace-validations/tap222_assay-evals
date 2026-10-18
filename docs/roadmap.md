@@ -200,35 +200,74 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 - **SDKs for other languages:** there are SDKs for Python and for TypeScript and JavaScript.
   Other languages write the events `assay test` reads ([any language](any-language.md)), send
   them to `POST /v1/ingest` directly, or use OpenTelemetry.
-- **Judging a saved run again:** `evaluate(rejudge=)` asks the judge again during the run, but
-  there's no command that runs a frozen judge (model and prompt) on a past run's saved outputs,
-  with no calls to the AI. That would measure the judge's own variance apart from a model swap,
-  and test a new judge or rubric on the same answers before switching to it.
-- **Reruns only where they're needed:** an inconclusive case (8/8 → 4/8) says "rerun with more
-  attempts", but not how many, and a rerun repeats every case. A sequential test (such as SPRT)
-  would add attempts one batch at a time to the borderline cases only, and stop each one as
-  soon as it's clearly chance or clearly worse, with a cap on attempts. Clear cases stop at the
-  first batch, so the spend goes to the ambiguous ones. It has to keep the correction for the
-  number of checks, so repeated looks don't raise false alarms. Judge-unstable checks are left
-  out: more attempts of the AI won't settle a judge that changes its verdict on the same answer.
+- **Agent security: scope tests and security alerts.** An agent given credentials and a task can
+  still reach what it wasn't meant to, and the organizations it happened to often didn't notice.
+  Today a `never` contract, `must_not_call`, `must_get_approval_before`, the injection check and
+  the personal-data check catch it in tests, and recorded HTTP calls show a request made around
+  the tools. Production alerts watch rates over runs, which suits quality and is too slow for this.
+  - **A scope per case:** the tools an agent may call and the argument values they may take (this
+    customer's account, not any account), checked against the actual operation and parameters.
+    Anything else fails, including an HTTP call to a protected host made another way.
+  - **Fails closed:** `faults()` on the permission check (error, timeout) and a check that the
+    protected action didn't run anyway.
+  - **Probes:** cases that ask, or inject an instruction, for an out-of-scope action, so the
+    boundary is tested on every pull request rather than assumed.
+  - **Security flags on what agents access and run, in production:** people now approve almost
+    everything an agent asks, so a click can't be the safeguard. Assay already sees each tool
+    call, its arguments and the HTTP requests a run makes. It should flag the security-relevant
+    ones by itself, with no rules to write first, approved or not:
+    - **Secrets and credentials:** reading `.env`, keys, tokens, `~/.ssh`, cloud credentials, or a
+      secret appearing in a tool's arguments, result or the answer.
+    - **Destructive or irreversible actions:** deletes, drops, `rm -rf`, force pushes, payments,
+      refunds, emails to many people.
+    - **Privilege and reach:** `sudo`, permission changes, new users or keys, access to another
+      customer's records, a host outside the usual list, a download piped into a shell.
+    - **Data leaving:** personal data sent to a tool or host that doesn't need it.
+    Each flag names the run, the step, what it touched and why it matters, with its severity.
+    High severity alerts at once to Slack or a webhook (not after a rate moves, as quality alerts
+    do), grouped so one bad deploy is one alert. Flags a team marks as expected become the
+    allowed list; the rest become tests, so the same action is caught in CI before the next
+    deploy. The same flags apply to the coding agents that build the app, through their hooks.
+  - **Approvals that are rubber stamps:** people approve almost everything an agent asks, so an
+    approval step can look safe while checking nothing. `run.approval()` records the action, the
+    decision and who, but not what the person was shown or how long they took. It should record
+    both (the arguments on screen, asked and decided times) and report, per approver and per
+    action: the approval rate, the median seconds to decide, risky actions approved in seconds,
+    an approval that doesn't match what then ran (approved a $40 refund, $400 went out), and
+    approved runs that broke a security rule anyway. In tests, a case where the person says no
+    checks the agent stops. The number for a team: the share of approvals that were real reviews.
+- **Evidence diffs: the same answer, from different evidence.** Two runs can both say "approved"
+  while the new one read an older policy, or the wrong customer's record. Each retrieved fragment
+  is recorded (id, source, score, whether it went into the prompt) and each tool call with its
+  result, but the diff compares the flow and the counts, not the evidence. It should say, per
+  case, which documents and records an answer rested on, and what changed against the baseline:
+  evidence dropped, added or swapped, a record of another entity. A changed basis under an
+  unchanged answer is a finding, not a pass. Fragments take a version and a date, so evidence that
+  was superseded shows as such. This is also the provenance for a decision: which policy version
+  and which records supported it.
+- **Retrieval that failed quietly:** a retrieval that errored or came back empty, or a source the
+  case expects that wasn't searched, and an answer that went on as if it had the evidence.
+  `handles_failure()` covers tools; retrieval needs the same, and `faults()` should be able to
+  break a retriever too.
+- **Saying "the sources don't say":** a RAG answer to a question its documents don't answer
+  should say so, not fill the gap with something plausible. Faithfulness flags a fabricated
+  claim, but nothing marks a case as unanswerable and fails an answer that answers it anyway. A
+  case should be able to expect an abstention, and the report should count abstentions apart:
+  right to abstain, abstained when the answer was there, answered when it wasn't.
+- **Citations the answer gives, checked:** faithfulness checks the judge's evidence against the
+  fragments, not the answer's own citations. A citation (a document, a page, a section) should
+  be checked against the source it names: that source exists, was retrieved, and says what the
+  sentence citing it says. A right claim with the wrong page fails as a wrong citation, not as
+  a wrong answer.
 - **Paid tool calls (x402):** an agent that pays for an API gets a `402` challenge, pays, and
   retries. A check should read the challenge (price, network, the payment flow it declares) and
   compare it with what the test expects, then check the paid response against its schema and
   the settlement receipt. It uses a mocked facilitator or test payments, never real money by
   default. Price, status, schema and settlement then show in the case-level diff like any other
-  change.
-- **Charged twice for one operation:** `assay.faults()` already injects timeouts and errors into
-  tool calls. For a paid tool it should also fail after settlement and repeat requests, then
-  count payments per logical operation: an agent or API that pays again on a retry fails the
-  check. This is a new payment check, not a new payment library.
-- **Paired pass and fail counts for every run:** the run-level change is a paired interval on
-  pass rates. It should also count the cases that went from pass to fail and from fail to pass,
-  with an exact McNemar test on those two numbers, as document runs already do per slice. A
-  case with repeats needs a rule to count as one pass or fail (most attempts passing, by
-  default), shown in the report.
-- **Code checks and judges apart in the verdict:** deterministic checks already outrank a judge
-  when the two disagree. The verdict should also report them separately, code checks first, so
-  a model swap has a signal no judge's noise reaches, with judged checks as the second line.
+  change, and `at_most_once` already catches a payment repeated after a lost reply.
+- **The same request sent twice:** `faults(tool="lost")` and `expect(run).at_most_once()` catch an
+  agent that pays again after a lost reply. A client that sends the whole request again (a
+  double click, a webhook delivered twice) isn't simulated yet.
 - **One release decision across both gates:** the slice gate (`/v1/gates/evaluate`) and the
   stability gate (`/v1/evals/runs/{run}/stability`) answer different questions and are called
   separately. A release should get one decision table: every gate as a row (quality per slice,

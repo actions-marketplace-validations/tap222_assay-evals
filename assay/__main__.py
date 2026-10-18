@@ -105,6 +105,8 @@ def main(argv=None) -> int:
     t.add_argument("--timeout", type=float, metavar="SECONDS", help="Stop an attempt that runs longer (overrides "
                                                                      "assay.toml)")
     t.add_argument("--failed", action="store_true", help="Run only the cases that didn't pass last time (pytest)")
+    t.add_argument("--rerun-unsure", action="store_true", help="Give more attempts only to the cases that could be "
+                                                                 "worse, a batch at a time, until each is clear")
     t.add_argument("--judge", action="store_true", help="Also have an LLM judge plan quality and consistency "
                                                         "(needs `pip install anthropic`; a model call per run)")
     t.add_argument("--base", metavar="REF", help="Also check the tests against this branch: assertions the change "
@@ -253,6 +255,16 @@ def main(argv=None) -> int:
                                            "(default: [calibrate] second_judge)")
     cb.add_argument("--format", choices=["text", "json"], default="text")
     cb.add_argument("--final", action="store_true", help="Report on the held-out test split (default: dev)")
+    rj = sub.add_parser("rejudge", help="Ask a judge about a saved run's answers again, with no calls to the AI: "
+                                        "agreement with the saved verdicts, flips, splits")
+    rj.add_argument("--judge", required=True, help="module:function or path.py:function, called as judge(**inputs)")
+    rj.add_argument("--run", help="The run to re-judge (default: the last)")
+    rj.add_argument("--field", help="Only this check")
+    rj.add_argument("--times", type=int, default=1, help="Judgements per answer: 2 or more shows where it splits")
+    rj.add_argument("--threshold", type=float, default=0.5, help="Score at or above which a scored verdict passes")
+    rj.add_argument("--min-agreement", type=float, help="Exit 1 when agreement with the saved verdicts is lower "
+                                                        "(0 to 1)")
+    rj.add_argument("--format", choices=["text", "json"], default="text")
     rp = sub.add_parser("report", help="What the evaluation found this week: issues caught before users saw them, "
                                        "failure modes, fixes, the log")
     rp.add_argument("--days", type=float, default=7)
@@ -337,6 +349,11 @@ def main(argv=None) -> int:
         code, text = weakening.guard(root, ref)
         print(text, file=sys.stderr if code == 2 else sys.stdout)
         return code
+    if args.cmd == "rejudge":
+        from pathlib import Path
+        from assay import rejudge
+        return rejudge.run(Path.cwd(), args.judge, args.run, args.field, args.times, args.threshold, args.format,
+                           args.min_agreement)
     if args.cmd in ("init", "test", "accept", "upload", "ack", "acks", "golden", "calibrate", "report", "log"):
         from pathlib import Path
         from assay import local
@@ -385,7 +402,7 @@ def main(argv=None) -> int:
             send = ({"url": args.url, "key": args.key, "tenant": args.send_tenant}
                     if local.upload_wanted(args.upload) else None)
             return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,
-                              args.junit, args.timeout, args.failed, args.judge)
+                              args.junit, args.timeout, args.failed, args.judge, args.rerun_unsure)
         if args.global_:
             if not args.claude_code:
                 print("--global goes with --claude-code: `assay init --claude-code --global`.", file=sys.stderr)
