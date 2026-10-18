@@ -500,6 +500,20 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     finishes or escalates instead of leaving a job half done.
   - **Count it in production:** runs that ended after an effect without completing or compensating
     it, per agent, so orphaned work is found before a customer finds it.
+- **Runaway runs, caught in the first minute:** an agent retried a failing tool 31,000 times
+  overnight, and the budget alert fired at month end. In tests this is caught: `faults()` keeps a
+  tool failing, and `handles_failure()`, `max_steps()` and `max_cost()` fail a case that retries past
+  its limit. In production, alerts watch rates over a window, which is too slow for one run gone
+  wrong. Alerts should fire at once, per run, for:
+  - **The same failure again and again:** the same tool returning the same error (its message with
+    ids and numbers taken out) five times in one run, whatever the model changes in its arguments.
+  - **A run far past its usual size:** calls, tokens or cost per run against that agent's normal.
+  - **Spend faster than normal:** spend per hour for a customer or an agent against its usual hour,
+    so a loop shows in minutes, long before a monthly total does.
+  - **The slow leak:** the share of runs that end having done nothing, and the cost per run that
+    did something. A run that finished "successfully" every time while doing no work is a cost with
+    no errors to count.
+  Each alert names the run and its repeated error, grouped so one loop is one page.
 - **One release decision across both gates:** the slice gate (`/v1/gates/evaluate`) and the
   stability gate (`/v1/evals/runs/{run}/stability`) answer different questions and are called
   separately. A release should get one decision table: every gate as a row (quality per slice,
