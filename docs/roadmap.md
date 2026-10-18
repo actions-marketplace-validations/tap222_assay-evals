@@ -190,6 +190,13 @@ User stories: [US-01](user-stories.md#us-01), [US-03](user-stories.md#us-03),
   evidence for a rule; they don't create one.
 - Nothing becomes a rule without a yes. A confirmed rule is written to `CLAUDE.md` (or
   `AGENTS.md`) and checked on every pull request; at most one suggestion per report.
+- One copy of the rules, and the version each run used: the same rules often live in several files
+  that drift apart (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules`, a copy in a subfolder or the home
+  directory), and an agent follows whichever it loads, stale or not, with nothing failing. Copies
+  that disagree are listed, with the lines that differ and which one is newer. A rule Assay writes
+  goes to the file the agent actually loads. Each test run records a digest of the instruction files
+  in effect, as it already does for prompt versions, so when a rule is corrected the runs and pull
+  requests made under the old one can be listed.
 - Claim check: when the coding agent says "all tests pass" or "fixed", check it against what
   actually ran. Each run gives a receipt (the command, its exit code, the commit, how many tests
   ran and passed), and a claim without a matching receipt is flagged before anyone reads the diff. This extends the existing claim contracts.
@@ -207,12 +214,22 @@ User stories: [US-08](user-stories.md#us-08), [US-09](user-stories.md#us-09),
 ### P4. Cost and performance
 
 - Database queries and outside calls per test, with growth flagged ("1 query became 21").
+- Growth that hides in small steps: each number (cost, input tokens, fixed context, calls) is
+  compared with the last passing run, which moves forward with every pass. A prompt that grows 20%
+  per pull request passes every time and is 7 times larger after nine. Numbers are also compared
+  with an anchor that doesn't move (the last release, or a month ago), and the report names the
+  changes that added the most: "fixed context 1,200 → 9,000 tokens since v1.4, over 9 pull
+  requests, most from summarise@7 and summarise@9".
 - What a change cost to build (coding sessions on the branch) and what it adds to run (AI
   calls per request).
 - A bug found in production becomes a test, extending what [Learning from
   production](learning.md) does for AI failures to all code. The case keeps the state that chose
   the path (feature flags, the account's permissions, the response the customer got), since the
-  same code takes different paths for two customers, and a case without it may not reproduce.
+  same code takes different paths for two customers, and a case without it may not reproduce. A
+  person overriding the agent's action counts too: an approval rejected, or a different action
+  taken than the one it recommended, with the reason given, becomes a candidate case that expects
+  the person's choice. How often people override the agent, per action, is the number, and only
+  cases that ended well are kept.
 
 Done when: cost per change matches the provider's bill within 5%.
 
@@ -268,7 +285,9 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   the tools. Production alerts watch rates over runs, which suits quality and is too slow for this.
   - **A scope per case:** the tools an agent may call and the argument values they may take (this
     customer's account, not any account), checked against the actual operation and parameters.
-    Anything else fails, including an HTTP call to a protected host made another way.
+    Anything else fails, including an HTTP call to a protected host made another way. Values are
+    compared after they're resolved, so `/reports/q3/../payroll`, a symlink or a glob can't pass for
+    the path the scope allows.
   - **Fails closed:** `faults()` on the permission check (error, timeout) and a check that the
     protected action didn't run anyway.
   - **Probes:** cases that ask, or inject an instruction, for an out-of-scope action, so the
@@ -280,6 +299,11 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     `send_email`, to the attacker's address. Each argument should carry where its value came from
     (the user, a trusted tool, or text the agent read), and a value that came only from untrusted
     text and goes to an outside destination (an address, a URL, an account, an amount) is flagged.
+    The check is also easy to slip past: one zero-width space or full-width letter inside "ignore all
+    previous instructions" hides it. Text should be normalized first (Unicode compatibility forms,
+    zero-width and control characters removed, look-alike letters folded). And an answer that embeds
+    a markdown image or link whose address carries data (`![x](https://host/?q=...)`) leaks it the
+    moment a chat window renders it, so that's flagged as data leaving.
   - **Testing the gate itself:** teams put a policy gate in front of tool calls (allow, block, needs
     approval). Keeping its policy right as it changes is the hard part: too strict and normal work
     stops, too loose and attacks pass. Recording each gate decision with its reason and policy
@@ -351,6 +375,13 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     allowed it, the evidence it rested on, and what happened after. The same view exports for
     security, legal or finance as CSV and PDF, signed so an edit shows. The number for a team:
     the time to answer that question, and the share of actions with a full record.
+  - **An approval the agent claimed, not one it was given:** `must_get_approval_before` accepts any
+    approval recorded in the run, whoever recorded it. An agent that writes its own approval, or
+    passes "trusted" or "approved_by: finance" in a tool's arguments, gets through. An approval
+    should record where it came from (the approval system, a person's decision, a signed record),
+    and only those count. A claim in the agent's own output or arguments never does, and probe cases
+    check it: an invoice that says "pre-approved" in its text must not get paid. An approval used
+    long after it was given, past the window the case allows, counts as none.
   - **Approvals that are rubber stamps:** people approve almost everything an agent asks, so an
     approval step can look safe while checking nothing. `run.approval()` records the action, the
     decision and who, but not what the person was shown or how long they took. It should record
@@ -375,6 +406,14 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     one.
   Each failed call is a case that can be run again, and the diff says what changed between
   versions: "stopped reading the time back", "now answers during hold".
+- **The same tool name on two MCP servers:** with many MCP servers behind one agent or gateway,
+  two of them can both offer `search`, and the client picks one without saying so. Assay records the
+  server of each tool call, but the flow and the diff name a call by its tool alone, so a `search`
+  that moved from the database server to the GitHub server shows as the same step before and after.
+  A wrong tool can return a perfectly valid answer, so nothing else fails either. A tool should be
+  named by its server and name together in the flow, the diff and the contracts (`db.search`). A
+  name offered by two servers in one model call is flagged as a collision, and a call that moved
+  to another server is a change of its own.
 - **Handoffs between agents: advice or a transfer:** one agent asks another either for a second
   opinion or to take over the next task. These are different promises, and a run records only
   that a sub-agent ran (`parent_run_id`), not which was asked or what it was allowed to do. A
@@ -387,10 +426,21 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     accepted or finished is flagged, not lost.
   - **No permission by message:** a request from another agent grants nothing a person didn't.
     The receiving agent's actions are held to the scope and approvals the person gave the first
-    agent, and an approval doesn't carry over to a task it wasn't given for.
+    agent, narrowed to the task it was handed, never wider, and an approval doesn't carry over to a
+    task it wasn't given for.
   - **What was handed over:** the facts the task needs (the customer, the constraint, the deadline)
     are in what the first agent passed on, so a handoff that drops one is a finding, not a guess.
   The diff shows a run with its sub-agents as one tree, so a change in who did what is visible.
+- **Replay recorded runs, decision by decision:** before switching a model, a prompt or a router
+  that picks tools, a team wants to know what it would have done on real traffic. Recorded runs
+  hold each step's input and each tool's result. Replaying one means giving the new setup the same
+  history up to a step and comparing its next decision (the tool, its arguments, or stopping) with
+  the recorded one. Tools aren't run again: the recorded results are fed back, so nothing is
+  charged, sent or deleted. The report counts where decisions diverge, grouped by kind (another
+  tool, other arguments, stopped early, went further), with each divergence scored against the
+  run's outcome and the case's checks: better, worse or unclear. A divergence on a tool that writes
+  or spends weighs more than one on a read. Runs whose tool definitions changed since they were
+  recorded are set apart, since their recorded results may no longer hold.
 - **Evidence diffs: the same answer, from different evidence.** Two runs can both say "approved"
   while the new one read an older policy, or the wrong customer's record. Each retrieved fragment
   is recorded (id, source, score, whether it went into the prompt) and each tool call with its
@@ -421,6 +471,14 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     client, or a reviewer who approves the change. Rerun after a fix, it shows what moved.
   It works from saved results, so a team can compare runs it already has without sharing its
   index or rerunning anything.
+- **Agent memory across sessions:** agents that remember users (Mem0, Zep, a vector store, a graph)
+  fail where a single conversation can't show it. A user moves house in one session, and the next
+  still ships to the old address. A user asks to be forgotten, and the fact comes back a week later.
+  One user's detail turns up in another user's answer. `simulate()` runs one conversation as one
+  run, so none of this is tested. A case should be able to span sessions (tell, update, delete,
+  then ask) and check that the latest value is used, a deleted fact never comes back in an answer or
+  a tool call, and nothing crosses from one user to another. Switching or upgrading the memory
+  store then shows, case by case, what it now remembers differently.
 - **Outdated and conflicting sources (RAG):** a policy has a 2024 and a 2025 version, both are
   retrieved, and the answer follows the old one. Or two sources disagree and the answer blends
   them. Teams handle it with version metadata, a filter and a prompt rule ("use the latest
@@ -445,6 +503,19 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   case expects that wasn't searched, and an answer that went on as if it had the evidence.
   `handles_failure()` covers tools; retrieval needs the same, and `faults()` should be able to
   break a retriever too.
+- **Conditions dropped, and questions half answered (RAG):** faithfulness counts a claim as
+  supported when its quote is in a fragment word for word. "Deployments are permitted" quotes the
+  source exactly, though the source says "only after approval", or says it in the next sentence. And
+  nothing checks that every part of a question was answered. It should:
+  - **Keep the conditions:** the evidence check reads the sentences around a quote, not only the
+    quote. A claim whose source limits it (only, unless, except, provided, after) and that leaves the
+    limit out fails as a dropped condition, and so does one an exception in another document limits.
+    Both kinds come with built-in cases (a condition in the same sentence, in the next one, in
+    another document), so the check is tested on what it's meant to catch.
+  - **Answer each part:** a question is split into the parts a complete answer has to establish.
+    Each is backed by a passage or stated as missing, and a part with no passage never counts as
+    answered. When the missing part is the one the verdict rests on (yes or no, compliant, on
+    time), an answer that gives the verdict anyway fails.
 - **Saying "the sources don't say":** a RAG answer to a question its documents don't answer
   should say so, not fill the gap with something plausible. Faithfulness flags a fabricated
   claim, but nothing marks a case as unanswerable and fails an answer that answers it anyway. A
@@ -475,6 +546,11 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   - **Allow "unverified":** when the read-back can't decide, the run ends unverified, a status of
     its own, never counted as done. An agent that claims done there is flagged, and so is one that
     retries after an unknown outcome instead of checking first.
+  - **Per call, not only at the end:** a tool reports that it ran, not that it worked. An `UPDATE`
+    that matched no rows returns the same "success" as one that changed the row. Database writes
+    Assay records (P1) should keep how many rows each changed, a count and never values. A write the
+    tool called a success that changed nothing is flagged, and so is a file write that left the file
+    as it was. A step with no effect to show for its success is "unknown", not done.
   - **Test the check itself:** each success check is run once on a deliberately failed case:
     `faults()` makes the action report success without doing anything. A check that still passes
     checks nothing, and is flagged like a weakened test.
@@ -491,6 +567,20 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     finishes or escalates instead of leaving a job half done.
   - **Count it in production:** runs that ended after an effect without completing or compensating
     it, per agent, so orphaned work is found before a customer finds it.
+- **Runaway runs, caught in the first minute:** an agent retried a failing tool 31,000 times
+  overnight, and the budget alert fired at month end. In tests this is caught: `faults()` keeps a
+  tool failing, and `handles_failure()`, `max_steps()` and `max_cost()` fail a case that retries past
+  its limit. In production, alerts watch rates over a window, which is too slow for one run gone
+  wrong. Alerts should fire at once, per run, for:
+  - **The same failure again and again:** the same tool returning the same error (its message with
+    ids and numbers taken out) five times in one run, whatever the model changes in its arguments.
+  - **A run far past its usual size:** calls, tokens or cost per run against that agent's normal.
+  - **Spend faster than normal:** spend per hour for a customer or an agent against its usual hour,
+    so a loop shows in minutes, long before a monthly total does.
+  - **The slow leak:** the share of runs that end having done nothing, and the cost per run that
+    did something. A run that finished "successfully" every time while doing no work is a cost with
+    no errors to count.
+  Each alert names the run and its repeated error, grouped so one loop is one page.
 - **One release decision across both gates:** the slice gate (`/v1/gates/evaluate`) and the
   stability gate (`/v1/evals/runs/{run}/stability`) answer different questions and are called
   separately. A release should get one decision table: every gate as a row (quality per slice,
@@ -518,6 +608,13 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   bootstrap error estimate.
 - **Migrations beyond adding:** on start, Assay adds new tables and columns to an existing
   database. Renaming or removing columns would need a real migration tool (Alembic).
+- **Secrets in what's recorded:** redaction and `assay redact check` look for personal data (email,
+  card, IBAN, phone), not credentials. An API key, token or private key that passes through a tool's
+  arguments, its result or a model's text is stored, and sent with `--upload`. Known key formats
+  (provider keys, cloud access keys, GitHub and Slack tokens, private key blocks, JWTs) and long
+  random strings in fields named like a secret should be masked before anything is written, with
+  the same pattern list as Gitleaks-style scanners so a team's existing allow-list carries over.
+  `assay redact check` reports any that got through.
 - **Secrets at rest:** Slack, Jira and Linear tokens are masked in the API but stored as
   plain text in Assay's database. Protect the database, or add encryption with a server key.
 
