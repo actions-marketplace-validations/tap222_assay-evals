@@ -203,6 +203,12 @@ User stories: [US-08](user-stories.md#us-08), [US-09](user-stories.md#us-09),
 ### P4. Cost and performance
 
 - Database queries and outside calls per test, with growth flagged ("1 query became 21").
+- Growth that hides in small steps: each number (cost, input tokens, fixed context, calls) is
+  compared with the last passing run, which moves forward with every pass. A prompt that grows 20%
+  per pull request passes every time and is 7 times larger after nine. Numbers are also compared
+  with an anchor that doesn't move (the last release, or a month ago), and the report names the
+  changes that added the most: "fixed context 1,200 → 9,000 tokens since v1.4, over 9 pull
+  requests, most from summarise@7 and summarise@9".
 - What a change cost to build (coding sessions on the branch) and what it adds to run (AI
   calls per request).
 - A bug found in production becomes a test, extending what [Learning from
