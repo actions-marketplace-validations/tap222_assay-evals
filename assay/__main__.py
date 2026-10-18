@@ -117,6 +117,17 @@ def main(argv=None) -> int:
                                       "(pytest, Jest, Vitest; no Assay tests needed)")
     gd.add_argument("--base", metavar="REF", help="The branch to compare with (default: ASSAY_BASE_REF, else "
                                                   "origin's default branch)")
+    ch = sub.add_parser("changes", help="What a change did that nothing checked: changed lines no test ran, "
+                                        "and deploy or dependency files no CI job used")
+    ch.add_argument("--base", metavar="REF", help="The branch to compare with (default: ASSAY_BASE_REF, else "
+                                                  "origin's default branch)")
+    ch.add_argument("--coverage", metavar="FILE", help="coverage.json, .coverage, coverage-final.json or lcov.info "
+                                                       "(default: the first of those found)")
+    ch.add_argument("--format", choices=["text", "markdown", "json"], default="text")
+    ch.add_argument("--all", action="store_true", help="List every item, numbered, not the top three")
+    ch.add_argument("--intended", type=int, metavar="N", help="Mark item N (as --all numbers them) intended, in "
+                                                              "assay.intended.toml: it's left out until it changes")
+    ch.add_argument("--reason", help="Why it's intended (needed with --intended)")
     u = sub.add_parser("upload", help="Send a test run (the latest, by default) to an Assay server")
     u.add_argument("run", nargs="?", help="A run id instead of the latest")
     for q in (t, u):
@@ -335,6 +346,10 @@ def main(argv=None) -> int:
         code, text = workspace.doctor(Path.cwd())
         print(text)
         return code
+    if args.cmd == "changes":
+        from pathlib import Path
+        from assay import changes
+        return changes.main(Path.cwd(), args.base, args.coverage, args.format, args.all, args.intended, args.reason)
     if args.cmd == "guard":
         from os import environ
         from pathlib import Path

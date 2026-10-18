@@ -97,8 +97,9 @@ exit $code
 
 The same summary goes on the job's summary page, and is in `.assay/summary.md` after every
 run. Its inputs are `command`, `install` (default `pip install assay-server pytest`),
-`timeout`, `comment`, `fail-on-inconclusive`, `token`, and `trusted-policy`, `config` and
-`policy-label` (see Security, below). Its `result` output is `passed`, `regressed`,
+`timeout`, `comment`, `fail-on-inconclusive`, `token`, `changes` (open the comment with
+the [change report](changes.md)), and `trusted-policy`, `config` and `policy-label` (see
+Security, below). Its `result` output is `passed`, `regressed`,
 `inconclusive` or `error`. A fork's PR gets a read-only token, so there the comment is
 skipped with a warning and the job doesn't fail over it. Outside the action,
 `assay pr-comment` posts the summary itself (it needs `GITHUB_TOKEN`).

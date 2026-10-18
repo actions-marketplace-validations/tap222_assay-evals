@@ -614,21 +614,20 @@ def regressed(d: dict) -> bool:
 
 # ---------- the command ----------
 
-def main(root, baseline_ref: Optional[str], current_ref: Optional[str], fmt: str = "text") -> int:
-    """`assay diff [BASELINE] [CURRENT]`: 0 nothing regressed, 1 something did, 2 nothing to compare."""
+def latest(root, baseline_ref: Optional[str] = None, current_ref: Optional[str] = None, quiet: bool = False):
+    """compute() for the runs `assay diff` would compare: (diff, None), or (None, why there's nothing).
+    quiet: don't say which baseline was picked."""
     import sys
     from assay import local
     from assay.failures import eval_runs
     home = local.ensure_home(root)
     if not (home / "assay.db").exists():
-        print("Nothing to compare yet: run `pytest --assay` or `assay test` first.", file=sys.stderr)
-        return 2
+        return None, "Nothing to compare yet: run `pytest --assay` or `assay test` first."
     engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
     state = local._state(home)
     runs = [r for r in eval_runs(engine, local.TENANT) if r["run_id"] != local.BASELINE]
     if not runs:
-        print("Nothing to compare yet: run `pytest --assay` or `assay test` first.", file=sys.stderr)
-        return 2
+        return None, "Nothing to compare yet: run `pytest --assay` or `assay test` first."
     current = resolve(runs, current_ref) if current_ref else (state.get("last") or runs[0]["run_id"])
     if baseline_ref:
         baseline = resolve(runs, baseline_ref)
@@ -637,7 +636,7 @@ def main(root, baseline_ref: Optional[str], current_ref: Optional[str], fmt: str
         cases = Counter(state["compared"]["cases"].values())
         known = {r["run_id"] for r in runs}
         baseline = next((run for run, _ in cases.most_common() if run in known), None) or local.BASELINE
-        if len(cases) > 1:
+        if len(cases) > 1 and not quiet:
             print(f"Compared with {baseline}, the baseline of {cases[baseline]} of {sum(cases.values())} cases.",
                   file=sys.stderr)
     elif state.get("baseline_cases"):
@@ -647,20 +646,26 @@ def main(root, baseline_ref: Optional[str], current_ref: Optional[str], fmt: str
     for ref, got in ((baseline_ref, baseline), (current_ref, current)):
         if ref and not got:
             known = ", ".join(label(r, r["run_id"]) for r in runs[:5])
-            print(f"No run is {ref!r}: give a run id or a version recorded with the runs (version=...). "
-                  f"Recent runs: {known}.", file=sys.stderr)
-            return 2
+            return None, (f"No run is {ref!r}: give a run id or a version recorded with the runs (version=...). "
+                          f"Recent runs: {known}.")
     if not baseline:
-        print("Only one run so far: there's nothing to compare it with.", file=sys.stderr)
-        return 2
+        return None, "Only one run so far: there's nothing to compare it with."
     try:
         cfg = local.find_config(root)
     except local.SetupError as exc:
-        print(exc, file=sys.stderr)
-        return 2
+        return None, str(exc)
     d = compute(engine, local.TENANT, current, baseline, cfg)
     if "error" in d:
-        print(d["error"], file=sys.stderr)
+        return None, d["error"]
+    return d, None
+
+
+def main(root, baseline_ref: Optional[str], current_ref: Optional[str], fmt: str = "text") -> int:
+    """`assay diff [BASELINE] [CURRENT]`: 0 nothing regressed, 1 something did, 2 nothing to compare."""
+    import sys
+    d, why = latest(root, baseline_ref, current_ref)
+    if d is None:
+        print(why, file=sys.stderr)
         return 2
     print({"text": text, "markdown": markdown, "json": as_json}[fmt](d), end="")
     return 1 if regressed(d) else 0
