@@ -187,6 +187,12 @@ User stories: [US-12](user-stories.md#us-12), [US-13](user-stories.md#us-13),
 - Overview, Changes, Quality, Reliability, Cost and Timelines, each opening with what needs
   attention; today's pages stay, under Investigate. Opt-in until it's proven.
 - A monthly page with the four numbers, each linked to its evidence, exported as PDF and CSV.
+- **Changes a coding agent built, against the rest:** the same numbers split by who built the
+  change, which Assay already records with each run (a coding agent's session, CI or a person). Per
+  group: the change failure rate (a later fix changed its lines, or a regression reached the default
+  branch), regressions and weakened tests caught before merge, items the change report raised, and
+  the time from a pull request's first commit to its merge. That's what AI changed in outcomes,
+  measured, not how much it was used. Per repository and team, never per person.
 
 User stories: [US-15](user-stories.md#us-15).
 
@@ -209,6 +215,9 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   cost per change stays, as one line.
 - **Production tracing.** Tracing tools do it well, and it isn't what Assay is for.
 - **"Hours saved" estimates.** Numbers you can't check lose trust.
+- **AI usage scores per person, or an HR org tree.** How much someone used an AI tool says nothing
+  about what it changed, and a ranking of people by it measures the wrong thing. Outcomes are
+  reported per repository and team.
 
 ## Not built yet
 
