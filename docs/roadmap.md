@@ -307,6 +307,13 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
       review.
     The number for a team: the share of agent actions with a known owner and an identity of their
     own, and how many agents hold access they didn't use.
+  - **"What did this agent do, and who approved it?" in a minute:** each run is recorded, but
+    finding every action of one kind means opening runs one by one. Assay's own audit log covers
+    the people using Assay, not what agents did. It should answer by action: every refund over $100
+    this month, with the agent, who asked, who approved and how fast, the rule or contract that
+    allowed it, the evidence it rested on, and what happened after. The same view exports for
+    security, legal or finance as CSV and PDF, signed so an edit shows. The number for a team:
+    the time to answer that question, and the share of actions with a full record.
   - **Approvals that are rubber stamps:** people approve almost everything an agent asks, so an
     approval step can look safe while checking nothing. `run.approval()` records the action, the
     decision and who, but not what the person was shown or how long they took. It should record
