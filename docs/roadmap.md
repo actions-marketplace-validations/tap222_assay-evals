@@ -243,6 +243,22 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     do), grouped so one bad deploy is one alert. Flags a team marks as expected become the
     allowed list; the rest become tests, so the same action is caught in CI before the next
     deploy. The same flags apply to the coding agents that build the app, through their hooks.
+  - **Calls that go around the gateway:** an LLM gateway or agent gateway (LiteLLM, Portkey, an
+    internal proxy) only governs the calls that reach it. An agent with a provider key and network
+    access can call a model, an MCP server or a tool's API directly, and the gateway never sees it.
+    Assay records model calls and outbound HTTP, but not where a model call went: a call through
+    the gateway and one straight to `api.openai.com` look the same. It should:
+    - **Record each call's destination:** the host each model call, MCP request and tool call
+      went to.
+    - **Fail a test that goes around:** with the gateway named in `assay.toml`, a test whose code
+      calls a model provider, an MCP server or a governed tool's API directly fails, naming the
+      call and the line that made it. A new code path that skips the gateway is caught in the pull
+      request, not found later in the bill.
+    - **Count it in production:** direct calls per agent, as a security flag, with the share of
+      model calls and tool calls that went through the gateway.
+    Assay sees only the calls its SDK records in the app's own process. Traffic from another
+    process or runtime needs egress rules at the network, and the report says so instead of
+    claiming full coverage.
   - **Whose access an agent uses, and when it drifts:** agents often run on the credentials of
     the person who set them up, keep them across sessions, and have no identity or baseline of
     their own, so identity and security tools see nothing unusual. Assay sees what each run did,
