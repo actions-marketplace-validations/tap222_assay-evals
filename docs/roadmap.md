@@ -260,6 +260,26 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   unchanged answer is a finding, not a pass. Fragments take a version and a date, so evidence that
   was superseded shows as such. This is also the provenance for a decision: which policy version
   and which records supported it.
+- **Outdated and conflicting sources (RAG):** a policy has a 2024 and a 2025 version, both are
+  retrieved, and the answer follows the old one. Or two sources disagree and the answer blends
+  them. Teams handle it with version metadata, a filter and a prompt rule ("use the latest
+  version"), or a separate layer that ranks what to trust. Whichever they use, nothing tests that
+  it worked. Faithfulness checks that a claim is in the fragments, and an outdated fragment passes
+  that check. Recording a version and a date with each fragment makes these checkable:
+  - **Answered from a superseded version:** the claims the answer rests on come from a fragment
+    a newer version of the same document replaces, while the current one was retrieved or exists.
+    An exception that only the old version has counts too.
+  - **Conflicting sources:** retrieved fragments that disagree on the claim the answer makes. A
+    case says what the answer should do: follow the rule (latest, or the more authoritative
+    source), or name the conflict. Blending the two, or picking one without saying so, fails.
+  - **Cases for it:** a few built from the documents themselves: each pair of versions that
+    changed a rule becomes a question whose answer differs between them, so a test exists before
+    a user hits it.
+  - **The documents changed, not the code:** a re-index or a new version of a document is a
+    cause, like a new prompt or model. "These 6 answers changed after policy.pdf v3 was indexed"
+    goes next to the regression, and a newer version left out of the index is flagged.
+  Counted per case, the number for a team: answers given from current sources, of all answers
+  whose sources have versions.
 - **Retrieval that failed quietly:** a retrieval that errored or came back empty, or a source the
   case expects that wasn't searched, and an answer that went on as if it had the evidence.
   `handles_failure()` covers tools; retrieval needs the same, and `faults()` should be able to
