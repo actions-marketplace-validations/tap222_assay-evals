@@ -211,6 +211,16 @@ def test_the_budget_stops_new_samples():
     assert "budget ($0.02)" in report.stopped
 
 
+def test_a_call_that_timed_out_is_not_counted_as_free():
+    # 529s are answers: nothing to pay. A timeout got no answer: the provider may have run it and billed it.
+    report = fast(retries=3, prices={"claude-opus-5": (5, 25)}).run(
+        Judge("anthropic", "claude-opus-5", client=Messages(fail=1, error=TimeoutError("Request timed out"))),
+        ["Rate this"], schema=VERDICT)
+    assert report.unpriced_calls == 1 and report.cost_usd == pytest.approx((1000 * 5 + 100 * 25) / 1e6)
+    assert "1 call got no answer (a timeout or a dropped connection), and the provider may have billed it" \
+        in str(report)
+
+
 def test_unpriced_and_unseen_calls_say_so():
     report = fast().run(lambda x: True, [1])
     assert report.cost_usd is None and "the judge's calls aren't seen" in str(report)
@@ -315,6 +325,13 @@ def test_cost_and_retry_after_readers():
                       "_hidden_params": {"response_cost": 0.0042}})
     assert lite.cost == 0.0042 and cost_of(lite, {}) == 0.0042
     assert cost_of(normalize({"model": "unknown-model", "choices": [], "usage": {"prompt_tokens": 1}}), {}) is None
+    # A call the provider answered with an error costs nothing; one it never answered may have been billed.
+    from assay_sdk.llm import Response
+    assert cost_of(Response(provider="openai", model="gpt-5", error="429", exception=HTTPError(429, {})), {}) == 0.0
+    timed_out = Response(provider="openai", model="gpt-5", error="Request timed out", exception=TimeoutError())
+    assert cost_of(timed_out, {"gpt-5": (1, 2)}) is None
+    assert cost_of(Response(provider="openai", error="timeout", error_kind="timeout"), {}) is None
+    assert cost_of(Response(provider="openai", error="the run's rate limit", error_kind="timeout", cost=0.0), {}) == 0.0
     assert retry_after(HTTPError(429, {"retry-after-ms": "1500"})) == 1.5
     assert retry_after(HTTPError(429, {"retry-after": "7"})) == 7
     assert retry_after(HTTPError(429, {"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"})) == 0

@@ -260,7 +260,7 @@ Estimated cost: $0.46
 | `timeout` | seconds for one model call (for a judge that isn't a `Judge`, for one attempt) |
 | `retries` | asks again per sample, in all: after a timeout, a dropped connection, an HTTP error whose status is in `retry_on`, or an answer that isn't a verdict (`retry_invalid=True`). A bug in the judge is final at once |
 | `max_time`, `budget_usd` | for the whole run. When one is reached, no more samples start. Those left are reported as not run, never as failures |
-| `prices` | `{model or prefix: (input, output[, cached])}`, dollars per million tokens, or `ASSAY_PRICES` as JSON. The provider's own figure is used when it gives one (LiteLLM, OpenRouter). A model with no price is reported as unpriced, never guessed |
+| `prices` | `{model or prefix: (input, output[, cached])}`, dollars per million tokens, or `ASSAY_PRICES` as JSON. The provider's own figure is used when it gives one (LiteLLM, OpenRouter). A model with no price is reported as unpriced, never guessed. A call the provider answered with an error (a 429, a 5xx) costs nothing; one that got no answer (a timeout, a dropped connection) may have been billed, so it's reported as not priced, never as $0 |
 | `cache=True` | identical samples are judged once |
 
 - **One retry layer, counted.** Through a `Judge`, the provider SDK's own retries are off

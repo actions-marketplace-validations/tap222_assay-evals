@@ -46,6 +46,22 @@ def test_coverage_is_read_from_coverage_py_istanbul_and_lcov(tmp_path):
     assert (got["lib/send.go"].ran, got["lib/send.go"].functions) == ({4}, [(3, 0, "Send")])
 
 
+def test_go_coverage_profiles_are_read_by_module_path(tmp_path):
+    (tmp_path / "go.mod").write_text("module github.com/acme/shop\n\ngo 1.22\n", encoding="utf-8")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "go.mod").write_text("module github.com/acme/shop/tools\n", encoding="utf-8")
+    profile = tmp_path / "coverage.out"
+    profile.write_text("mode: set\n"
+                       "github.com/acme/shop/pay/refund.go:10.2,12.16 2 1\n"
+                       "github.com/acme/shop/pay/refund.go:14.2,15.10 1 0\n"
+                       "github.com/acme/shop/tools/gen/main.go:3.13,4.2 1 1\n"
+                       "example.com/elsewhere/x.go:1.1,2.2 1 1\n", encoding="utf-8")
+    assert changes.find_coverage(tmp_path) == profile
+    got = changes.read_coverage(tmp_path, profile)
+    assert set(got) == {"pay/refund.go", "tools/gen/main.go"}  # the nested module by its own go.mod
+    assert (got["pay/refund.go"].measured, got["pay/refund.go"].ran) == ({10, 11, 12, 14, 15}, {10, 11, 12})
+
+
 # ---------- changed lines no test ran ----------
 
 APP = '''import requests

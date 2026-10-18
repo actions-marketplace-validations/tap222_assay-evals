@@ -58,7 +58,11 @@ READS_GREW = (2, 5)  # reads of a table that at least doubled and grew by 5 or m
 
 def _step_label(s: dict) -> Optional[str]:
     if s["kind"] == "tool":
-        return None if s["name"] in (DB_READS, DB_UNWRITTEN) else s["name"]
+        if s["name"] in (DB_READS, DB_UNWRITTEN):
+            return None
+        # An MCP tool is its server and its name: two servers can both offer `search`, and a call that
+        # moved from one to the other is a change, though the name is the same.
+        return f"{s['server']}.{s['name']}" if s.get("server") else s["name"]
     if s["kind"] == "approval":
         decision = (s.get("args") or {}).get("decision")
         return f"approval({s['name']})" if decision in (None, "approved") else f"approval({s['name']}: {decision})"

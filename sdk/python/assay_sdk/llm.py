@@ -323,7 +323,7 @@ class Judge:
                 why = scope.gate()  # the run's rate limit
                 if why:
                     return Response(provider=self.provider, model=self.model, error=why, error_kind="timeout",
-                                    finish_reason="error")
+                                    finish_reason="error", cost=0.0)  # never sent: nothing to pay
                 r = self._once(messages, system, schema, check, {**self.defaults, **params}, scope.call_timeout())
                 scope.counted(r, judge=True)
                 if r.ok or not scope.retry_call(r, i):

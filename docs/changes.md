@@ -71,7 +71,8 @@ left, the first of these that's found (or `--coverage FILE`):
 | `coverage.json` | coverage.py: `pytest --cov --cov-report=json`, or `coverage json` |
 | `.coverage` | coverage.py's data file (needs `coverage` installed) |
 | `coverage/coverage-final.json` | Jest or Vitest with `--coverage` (istanbul) |
-| `coverage/lcov.info`, `lcov.info` | lcov, which Go, Rust, Ruby, Java and most others can write |
+| `coverage.out`, `cover.out` | Go: `go test -coverprofile=coverage.out ./...` (each module's path in `go.mod` maps it to the repository) |
+| `coverage/lcov.info`, `lcov.info` | lcov, which Rust, Ruby, Java and most other languages can write |
 
 Lines coverage doesn't count, like comments and blank lines, are left out, and so are test
 files. Unrun lines are grouped by the function they're in. A file no test ran at all is one item,

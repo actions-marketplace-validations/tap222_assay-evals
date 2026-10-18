@@ -19,7 +19,8 @@ flagged one, so it's lines, grouped by the function they're in.
 
 Changed lines come from `git diff` against the merge base. Whether a test ran them comes from the
 coverage the test run left behind: coverage.py (`coverage.json` or `.coverage`), Jest or Vitest
-(`coverage/coverage-final.json`), or lcov (`lcov.info`, which most languages can write). Lines
+(`coverage/coverage-final.json`), Go (`coverage.out` from `go test -coverprofile`), or lcov
+(`lcov.info`, which most other languages can write). Lines
 coverage doesn't count (comments, blank lines) are left out. A changed code file no test loaded
 at all is one item. Each function is ranked by what its unrun lines do: money first, then messages,
 logins, database writes and outside calls, then the rest.
@@ -44,7 +45,7 @@ from assay.weakening import CODE, JS_TEST, PY_TEST
 
 SHOW = 3
 COVERAGE_FILES = ("coverage.json", ".coverage", "coverage/coverage-final.json", "coverage/lcov.info", "lcov.info",
-                  "coverage/coverage.json")
+                  "coverage/coverage.json", "coverage.out", "cover.out")
 
 # What a line does, by the words in it; the first that matches names the risk.
 RISKS = [
@@ -141,6 +142,10 @@ def read_coverage(root: Path, path: Path) -> Dict[str, FileCoverage]:
     """{repo-relative path: FileCoverage} from any of the formats in the module docstring."""
     if path.name.endswith(".info"):
         return _lcov(root, path.read_text(encoding="utf-8", errors="replace"))
+    if path.suffix in (".out", ".txt", ".cov", ".profile") or path.name.endswith("cover.out"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if text.startswith("mode:"):
+            return _go(root, text)
     if path.suffix == ".json":
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data.get("files"), dict):  # coverage.py's JSON report
@@ -201,6 +206,48 @@ def _istanbul(root: Path, data: dict) -> Dict[str, FileCoverage]:
             if loc.get("start"):
                 cov.functions.append((loc["start"]["line"], loc["end"]["line"], fn.get("name") or "(anonymous)"))
         out[rel] = cov
+    return out
+
+
+def _go_modules(root: Path) -> List[Tuple[str, str]]:
+    """[(module path, its directory in the repository)] from every go.mod, the longest module first."""
+    out = []
+    listed = (_git(root, "ls-files", "--cached", "--others", "--exclude-standard", "*go.mod") or "").splitlines()
+    for mod in listed or (["go.mod"] if (root / "go.mod").exists() else []):
+        try:
+            m = re.search(r"^module\s+(\S+)", (root / mod).read_text(encoding="utf-8", errors="replace"), re.M)
+        except OSError:
+            continue
+        if m:
+            out.append((m.group(1).strip('"'), _dir(mod)))
+    return sorted(out, key=lambda x: -len(x[0]))
+
+
+def _go(root: Path, text: str) -> Dict[str, FileCoverage]:
+    """Go's own profile (`go test -coverprofile=coverage.out`): "pkg/file.go:12.2,15.3 4 1" per block,
+    named by import path. The module path in go.mod turns it into a path in the repository."""
+    modules = _go_modules(root)
+    out: Dict[str, FileCoverage] = {}
+    for line in text.splitlines()[1:]:
+        m = re.match(r"^(.+):(\d+)\.\d+,(\d+)\.\d+ \d+ (\d+)$", line.strip())
+        if not m:
+            continue
+        name, start, end, count = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        rel = None
+        for module, d in modules:
+            if name == module or name.startswith(module + "/"):
+                rest = name[len(module):].lstrip("/")
+                rel = f"{d}/{rest}" if d else rest
+                break
+        if rel is None and (Path(name).is_absolute() or (root / name).exists()):
+            rel = _rel(root, name)
+        if not rel:
+            continue  # another module's package: a dependency, not this repository
+        cov = out.setdefault(rel, FileCoverage())
+        for n in range(start, end + 1):
+            cov.measured.add(n)
+            if count > 0:
+                cov.ran.add(n)
     return out
 
 
