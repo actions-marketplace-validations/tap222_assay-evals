@@ -439,6 +439,19 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   case expects that wasn't searched, and an answer that went on as if it had the evidence.
   `handles_failure()` covers tools; retrieval needs the same, and `faults()` should be able to
   break a retriever too.
+- **Conditions dropped, and questions half answered (RAG):** faithfulness counts a claim as
+  supported when its quote is in a fragment word for word. "Deployments are permitted" quotes the
+  source exactly, though the source says "only after approval", or says it in the next sentence. And
+  nothing checks that every part of a question was answered. It should:
+  - **Keep the conditions:** the evidence check reads the sentences around a quote, not only the
+    quote. A claim whose source limits it (only, unless, except, provided, after) and that leaves the
+    limit out fails as a dropped condition, and so does one an exception in another document limits.
+    Both kinds come with built-in cases (a condition in the same sentence, in the next one, in
+    another document), so the check is tested on what it's meant to catch.
+  - **Answer each part:** a question is split into the parts a complete answer has to establish.
+    Each is backed by a passage or stated as missing, and a part with no passage never counts as
+    answered. When the missing part is the one the verdict rests on (yes or no, compliant, on
+    time), an answer that gives the verdict anyway fails.
 - **Saying "the sources don't say":** a RAG answer to a question its documents don't answer
   should say so, not fill the gap with something plausible. Faithfulness flags a fabricated
   claim, but nothing marks a case as unanswerable and fails an answer that answers it anyway. A
