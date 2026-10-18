@@ -226,6 +226,19 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     an approval that doesn't match what then ran (approved a $40 refund, $400 went out), and
     approved runs that broke a security rule anyway. In tests, a case where the person says no
     checks the agent stops. The number for a team: the share of approvals that were real reviews.
+- **Evidence diffs: the same answer, from different evidence.** Two runs can both say "approved"
+  while the new one read an older policy, or the wrong customer's record. Each retrieved fragment
+  is recorded (id, source, score, whether it went into the prompt) and each tool call with its
+  result, but the diff compares the flow and the counts, not the evidence. It should say, per
+  case, which documents and records an answer rested on, and what changed against the baseline:
+  evidence dropped, added or swapped, a record of another entity. A changed basis under an
+  unchanged answer is a finding, not a pass. Fragments take a version and a date, so evidence that
+  was superseded shows as such. This is also the provenance for a decision: which policy version
+  and which records supported it.
+- **Retrieval that failed quietly:** a retrieval that errored or came back empty, or a source the
+  case expects that wasn't searched, and an answer that went on as if it had the evidence.
+  `handles_failure()` covers tools; retrieval needs the same, and `faults()` should be able to
+  break a retriever too.
 - **Saying "the sources don't say":** a RAG answer to a question its documents don't answer
   should say so, not fill the gap with something plausible. Faithfulness flags a fabricated
   claim, but nothing marks a case as unanswerable and fails an answer that answers it anyway. A
