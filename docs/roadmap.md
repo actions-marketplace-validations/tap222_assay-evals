@@ -293,6 +293,22 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     an approval that doesn't match what then ran (approved a $40 refund, $400 went out), and
     approved runs that broke a security rule anyway. In tests, a case where the person says no
     checks the agent stops. The number for a team: the share of approvals that were real reviews.
+- **Handoffs between agents: advice or a transfer:** one agent asks another either for a second
+  opinion or to take over the next task. These are different promises, and a run records only
+  that a sub-agent ran (`parent_run_id`), not which was asked or what it was allowed to do. A
+  handoff should say which it is, and tests should check that each kept its promise:
+  - **Advice:** the agent asked for an opinion only reads. A write, a message sent or any other
+    action with an effect, in its run, fails the case, and its findings come back to the agent
+    that asked.
+  - **Take over:** the receiving agent says whether it accepted, and the task has one owner after:
+    the agent that handed it off doesn't keep acting on it, and a task handed off and never
+    accepted or finished is flagged, not lost.
+  - **No permission by message:** a request from another agent grants nothing a person didn't.
+    The receiving agent's actions are held to the scope and approvals the person gave the first
+    agent, and an approval doesn't carry over to a task it wasn't given for.
+  - **What was handed over:** the facts the task needs (the customer, the constraint, the deadline)
+    are in what the first agent passed on, so a handoff that drops one is a finding, not a guess.
+  The diff shows a run with its sub-agents as one tree, so a change in who did what is visible.
 - **Evidence diffs: the same answer, from different evidence.** Two runs can both say "approved"
   while the new one read an older policy, or the wrong customer's record. Each retrieved fragment
   is recorded (id, source, score, whether it went into the prompt) and each tool call with its
