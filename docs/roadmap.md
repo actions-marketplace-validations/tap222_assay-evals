@@ -250,6 +250,19 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     protected action didn't run anyway.
   - **Probes:** cases that ask, or inject an instruction, for an out-of-scope action, so the
     boundary is tested on every pull request rather than assumed.
+  - **Injected instructions that change a value, not the tool:** the injection check reads tool
+    and resource results and catches a call the injected text named, a broken contract, or a call
+    the case didn't expect. It misses two things. Retrieved documents aren't read, though a planted
+    document is the usual way in. And an expected call with a planted value passes: the right
+    `send_email`, to the attacker's address. Each argument should carry where its value came from
+    (the user, a trusted tool, or text the agent read), and a value that came only from untrusted
+    text and goes to an outside destination (an address, a URL, an account, an amount) is flagged.
+  - **Testing the gate itself:** teams put a policy gate in front of tool calls (allow, block, needs
+    approval). Keeping its policy right as it changes is the hard part: too strict and normal work
+    stops, too loose and attacks pass. Recording each gate decision with its reason and policy
+    version lets cases check it: attack cases must be blocked, normal ones allowed. The report
+    gives the share of normal calls blocked and attacks let through, per policy version, and what a
+    policy change moved.
   - **Security flags on what agents access and run, in production:** people now approve almost
     everything an agent asks, so a click can't be the safeguard. Assay already sees each tool
     call, its arguments and the HTTP requests a run makes. It should flag the security-relevant
@@ -300,7 +313,8 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     - **Keep a baseline per agent:** the tools, hosts, tables and kinds of records it normally
       reaches, learned from its runs. The first time it reaches something new (a new host,
       another customer's records, a write where it only read), that's an alert at once, not after
-      a rate moves. Drift is measured against the agent's own history, so no rules come first.
+      a rate moves. Volume counts too: an agent allowed to read the CRM that reads a thousand
+      customers for a one-customer task is draining it one permitted query at a time. Drift is measured against the agent's own history, so no rules come first.
     - **Access held but not used:** the tools and scopes an agent is given against the ones it used
       in the last 30 days, so access can be trimmed to what it does. An agent with no runs for a
       while that still holds access, or whose owner no longer signs in to Assay, is listed for
