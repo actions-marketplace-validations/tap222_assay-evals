@@ -117,13 +117,21 @@ User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
 - The likely cause of each change: the file, commit, package or config next to it, or "nothing
   on your side changed" when an outside service did.
 - Changed lines that no test ran, grouped by function and ranked by risk: money, messages,
-  logins, database writes and outside calls first.
+  logins, database writes and outside calls first. A changed helper takes the risk of what calls it: an untested
+  change to `format_amount` used only by `refund()` ranks with money, not with the rest. The
+  callers come from the code itself (the parser, or the language's own tooling), never a model.
 - Deploy and dependency changes no CI job checked: a requirements, lock or ignore file, a
   workflow or a version pin changed, and nothing in the pull request built, installed or
   deployed from it. In P0 these were 4 of 9 bugs, which coverage can't see.
 - Flaky or real for every test, with the existing repeat statistics.
 - Mark a change intended once.
-- The same report as the PR comment, and as JSON a coding agent can act on.
+- The same report as the PR comment, and as JSON a coding agent can act on. Also as an MCP server,
+  so Claude Code, Cursor or any other agent can ask mid-session what its change did, and fix it
+  before a pull request exists.
+- Fragile code ranked higher: lines and functions that later fixes kept changing, from the
+  repository's own history (a fix commit's blame, as the P0 replay did). An untested change in a
+  function fixed four times this quarter outranks one in code nobody has touched in a year. No
+  model is involved, and the history is read once and kept.
 - Failure paths no test ran: changed lines in an error handler, a retry, a fallback, a timeout or
   an empty-result branch, listed as their own kind ("failure handling") and ranked just after money
   and the rest. Tests usually prove the happy path; a pull request where only the happy path ran is
@@ -259,6 +267,19 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     protected action didn't run anyway.
   - **Probes:** cases that ask, or inject an instruction, for an out-of-scope action, so the
     boundary is tested on every pull request rather than assumed.
+  - **Injected instructions that change a value, not the tool:** the injection check reads tool
+    and resource results and catches a call the injected text named, a broken contract, or a call
+    the case didn't expect. It misses two things. Retrieved documents aren't read, though a planted
+    document is the usual way in. And an expected call with a planted value passes: the right
+    `send_email`, to the attacker's address. Each argument should carry where its value came from
+    (the user, a trusted tool, or text the agent read), and a value that came only from untrusted
+    text and goes to an outside destination (an address, a URL, an account, an amount) is flagged.
+  - **Testing the gate itself:** teams put a policy gate in front of tool calls (allow, block, needs
+    approval). Keeping its policy right as it changes is the hard part: too strict and normal work
+    stops, too loose and attacks pass. Recording each gate decision with its reason and policy
+    version lets cases check it: attack cases must be blocked, normal ones allowed. The report
+    gives the share of normal calls blocked and attacks let through, per policy version, and what a
+    policy change moved.
   - **Security flags on what agents access and run, in production:** people now approve almost
     everything an agent asks, so a click can't be the safeguard. Assay already sees each tool
     call, its arguments and the HTTP requests a run makes. It should flag the security-relevant
@@ -309,13 +330,21 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     - **Keep a baseline per agent:** the tools, hosts, tables and kinds of records it normally
       reaches, learned from its runs. The first time it reaches something new (a new host,
       another customer's records, a write where it only read), that's an alert at once, not after
-      a rate moves. Drift is measured against the agent's own history, so no rules come first.
+      a rate moves. Volume counts too: an agent allowed to read the CRM that reads a thousand
+      customers for a one-customer task is draining it one permitted query at a time. Drift is measured against the agent's own history, so no rules come first.
     - **Access held but not used:** the tools and scopes an agent is given against the ones it used
       in the last 30 days, so access can be trimmed to what it does. An agent with no runs for a
       while that still holds access, or whose owner no longer signs in to Assay, is listed for
       review.
     The number for a team: the share of agent actions with a known owner and an identity of their
     own, and how many agents hold access they didn't use.
+  - **"What did this agent do, and who approved it?" in a minute:** each run is recorded, but
+    finding every action of one kind means opening runs one by one. Assay's own audit log covers
+    the people using Assay, not what agents did. It should answer by action: every refund over $100
+    this month, with the agent, who asked, who approved and how fast, the rule or contract that
+    allowed it, the evidence it rested on, and what happened after. The same view exports for
+    security, legal or finance as CSV and PDF, signed so an edit shows. The number for a team:
+    the time to answer that question, and the share of actions with a full record.
   - **Approvals that are rubber stamps:** people approve almost everything an agent asks, so an
     approval step can look safe while checking nothing. `run.approval()` records the action, the
     decision and who, but not what the person was shown or how long they took. It should record
@@ -324,6 +353,22 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     an approval that doesn't match what then ran (approved a $40 refund, $400 went out), and
     approved runs that broke a security rule anyway. In tests, a case where the person says no
     checks the agent stops. The number for a team: the share of approvals that were real reviews.
+- **Voice and phone agents: the call, not just the booking:** most phone agents book the slot
+  when the caller plays along. They differ on what happens around it: hold, silence, being
+  interrupted, a caller who changes an answer. Simulated users (`simulate()`) test a conversation,
+  but only as text taking turns. They should be able to act like callers:
+  - **Caller moves:** go silent or put the agent on hold for a while, interrupt it mid-sentence,
+    correct an earlier answer ("actually, Thursday"), give two answers at once, ask for a person.
+  - **Checks on the outcome, not the transcript:** the booking holds the final, corrected
+    details, not the first ones. The agent read the time back. "Next Tuesday" resolved to the
+    right date against a fixed clock. Nothing from its instructions was spoken that the caller
+    shouldn't hear ("3:30 Pacific"). A handoff to a person carried the summary.
+  - **Timing, from the platform's own call record:** time to first response, gaps after a hold,
+    how often it talked over the caller, read from the transcript timings a voice platform gives
+    (Retell, Vapi and others send them), so the same cases compare two agents or two versions of
+    one.
+  Each failed call is a case that can be run again, and the diff says what changed between
+  versions: "stopped reading the time back", "now answers during hold".
 - **Handoffs between agents: advice or a transfer:** one agent asks another either for a second
   opinion or to take over the next task. These are different promises, and a run records only
   that a sub-agent ran (`parent_run_id`), not which was asked or what it was allowed to do. A
@@ -413,6 +458,19 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 - **The same request sent twice:** `faults(tool="lost")` and `expect(run).at_most_once()` catch an
   agent that pays again after a lost reply. A client that sends the whole request again (a
   double click, a webhook delivered twice) isn't simulated yet.
+- **Half-finished work: a failure or a crash in the middle:** an agent books the slot, charges
+  the card, then fails to send the confirmation, or its process dies after the charge. The first
+  steps took effect and nothing undid them. `faults()` fails one call, and `at_most_once()` catches
+  a repeat, but nothing checks what a failed or interrupted run leaves behind. It should:
+  - **Fail a later step and check the earlier ones were undone:** a case says which action
+    compensates which (a refund for a charge, a release for a hold), and a run that failed after an
+    effect either compensated it or says plainly what's still in place. A charge left standing for
+    a booking that failed is a finding.
+  - **Stop the run after any step and start it again:** `faults()` gets a crash point, and the case
+    is rerun from the agent's saved state. The resumed run doesn't repeat what took effect, and
+    finishes or escalates instead of leaving a job half done.
+  - **Count it in production:** runs that ended after an effect without completing or compensating
+    it, per agent, so orphaned work is found before a customer finds it.
 - **One release decision across both gates:** the slice gate (`/v1/gates/evaluate`) and the
   stability gate (`/v1/evals/runs/{run}/stability`) answer different questions and are called
   separately. A release should get one decision table: every gate as a row (quality per slice,
