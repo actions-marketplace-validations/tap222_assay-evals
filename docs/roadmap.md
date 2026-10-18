@@ -449,6 +449,20 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 - **The same request sent twice:** `faults(tool="lost")` and `expect(run).at_most_once()` catch an
   agent that pays again after a lost reply. A client that sends the whole request again (a
   double click, a webhook delivered twice) isn't simulated yet.
+- **Done, proven from outside the agent:** browser and tool agents report success because the
+  page changed, while the form was silently rejected or the session had expired. A success check
+  today (`success=` in `simulate()`, or `run.state_of()`) reads what the run recorded, which is the
+  agent's own view agreeing with itself. It should:
+  - **Read back from somewhere the agent didn't write:** a case names the expected end state and a
+    check that reads it from the system of record (an API, the database, the admin view, the inbox),
+    by the id the action returned. It compares the fields that matter, not just that a row exists,
+    waits for a final status rather than "pending", and expects it exactly once.
+  - **Allow "unverified":** when the read-back can't decide, the run ends unverified, a status of
+    its own, never counted as done. An agent that claims done there is flagged, and so is one that
+    retries after an unknown outcome instead of checking first.
+  - **Test the check itself:** each success check is run once on a deliberately failed case:
+    `faults()` makes the action report success without doing anything. A check that still passes
+    checks nothing, and is flagged like a weakened test.
 - **Half-finished work: a failure or a crash in the middle:** an agent books the slot, charges
   the card, then fails to send the confirmation, or its process dies after the charge. The first
   steps took effect and nothing undid them. `faults()` fails one call, and `at_most_once()` catches
