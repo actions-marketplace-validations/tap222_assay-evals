@@ -476,6 +476,11 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   - **Allow "unverified":** when the read-back can't decide, the run ends unverified, a status of
     its own, never counted as done. An agent that claims done there is flagged, and so is one that
     retries after an unknown outcome instead of checking first.
+  - **Per call, not only at the end:** a tool reports that it ran, not that it worked. An `UPDATE`
+    that matched no rows returns the same "success" as one that changed the row. Database writes
+    Assay records (P1) should keep how many rows each changed, a count and never values. A write the
+    tool called a success that changed nothing is flagged, and so is a file write that left the file
+    as it was. A step with no effect to show for its success is "unknown", not done.
   - **Test the check itself:** each success check is run once on a deliberately failed case:
     `faults()` makes the action report success without doing anything. A check that still passes
     checks nothing, and is flagged like a weakened test.
