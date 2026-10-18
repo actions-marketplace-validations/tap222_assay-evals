@@ -8,6 +8,7 @@ const { test, beforeEach } = require("node:test");
 const assay = require("..");
 const { summarize } = require("../sql");
 const { recordPg } = require("../pg");
+const { recordHttp, route } = require("../http");
 
 let file;
 beforeEach(() => {
@@ -22,7 +23,8 @@ test("a write is its operation, table, the columns it sets and the ones it leave
   assert.deepEqual(summarize('INSERT INTO "public"."bookings"("id", "amount", "locationId") VALUES (DEFAULT, $1, $2) RETURNING "id"', [500, null]),
                    { op: "INSERT", table: "bookings", set: ["id", "amount", "locationId"], empty: ["id", "locationId"] });
   assert.deepEqual(summarize("insert into clinics (name, timezone, active) values ($1, 'UTC', true)", ["Salon"]),
-                   { op: "INSERT", table: "clinics", set: ["name", "timezone", "active"], empty: [] });
+                   { op: "INSERT", table: "clinics", set: ["name", "timezone", "active"], empty: [],
+                     placeholder: { timezone: "UTC" } });
   assert.deepEqual(summarize('UPDATE "bookings" SET "status" = $1, "checkedInAt" = NULL WHERE "id" = $2', ["arrived", 7]),
                    { op: "UPDATE", table: "bookings", set: ["status", "checkedInAt"], empty: ["checkedInAt"] });
   assert.deepEqual(summarize('DELETE FROM "queue_entries" WHERE "id" = $1', [1]),
@@ -102,4 +104,107 @@ test("queries outside a plain test, or inside an assayCase, aren't recorded", as
     assay.setPlainRun(null);
   }
   assert.deepEqual(steps().filter((x) => x.name.startsWith("DB ")), []);
+});
+
+test("a column set to a stand-in value is a placeholder; only the word is kept", () => {
+  assert.deepEqual(summarize('INSERT INTO "staff"("name", "role", "bio") VALUES ($1, $2, \'N/A\')', ["Unknown", "admin"]).placeholder,
+                   { name: "Unknown", bio: "N/A" });
+  assert.deepEqual(summarize("UPDATE clinics SET time_zone = 'Etc/UTC', name = $1", ["UTC"]).placeholder,
+                   { time_zone: "Etc/UTC" }); // UTC is a placeholder only for a timezone
+  assert.equal(summarize("INSERT INTO t (a) VALUES ($1)", ["Salon"]).placeholder, undefined);
+  assert.equal(summarize("INSERT INTO t (a) VALUES ($1)", ["Salon"]).columns, undefined);
+  assert.deepEqual(summarize("INSERT INTO t (a, b, c) VALUES ($1, 'x', DEFAULT)", [5], { values: true }).columns,
+                   [["a", 5], ["b", "x"]]);
+});
+
+test("a value the test sent that no later query used is reported by name, never by value", async () => {
+  const pg = fakePg();
+  recordPg(pg);
+  const client = new pg.Client();
+  const run = new assay.Run("adds a booking", { caseId: "b.test.js::adds", tags: { assay_record: "plain" } });
+  assay.setPlainRun(run);
+  try {
+    assay.sent({ customerId: "c-77", branchId: "branch-9", pin: { lat: 12.97, lng: 77.6 }, password: "hunter22",
+                 note: "window seat", quantity: 1 }, "createBooking");
+    await client.query("SELECT * FROM customers WHERE id = $1", ["c-77"]);
+    await client.query('INSERT INTO "bookings"("customerId", "metadata", "note", "branchId") VALUES ($1, $2, $3, DEFAULT)',
+                       ["c-77", { branchId: "branch-9" }, "window seat"]);
+    assay.sent({ name: "never written" }, "after the last write"); // nothing was written after it
+  } finally {
+    assay.setPlainRun(null);
+  }
+  run.end();
+  const s = steps().find((x) => x.name === "DB unwritten");
+  assert.deepEqual(s.args, { createBooking: { json: { branchId: "bookings.metadata" }, never: ["pin.lat", "pin.lng"] } });
+  const text = fs.readFileSync(file, "utf8");
+  for (const v of ["branch-9", "hunter22", "77.6", "window seat"]) assert.ok(!text.includes(v), v);
+});
+
+test("a test whose sent values all reached a row records nothing more", async () => {
+  const pg = fakePg();
+  recordPg(pg);
+  const client = new pg.Client();
+  const run = new assay.Run("ok", { caseId: "c", tags: { assay_record: "plain" } });
+  assay.setPlainRun(run);
+  try {
+    assay.sent({ amount: "12.50", at: new Date("2026-01-02T03:04:05Z") });
+    await client.query("INSERT INTO pay (amount, at) VALUES ($1, $2)", [12.5, "2026-01-02T03:04:05.000Z"]);
+  } finally {
+    assay.setPlainRun(null);
+  }
+  run.end();
+  assert.equal(steps().find((x) => x.name === "DB unwritten"), undefined);
+});
+
+test("a JSON request to the app in the same process counts as sent; its path keeps no ids", async () => {
+  assert.equal(route("/clinics/42/bookings/3f2b6c1e-8a4d-4b1e-9f0a-1c2d3e4f5a6b?x=1"), "/clinics/:id/bookings/:id");
+  const http = require("node:http");
+  const pg = fakePg();
+  recordPg(pg);
+  assert.equal(recordHttp(), true);
+  const client = new pg.Client();
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", async () => {
+      const b = JSON.parse(body);
+      await client.query("INSERT INTO bookings (slot) VALUES ($1)", [b.slot]); // drops b.branchId
+      res.end("{}");
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const run = new assay.Run("api", { caseId: "d", tags: { assay_record: "plain" } });
+  assay.setPlainRun(run);
+  try {
+    await new Promise((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port: server.address().port, method: "POST", path: "/clinics/42/bookings",
+                                 headers: { "content-type": "application/json" } }, (res) => { res.resume(); res.on("end", resolve); });
+      req.on("error", reject);
+      req.end(JSON.stringify({ slot: "09:30", branchId: "branch-9" }));
+    });
+  } finally {
+    assay.setPlainRun(null);
+    server.close();
+  }
+  run.end();
+  assert.deepEqual(steps().find((x) => x.name === "DB unwritten").args, { "POST /clinics/:id/bookings": { never: ["branchId"] } });
+});
+
+test("a write the test makes itself is marked as a fixture; one the app makes isn't", async () => {
+  const pg = fakePg();
+  recordPg(pg);
+  const client = new pg.Client();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "assay-fixture-"));
+  fs.writeFileSync(path.join(dir, "bookings.spec.js"), "module.exports = (c) => c.query('INSERT INTO clinics (name) VALUES ($1)', ['x']);");
+  fs.writeFileSync(path.join(dir, "service.js"), "module.exports = (c) => c.query('INSERT INTO bookings (slot) VALUES ($1)', ['y']);");
+  const run = new assay.Run("f", { caseId: "f", tags: { assay_record: "plain" } });
+  assay.setPlainRun(run);
+  try {
+    await require(path.join(dir, "bookings.spec.js"))(client);
+    await require(path.join(dir, "service.js"))(client);
+  } finally {
+    assay.setPlainRun(null);
+  }
+  run.end();
+  assert.deepEqual(steps().map((x) => [x.name, x.args.fixture]), [["DB INSERT clinics", true], ["DB INSERT bookings", undefined]]);
 });

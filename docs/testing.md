@@ -97,6 +97,15 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
   empty"), a write made twice instead of once, and reads of a table that at least doubled and
   grew by 5 or more ("reads of services: 12 instead of 1"). Writes in a test's own `beforeEach`
   and `afterEach` count as the test's; those in `beforeAll` and `afterAll` aren't recorded.
+- **New writes, checked (Jest):** a write that saves wrong data is usually wrong from the commit
+  that added it, with nothing to diff against. `assay test` lists "New writes to check": a column
+  set to a placeholder ("Unknown", "", a timezone of UTC), money left empty on an INSERT, a
+  reference left empty while its twin is set (`clinic_id` and `clinicId`), and a value the test
+  sent that no query used, or that reached the database only inside a JSON column. Sent values
+  come from JSON requests to the app in the same process, or `assay.sent(input)`; only field names
+  are recorded. At most three lines, one per finding however many tests show it, ranked money,
+  then times, then ids. Writes the test makes itself aren't checked, and the run still passes.
+  [Details](../sdk/js/README.md#new-writes-checked).
 - **Safety rules:** go in `assay.toml` as path contracts, e.g. `never delete_order`, or
   `refund only_after get_order`. Every agent run is checked against them.
 - **PII:** personal data (email, card, IBAN, SSN, phone) in a tool's arguments fails the PII
