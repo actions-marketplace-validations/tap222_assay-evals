@@ -124,6 +124,15 @@ User stories: [US-02](user-stories.md#us-02), [US-11](user-stories.md#us-11).
 - Flaky or real for every test, with the existing repeat statistics.
 - Mark a change intended once.
 - The same report as the PR comment, and as JSON a coding agent can act on.
+- Failure paths no test ran: changed lines in an error handler, a retry, a fallback, a timeout or
+  an empty-result branch, listed as their own kind ("failure handling") and ranked just after money
+  and the rest. Tests usually prove the happy path; a pull request where only the happy path ran is
+  implemented, not ready.
+- The deployed app against what was tested: settings the changed code reads that every test
+  leaves unset (an environment variable, a feature flag), which is how an upload that never
+  uploaded passed every test in the P0 replay. After a deploy, a few recorded cases run against the
+  deployed app, and what differs from the test run is listed: a status, a write that didn't happen,
+  an outside call that went elsewhere.
 - Mechanical edits apart from behavior changes: a rename, a moved function or a reformat that
   leaves the parsed code the same is grouped as mechanical and left out of untested lines, so the
   short list of behavior changes is what gets read. A behavior change hidden in a mechanical
