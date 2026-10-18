@@ -274,6 +274,11 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     `send_email`, to the attacker's address. Each argument should carry where its value came from
     (the user, a trusted tool, or text the agent read), and a value that came only from untrusted
     text and goes to an outside destination (an address, a URL, an account, an amount) is flagged.
+    The check is also easy to slip past: one zero-width space or full-width letter inside "ignore all
+    previous instructions" hides it. Text should be normalized first (Unicode compatibility forms,
+    zero-width and control characters removed, look-alike letters folded). And an answer that embeds
+    a markdown image or link whose address carries data (`![x](https://host/?q=...)`) leaks it the
+    moment a chat window renders it, so that's flagged as data leaving.
   - **Testing the gate itself:** teams put a policy gate in front of tool calls (allow, block, needs
     approval). Keeping its policy right as it changes is the hard part: too strict and normal work
     stops, too loose and attacks pass. Recording each gate decision with its reason and policy
