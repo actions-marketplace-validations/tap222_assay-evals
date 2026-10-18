@@ -424,6 +424,16 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   - **What was handed over:** the facts the task needs (the customer, the constraint, the deadline)
     are in what the first agent passed on, so a handoff that drops one is a finding, not a guess.
   The diff shows a run with its sub-agents as one tree, so a change in who did what is visible.
+- **Replay recorded runs, decision by decision:** before switching a model, a prompt or a router
+  that picks tools, a team wants to know what it would have done on real traffic. Recorded runs
+  hold each step's input and each tool's result. Replaying one means giving the new setup the same
+  history up to a step and comparing its next decision (the tool, its arguments, or stopping) with
+  the recorded one. Tools aren't run again: the recorded results are fed back, so nothing is
+  charged, sent or deleted. The report counts where decisions diverge, grouped by kind (another
+  tool, other arguments, stopped early, went further), with each divergence scored against the
+  run's outcome and the case's checks: better, worse or unclear. A divergence on a tool that writes
+  or spends weighs more than one on a read. Runs whose tool definitions changed since they were
+  recorded are set apart, since their recorded results may no longer hold.
 - **Evidence diffs: the same answer, from different evidence.** Two runs can both say "approved"
   while the new one read an older policy, or the wrong customer's record. Each retrieved fragment
   is recorded (id, source, score, whether it went into the prompt) and each tool call with its
