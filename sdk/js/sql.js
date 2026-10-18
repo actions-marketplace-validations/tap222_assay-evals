@@ -8,10 +8,18 @@
  *   // { op: "INSERT", table: "bookings", set: ["amount"], empty: ["id", "amount"] }
  *
  * Empty: DEFAULT, NULL, or a parameter bound to null. A column the statement doesn't name isn't
- * known here: that needs the table's schema. Not a SQL parser: anything it can't read is null.
+ * known here: that needs the table's schema. Placeholder: a column set to a stand-in value from a
+ * short list ("Unknown", "N/A", "", "undefined"), or a timezone column set to UTC; only that word is
+ * kept. With { values: true }, `columns` also lists [column, value] pairs for checking in memory
+ * (pg.js); they're never recorded. Not a SQL parser: anything it can't read is null.
  */
 
 const MAX_COLUMNS = 100;
+// Values that stand in for a missing one: a write that saves them is usually a fallback that ran.
+const PLACEHOLDERS = new Set(["", "unknown", "n/a", "na", "none", "null", "undefined", "nan", "tbd", "todo",
+                              "placeholder", "[object object]", "-", "?"]);
+const ZONE = /^(time_?zone|tz)$|_(time_?zone|tz)$|[a-z](TimeZone|Timezone|Tz)$/i;
+const UTC = new Set(["utc", "etc/utc", "gmt", "etc/gmt", "z", "+00:00"]);
 const OPS = { insert: "INSERT", update: "UPDATE", delete: "DELETE", select: "SELECT" };
 
 /** sql with comments, string literals and quoted names blanked to spaces, so keywords can be
@@ -104,11 +112,44 @@ function isEmpty(value, values) {
   return false;
 }
 
+/** What a value expression is, when it's a literal or a bound parameter: { value }; otherwise null. */
+function valueOf(expr, values) {
+  const v = expr.trim();
+  const lit = /^'((?:[^']|'')*)'(\s*::.*)?$/.exec(v);
+  if (lit) return { value: lit[1].replace(/''/g, "'") };
+  const p = /^\$(\d+)(\s*::.*)?$/.exec(v);
+  if (p && Array.isArray(values) && Number(p[1]) - 1 < values.length) return { value: values[Number(p[1]) - 1] };
+  return null;
+}
+
+/** The placeholder a column was set to, as written, or undefined. */
+function placeholderOf(column, value) {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim().toLowerCase();
+  if (PLACEHOLDERS.has(v) || (ZONE.test(column) && UTC.has(v))) return value.trim();
+  return undefined;
+}
+
+/** Adds placeholder (and, asked for, columns) to a summary from its [column, expression] pairs. */
+function finish(summary, pairs, values, keep) {
+  const placeholder = {}, columns = [];
+  for (const [column, expr] of pairs) {
+    const known = expr === undefined ? null : valueOf(expr, values);
+    if (!known) continue;
+    const word = placeholderOf(column, known.value);
+    if (word !== undefined && !(column in placeholder) && Object.keys(placeholder).length < MAX_COLUMNS) placeholder[column] = word;
+    if (keep && known.value !== null && known.value !== undefined) columns.push([column, known.value]);
+  }
+  if (Object.keys(placeholder).length) summary.placeholder = placeholder;
+  if (keep) summary.columns = columns;
+  return summary;
+}
+
 function cap(list) {
   return list.slice(0, MAX_COLUMNS);
 }
 
-function insert(sql, b, top, at, values) {
+function insert(sql, b, top, at, values, keep) {
   const t = tableAt(sql, b, at);
   if (!t) return null;
   const open = b.indexOf("(", t.end);
@@ -121,7 +162,7 @@ function insert(sql, b, top, at, values) {
   const columns = split(sql, b, open + 1, close).map(name);
   if (valuesAt < 0) return { op: "INSERT", table: t.table, set: cap(columns), empty: [] }; // INSERT ... SELECT
   // Each row's values; a column is empty when every row leaves it empty.
-  const empty = new Set(columns);
+  const empty = new Set(columns), pairs = [];
   let from = t.end + valuesAt + "values".length, rows = 0;
   for (;;) {
     const m = /^\s*,?\s*\(/.exec(b.slice(from));
@@ -129,15 +170,19 @@ function insert(sql, b, top, at, values) {
     const rowOpen = from + m[0].length - 1, rowClose = closing(b, rowOpen);
     if (rowClose < 0) break;
     const row = split(sql, b, rowOpen + 1, rowClose);
-    columns.forEach((c, i) => { if (row[i] === undefined || !isEmpty(row[i], values)) empty.delete(c); });
+    columns.forEach((c, i) => {
+      if (row[i] === undefined || !isEmpty(row[i], values)) empty.delete(c);
+      pairs.push([c, row[i]]);
+    });
     rows++;
     from = rowClose + 1;
   }
   if (!rows) empty.clear();
-  return { op: "INSERT", table: t.table, set: cap(columns), empty: cap(columns.filter((c) => empty.has(c))) };
+  return finish({ op: "INSERT", table: t.table, set: cap(columns), empty: cap(columns.filter((c) => empty.has(c))) },
+                pairs, values, keep);
 }
 
-function update(sql, b, top, at, values) {
+function update(sql, b, top, at, values, keep) {
   const t = tableAt(sql, b, at);
   if (!t) return null;
   const setAt = top.slice(t.end).search(/\bset\b/i);
@@ -145,20 +190,21 @@ function update(sql, b, top, at, values) {
   const start = t.end + setAt + 3;
   const stop = top.slice(start).search(/\b(where|from|returning)\b/i);
   const end = stop < 0 ? sql.length : start + stop;
-  const set = [], empty = [];
+  const set = [], empty = [], pairs = [];
   for (const pair of split(sql, b, start, end)) {
     const eq = blank(pair).indexOf("=");
     if (eq < 0 || pair.trim().startsWith("(")) continue; // (a, b) = (...): not worth reading
     const column = name(pair.slice(0, eq));
     set.push(column);
     if (isEmpty(pair.slice(eq + 1), values)) empty.push(column);
+    pairs.push([column, pair.slice(eq + 1)]);
   }
-  return { op: "UPDATE", table: t.table, set: cap(set), empty: cap(empty) };
+  return finish({ op: "UPDATE", table: t.table, set: cap(set), empty: cap(empty) }, pairs, values, keep);
 }
 
-/** { op, table, set, empty } for an INSERT, UPDATE, DELETE or SELECT; null for anything else
- * (BEGIN, SET, a SELECT with no table) or what can't be read. */
-function summarize(sql, values) {
+/** { op, table, set, empty, placeholder? } for an INSERT, UPDATE, DELETE or SELECT; null for anything
+ * else (BEGIN, SET, a SELECT with no table) or what can't be read. */
+function summarize(sql, values, { values: keep = false } = {}) {
   if (typeof sql !== "string" || !sql.trim()) return null;
   try {
     sql = blank(sql, false);
@@ -169,8 +215,8 @@ function summarize(sql, values) {
     if (!m) return null;
     const op = OPS[m[1].split(/\s/)[0].toLowerCase()];
     const at = m.index + m[0].length;
-    if (op === "INSERT") return insert(sql, b, top, at, values);
-    if (op === "UPDATE") return update(sql, b, top, at, values);
+    if (op === "INSERT") return insert(sql, b, top, at, values, keep);
+    if (op === "UPDATE") return update(sql, b, top, at, values, keep);
     if (op === "DELETE") {
       const t = tableAt(sql, b, at);
       return t && { op, table: t.table, set: [], empty: [] };

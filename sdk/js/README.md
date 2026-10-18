@@ -132,6 +132,44 @@ parameter bound to null). Values are never recorded, and reads are only counted 
    reads of services: 12 instead of 1
 ```
 
+### New writes, checked
+
+A write that saves wrong data is usually wrong from the commit that added it, so there's nothing
+to diff it against. `assay test` checks new writes on their own, and lists what looks wrong under
+"New writes to check" (at most three lines, one per finding however many tests show it; the
+run still passes):
+
+```
+New writes to check (3):
+  INSERT bookings leaves amountDue empty (books a slot)
+  INSERT clinics sets timezone to "UTC" (creates a clinic, and 2 more tests)
+  createBooking sent branchId; it reached only bookings.metadata (inside JSON), no column of its own (books a slot)
+```
+
+- **Placeholders:** a column set to a stand-in ("Unknown", "N/A", "", "undefined"), or a
+  timezone column set to UTC. Only the word from that list is recorded.
+- **Money left empty:** an INSERT that leaves an amount, price, fee or balance column empty.
+- **A reference left empty next to its twin:** `clinic_id` empty while `clinicId` is set, so a
+  relation reads the empty one.
+- **A value the test sent that never reached the database:** the JSON body of a request to the
+  app in the same process (supertest) is read in memory. For a test that calls a service
+  directly, add `assay.sent(input)`. A field whose value no later query used is reported by name,
+  never by value, and so is one that reached the database only inside a JSON column.
+
+Ranked money first, then times and timezones, then ids. Writes the test makes itself (a raw
+INSERT in the spec file, a fixture in `beforeEach`) aren't checked. A finding its baseline had
+too isn't shown again.
+
+```js
+const { sent } = require("assay-evals");
+
+it("creates a location", async () => {
+  const input = { name: "Main", pin: { lat: 12.97, lng: 77.6 } };
+  sent(input);                       // checked against what the queries used
+  await service.createLocation(clinicId, input);
+});
+```
+
 Plain `npx jest` records nothing. These tests aren't held to the agent checks (loops, tool
 errors, PII): only their own asserts judge them. Writes in a test's own `beforeEach` and
 `afterEach` count as the test's; those in `beforeAll` and `afterAll` aren't recorded. Writes made

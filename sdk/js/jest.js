@@ -6,7 +6,8 @@
  *   setupFilesAfterEnv: ["assay-evals/jest"]
  *
  * Under `assay test` (ASSAY_PATH set), each test is a case named "<file>::<test name>" with its pass
- * or fail, its time, and what it wrote to Postgres through pg (pg.js). Plain `npx jest` records
+ * or fail, its time, and what it wrote to Postgres through pg (pg.js), with any value of a JSON request
+ * to the app (http.js) or of assay.sent() that no query used (writes.js). Plain `npx jest` records
  * nothing. Such a test is tagged assay_record = "plain", as with pytest --assay-all: Assay's agent
  * checks are for agents, so only its own asserts and whether it finished judge it.
  *
@@ -15,6 +16,7 @@
  */
 const { Run, caseIdOf, currentTest, setPlainRun } = require("./index");
 const { recordPg } = require("./pg");
+const { recordHttp } = require("./http");
 
 const PLAIN = { assay_record: "plain" };
 
@@ -38,6 +40,7 @@ let warned = false;
 
 if (process.env.ASSAY_PATH && typeof beforeEach === "function") {
   recordPg();
+  recordHttp();
   let run = null;
   beforeEach(() => {
     const t = currentTest();

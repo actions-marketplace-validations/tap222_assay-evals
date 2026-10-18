@@ -91,8 +91,18 @@ weak, and recording more of what the code did is what the signal needs. First st
 test with its outbound HTTP calls (`--assay-all`, opt-in), who ran it, and the weakened tests a
 run found, in the CLI, the PR comment and the dashboard. Second step: every Jest test with what it
 writes to Postgres through `pg` (`assay-evals/jest`, opt-in), as table, operation and the columns
-set or left empty, compared with its last passing run. Next: checking new writes for a column
-left at its default, which the booking-app replay showed matters more than the diff.
+set or left empty, compared with its last passing run. Third step: new writes checked on their own,
+which the booking-app replay showed matters more than the diff. A placeholder saved, money left
+empty, a reference left empty next to its twin, and a value the test sent (a JSON request, or
+`assay.sent()`) that never reached a row are listed under "New writes to check". Writes the test
+makes itself are left out.
+
+Met on the booking app (October 2026): its whole Jest suite, 1,671 tests, recorded with no test
+changes, about 5% slower (25.9 s to 27.2 s). The first version of the check listed 157 findings.
+After grouping a finding across tests, leaving out the tests' own fixtures, and dropping optional
+dates and references, it lists 5. Two are real bugs: a location's `clinic_id` never set, so its
+relation is always empty, and queue entries saved with an empty-string user. The other three are
+empty strings saved where null was meant. The guard lists 4a4d5a0 and not #32. Next: P2.
 
 Done when: a real app's whole suite is recorded with no test changes, recording adds under 10%
 to test time, and the guard flags the rewritten expected value found in P0 (4a4d5a0) and not
