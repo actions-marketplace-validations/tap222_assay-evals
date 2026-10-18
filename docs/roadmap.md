@@ -464,6 +464,14 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     client, or a reviewer who approves the change. Rerun after a fix, it shows what moved.
   It works from saved results, so a team can compare runs it already has without sharing its
   index or rerunning anything.
+- **Agent memory across sessions:** agents that remember users (Mem0, Zep, a vector store, a graph)
+  fail where a single conversation can't show it. A user moves house in one session, and the next
+  still ships to the old address. A user asks to be forgotten, and the fact comes back a week later.
+  One user's detail turns up in another user's answer. `simulate()` runs one conversation as one
+  run, so none of this is tested. A case should be able to span sessions (tell, update, delete,
+  then ask) and check that the latest value is used, a deleted fact never comes back in an answer or
+  a tool call, and nothing crosses from one user to another. Switching or upgrading the memory
+  store then shows, case by case, what it now remembers differently.
 - **Outdated and conflicting sources (RAG):** a policy has a 2024 and a 2025 version, both are
   retrieved, and the answer follows the old one. Or two sources disagree and the answer blends
   them. Teams handle it with version metadata, a filter and a prompt rule ("use the latest
