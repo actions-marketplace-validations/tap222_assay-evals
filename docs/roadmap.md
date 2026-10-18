@@ -243,6 +243,23 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     do), grouped so one bad deploy is one alert. Flags a team marks as expected become the
     allowed list; the rest become tests, so the same action is caught in CI before the next
     deploy. The same flags apply to the coding agents that build the app, through their hooks.
+  - **Whose access an agent uses, and when it drifts:** agents often run on the credentials of
+    the person who set them up, keep them across sessions, and have no identity or baseline of
+    their own, so identity and security tools see nothing unusual. Assay sees what each run did,
+    but not whose access it used. It should:
+    - **Record the identity behind each action:** the agent, its owner, the person or system that
+      asked, and the credential each tool call and HTTP request used. A run that acts with a
+      person's credentials on someone else's request, or with no owner on record, is flagged.
+    - **Keep a baseline per agent:** the tools, hosts, tables and kinds of records it normally
+      reaches, learned from its runs. The first time it reaches something new (a new host,
+      another customer's records, a write where it only read), that's an alert at once, not after
+      a rate moves. Drift is measured against the agent's own history, so no rules come first.
+    - **Access held but not used:** the tools and scopes an agent is given against the ones it used
+      in the last 30 days, so access can be trimmed to what it does. An agent with no runs for a
+      while that still holds access, or whose owner no longer signs in to Assay, is listed for
+      review.
+    The number for a team: the share of agent actions with a known owner and an identity of their
+    own, and how many agents hold access they didn't use.
   - **Approvals that are rubber stamps:** people approve almost everything an agent asks, so an
     approval step can look safe while checking nothing. `run.approval()` records the action, the
     decision and who, but not what the person was shown or how long they took. It should record
