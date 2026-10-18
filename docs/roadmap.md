@@ -186,6 +186,13 @@ User stories: [US-01](user-stories.md#us-01), [US-03](user-stories.md#us-03),
   evidence for a rule; they don't create one.
 - Nothing becomes a rule without a yes. A confirmed rule is written to `CLAUDE.md` (or
   `AGENTS.md`) and checked on every pull request; at most one suggestion per report.
+- One copy of the rules, and the version each run used: the same rules often live in several files
+  that drift apart (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules`, a copy in a subfolder or the home
+  directory), and an agent follows whichever it loads, stale or not, with nothing failing. Copies
+  that disagree are listed, with the lines that differ and which one is newer. A rule Assay writes
+  goes to the file the agent actually loads. Each test run records a digest of the instruction files
+  in effect, as it already does for prompt versions, so when a rule is corrected the runs and pull
+  requests made under the old one can be listed.
 - Claim check: when the coding agent says "all tests pass" or "fixed", check it against what
   actually ran. Each run gives a receipt (the command, its exit code, the commit, how many tests
   ran and passed), and a claim without a matching receipt is flagged before anyone reads the diff. This extends the existing claim contracts.
