@@ -266,6 +266,14 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     do), grouped so one bad deploy is one alert. Flags a team marks as expected become the
     allowed list; the rest become tests, so the same action is caught in CI before the next
     deploy. The same flags apply to the coding agents that build the app, through their hooks.
+  - **What an agent could reach, and when that grows:** an agent's risk is everything its tools
+    allow, not only what it's meant to do, and that grows quietly, one integration at a time. Assay
+    records every tool an agent is offered, with its definition, but doesn't say what they reach. It
+    should sort each tool by what it can do (read, write, delete, spend money, send messages, call
+    outside hosts) and over what (this customer's records or any). Each agent gets one map of its
+    reach, next to what it actually used. A pull request that widens it is an item in the change
+    report: "the support agent gains `issue_refund` (spends money, any customer)". It isn't a
+    failure, because the change may be intended, but nobody approves it without seeing it.
   - **Calls that go around the gateway:** an LLM gateway or agent gateway (LiteLLM, Portkey, an
     internal proxy) only governs the calls that reach it. An agent with a provider key and network
     access can call a model, an MCP server or a tool's API directly, and the gateway never sees it.
