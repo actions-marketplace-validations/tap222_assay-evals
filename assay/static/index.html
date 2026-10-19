@@ -60,7 +60,7 @@ h3{font:600 16px var(--display);margin:0}
 .sub{color:var(--ink-2);margin:4px 0 0}
 .ref{font-family:var(--mono);font-size:11px;color:var(--muted)}
 .mono{font-family:var(--mono)}
-.stack{display:grid;gap:18px}
+.stack{display:grid;gap:18px;grid-template-columns:minmax(0,1fr)}  /* the column fits the page: a chart can't size it */
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
 .panel-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px}
 /* status strip */
@@ -85,6 +85,8 @@ h3{font:600 16px var(--display);margin:0}
 .chip{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;padding:2px 7px;border-radius:999px;white-space:nowrap;display:inline-block}
 .chip.good{color:var(--good);background:var(--good-bg)}.chip.warn{color:var(--warn);background:var(--warn-bg)}
 .chip.bad{color:var(--bad);background:var(--bad-bg)}.chip.neutral{color:var(--muted);background:var(--sunk)}
+.chip.new{color:#fff;background:var(--accent);margin-left:6px;font-size:9.5px;padding:1px 6px;vertical-align:middle}
+.panel-sub{border-top:1px solid var(--line);padding-top:12px;margin-top:4px}.panel-sub ul{list-style:none;padding:0;margin:8px 0 0}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:500;padding:0 10px 8px 0;border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);vertical-align:top}
@@ -111,7 +113,7 @@ svg.spark{width:100%;height:34px;display:block}
 /* detail */
 .detail-head{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start}
 .picker{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-svg.chart{width:100%;height:auto;display:block}
+svg.chart{width:100%;height:auto;display:block}  /* with its own size (width, height, max-width): a browser can shrink it to fit, never blow it up */
 svg.chart text{fill:var(--muted);font:11px var(--mono)}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
 .legend i{display:inline-block;width:18px;height:10px;vertical-align:middle;margin-right:6px;border-radius:2px}
@@ -379,8 +381,8 @@ function chart(h,m){
   g+=`<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
   g+=pts.map((p,i)=>{const last=i===pts.length-1,out=last&&h.band&&(p.value<h.band.low||p.value>h.band.high);
     return `<circle cx="${x(p.at)}" cy="${y(p.value)}" r="${last?4.5:2.5}" fill="${out?"var(--bad)":"var(--accent)"}"><title>${esc(p.at.slice(0,16).replace("T"," "))} · ${esc(fmt(p.value,m.unit))} · n=${p.n}</title></circle>`}).join("");
-  if(m.legend===false)return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.name)} over time">${g}</svg>`;
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.name)} over time">${g}</svg>
+  if(m.legend===false)return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:${W}px" role="img" aria-label="${esc(m.name)} over time">${g}</svg>`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:${W}px" role="img" aria-label="${esc(m.name)} over time">${g}</svg>
     <div class="legend"><span><i style="background:var(--accent)"></i>value per run</span>${h.band?`<span><i style="background:var(--band)"></i>expected range from the last ${h.band.points} runs</span>`:""}${h.slo?`<span><i style="border-top:2px dashed var(--warn);height:0"></i>SLO target</span>`:""}${(h.changes||[]).length?`<span><i style="border-top:2px dashed var(--accent-ink);height:0"></i>a prompt version went live</span>`:""}</div>`;
 }
 
@@ -396,6 +398,19 @@ async function loadSources(){
   const pick=all.includes(keep)?keep:all.includes(DEMO_SOURCE)?DEMO_SOURCE:all[0];
   $("#source").innerHTML=all.length?all.map(x=>`<option ${x===pick?"selected":""}>${esc(x)}</option>`).join(""):`<option value="">No sources yet</option>`;
 }
+// A project that starts uploading while the page is open joins the menu by itself: the list is read
+// again every 30 s while the tab is visible, and on coming back to it. The selection stays.
+async function syncSources(){
+  if(document.hidden)return;
+  const s=await api("/v1/sources").catch(()=>null);if(!s)return;
+  const sel=$("#source"),had=[...sel.options].map(o=>o.value).filter(Boolean);
+  const fresh=[...new Set([...s.configured,...s.with_results])].filter(x=>!had.includes(x));
+  if(!fresh.length)return;
+  if(!had.length){await loadSources();await refresh();return}  // the menu said "No sources yet"
+  fresh.forEach(x=>sel.add(new Option(x,x)));
+}
+setInterval(syncSources,30000);
+document.addEventListener("visibilitychange",syncSources);
 // The header's "Last run": the newer of the latest measure run and the latest test run.
 async function showLastRun(){
   const s=src(),el=$("#updated");
@@ -421,6 +436,7 @@ function renderEmpty(msg){
 }
 
 /* ---------- views, tabs and settings ---------- */
+const NEW_TABS=["gates"];  // tabs with something added since the last release, tagged "New" in the nav
 const TAB_INFO={overview:["Overview","The latest test run against the one before it"],diff:["Behavior diff","Any two test runs side by side"],
   failures:["Failures","Failures grouped into causes"],gates:["Release gates","Advance, hold or roll back, decided in CI"],
   prompts:["Prompts","Results for each prompt version"],agents:["Agents","Agent runs, step by step"],
@@ -447,7 +463,7 @@ function buildNav(){
   const on=enabledViews(),cur=currentView(),sw=$("#viewswitch");
   sw.hidden=on.length<2;
   sw.innerHTML=on.map(v=>`<button type="button" data-v="${v}" aria-pressed="${v===cur}">${v==="agents"?"Agents":"Documents"}</button>`).join("");
-  $("#tabs").innerHTML=[...viewTabs(cur),"projects","connect","settings"].map(t=>`${t==="projects"?`<span class="spacer"></span>`:""}<a href="#${t}" data-tab="${t}">${esc(TAB_INFO[t][0])}${t==="alerts"?`<span class="badge" id="alert-badge"${S.alertCount?"":" hidden"}>${S.alertCount||""}</span>`:""}</a>`).join("");
+  $("#tabs").innerHTML=[...viewTabs(cur),"projects","connect","settings"].map(t=>`${t==="projects"?`<span class="spacer"></span>`:""}<a href="#${t}" data-tab="${t}">${esc(TAB_INFO[t][0])}${NEW_TABS.includes(t)?`<span class="chip new">New</span>`:""}${t==="alerts"?`<span class="badge" id="alert-badge"${S.alertCount?"":" hidden"}>${S.alertCount||""}</span>`:""}</a>`).join("");
   markTab();
 }
 $("#viewswitch").onclick=e=>{const b=e.target.closest("[data-v]");if(!b)return;
@@ -495,6 +511,15 @@ function renderSettings(){
 /* ---------- all projects ---------- */
 // Where a test run came from: its git remote and its folder, as the upload recorded them.
 const fromWhere=o=>o?[o.repo&&`<span class="mono">${esc(o.repo)}</span>`,o.folder&&`<span class="mono">${esc(o.folder)}</span>`].filter(Boolean).join(" · "):"";
+// How to send another repository's runs here, new or already set up: it shows up in the menu on its first upload.
+const addRepo=()=>`<div class="panel stack"><div><h2>Add a repository<span class="chip new">New</span></h2>
+  <p class="sub">In the repository, new or already using Assay. Its first run shows up here and in the project menu, under the repository's name, within 30 seconds.</p></div>
+<pre class="code">pip install -U assay-server pytest
+export ASSAY_URL=${esc(location.origin)}
+export ASSAY_UPLOAD=1          # every run is sent, from any repository
+export ASSAY_BASE_REF=origin/main   # so tests a change weakened are found
+pytest --assay --assay-all tests    # every test, its HTTP calls, and who ran it</pre>
+  <p class="note">Without <code>--assay-all</code>, only tests that take the <code>assay_case</code> fixture are recorded. Put <code>[pytest] record = "all"</code> in <code>assay.toml</code> to make it the default. Run from Claude Code, the run says so, with its session.</p></div>`;
 // Every repository that sends its test runs here, filed under its name: its latest run against the one before.
 async function renderProjects(){
   const box=$("#tab-projects");
@@ -503,7 +528,7 @@ async function renderProjects(){
   if(!list.length){box.innerHTML=`<div class="panel stack"><div><h2>All projects</h2><p class="sub">Each repository that sends its test runs here gets a row, under its own name.</p></div>
 <pre class="code">export ASSAY_URL=${esc(location.origin)}
 export ASSAY_UPLOAD=1          # every run is sent, from any repository
-pytest --assay tests</pre></div>`;return}
+pytest --assay --assay-all tests</pre></div>${addRepo()}`;return}
   const worse=x=>x.counts?x.counts.regressed+x.counts.new_failures:0,bad=list.filter(worse).length;
   list=[...list.filter(worse),...list.filter(x=>!worse(x))];  // what regressed first, then by latest run
   const row=x=>{const k=x.counts,L=x.latest,w=worse(x);
@@ -519,7 +544,7 @@ pytest --assay tests</pre></div>`;return}
   </div>
   <div class="panel"><div class="panel-head"><div><h2>All projects</h2><p class="sub">Each repository's latest test run against the one before it. Open one to see what changed.</p></div></div>
     <div class="scroll"><table><tr><th>Project</th><th>Latest run</th><th class="num">Checks passed</th><th class="num">Changed</th><th class="num">Flaky</th><th class="num">Runs</th><th>When</th></tr>
-    ${list.map(row).join("")}</table></div></div>`;
+    ${list.map(row).join("")}</table></div></div>${addRepo()}`;
   box.querySelectorAll("[data-project]").forEach(r=>r.onclick=()=>{
     const s=r.dataset.project,sel=$("#source");
     if(![...sel.options].some(o=>o.value===s))sel.insertAdjacentHTML("beforeend",`<option>${esc(s)}</option>`);
@@ -541,12 +566,26 @@ async function renderTests(){
   if(!runs.length){box.innerHTML=demo+`<div class="panel stack"><div><h2>No test runs here yet</h2><p class="sub">Send your pytest runs to this server, and each run is compared with the one before it: what regressed, what changed, and what's flaky.</p></div>
 <pre class="code">pip install assay-server pytest
 export ASSAY_URL=${esc(location.origin)}
-export ASSAY_KEY=ak_...        # an API key from Connect
-pytest --assay --assay-upload tests</pre>
+export ASSAY_KEY=ak_...        # an API key from Connect (not needed in open mode)
+pytest --assay --assay-all --assay-upload tests   # --assay-all: every test, not only assay_case ones</pre>
     <p class="note"><a href="${GUIDE}" target="_blank" rel="noopener">Getting started</a> shows the two lines to add to your app and a first test.</p></div>`;return}
   const cur=runs[0],prev=runs[1];
+  const NEWTAG=`<span class="chip new">New</span>`;
+  // Who ran it: a coding agent's session, CI, or a person; the branch and commit it ran on.
+  const ranBy=o=>{if(!o||!(o.ran_by_agent||o.commit))return"";
+    const who=o.ran_by_agent?`<b>${esc(o.ran_by_agent)}</b>${o.agent_session?` <span class="mono ref" title="${esc(o.agent_session)}">session ${esc(o.agent_session.slice(0,8))}</span>`:""}`:"a person (no coding agent)";
+    const on=o.commit?` on <span class="mono">${esc(o.branch||"detached")}</span> @ <span class="mono">${esc(o.commit)}</span>${o.uncommitted?` <span class="chip warn">uncommitted changes</span>`:""}`:"";
+    return `<p class="sub">Run by ${who}${on}${NEWTAG}</p>`};
+  // Tests a change weakened against the base branch: removed or loosened assertions, rewritten expected values.
+  const weak=o=>{const W=(o&&o.weakened_tests)||[];if(!W.length)return"";
+    const loose=W.filter(f=>f.kind!=="rewritten"),more=(o.weakened_total||W.length)-W.length;
+    return `<div class="panel-sub"><h3>${loose.length?`${loose.length} test${loose.length===1?"":"s"} weakened`:"Expected values changed"}${NEWTAG}</h3>
+      <p class="note">Against the base branch: an assertion removed or loosened makes a test pass without checking anything; a rewritten expected value is listed to confirm.</p>
+      <ul class="stack">${W.map(f=>`<li><span class="chip ${f.kind==="rewritten"?"neutral":"bad"}">${esc(f.kind)}</span> <b class="mono">${esc(f.test)}</b> <span class="ref">${esc(f.file)}${f.line?":"+f.line:""}</span>
+        <div class="mono ref">Before: ${esc(f.before||"")}</div><div class="mono">Now:&nbsp;&nbsp;&nbsp; ${esc(f.after||"")}</div></li>`).join("")}</ul>
+      ${more>0?`<p class="note">And ${more} more: the PR comment and <code>assay guard</code> list them all.</p>`:""}</div>`};
   const label=r=>Object.entries(r.lineage||{}).map(([k,v])=>`<span class="ref">${esc(k)} ${esc(v)}</span>`).join(" · ");
-  const head=`<div class="panel-head"><div><h2>Latest test run</h2><p class="sub"><b class="mono">${esc(cur.run_id)}</b> ${esc(when(cur.start))}${prev?`, compared with <b class="mono">${esc(prev.run_id)}</b>`:""}</p>${fromWhere(cur.origin)?`<p class="sub">From ${fromWhere(cur.origin)}</p>`:""}${cur.lineage&&Object.keys(cur.lineage).length?`<p class="sub">${label(cur)}</p>`:""}</div><a href="#diff" class="ref">Open behavior diff →</a></div>`;
+  const head=`<div class="panel-head"><div><h2>Latest test run</h2><p class="sub"><b class="mono">${esc(cur.run_id)}</b> ${esc(when(cur.start))}${prev?`, compared with <b class="mono">${esc(prev.run_id)}</b>`:""}</p>${fromWhere(cur.origin)?`<p class="sub">From ${fromWhere(cur.origin)}</p>`:""}${ranBy(cur.origin)}${cur.lineage&&Object.keys(cur.lineage).length?`<p class="sub">${label(cur)}</p>`:""}</div><a href="#diff" class="ref">Open behavior diff →</a></div>${weak(cur.origin)}`;
   if(!prev){box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">${cur.passed.toLocaleString()} of ${cur.results.toLocaleString()} checks passed. The next run is compared with this one.</p></div>`;return}
   box.innerHTML=demo+`<div class="panel stack">${head}<p class="note">Comparing…</p></div>`;
   let d;
@@ -742,7 +781,7 @@ function stackedChart(series,points){
     COMP_KEYS.forEach(k=>{const v=series[k]?.[i]||0;if(!v)return;g+=`<rect x="${x}" y="${y(base+v)}" width="${w}" height="${y(base)-y(base+v)}" fill="${COMP_COLOR[k]}"><title>${esc(at.slice(0,10))} · ${esc(COMP_LABEL[k])} ${esc(money(v))}</title></rect>`;base+=v});
     const every=Math.ceil(n/7);
     if(i%every===0&&(n-1-i>=every/2||i===n-1)||i===n-1)g+=`<text x="${x+w/2}" y="${H-8}" text-anchor="middle">${at.slice(5,10)}</text>`});
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Cost per document by component over time">${g}</svg>`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:${W}px" role="img" aria-label="Cost per document by component over time">${g}</svg>`;
 }
 async function renderCost(){
   const days=+(store.get("assay-cost-days")||7),by=store.get("assay-cost-by")||"document_type";
@@ -1488,20 +1527,37 @@ function lifecyclePanel(l){
           .map(([why,checks])=>`<div><b>${esc([...new Set(checks)].join(", "))}</b> <span class="ref" title="${esc(why)}">${esc(why.length>140?why.slice(0,140)+"…":why)}</span></div>`).join("")}</td><td class="ref">${esc(r.evaluated_at.slice(0,16).replace("T"," "))}</td></tr>`).join("")}</table></div></details>`
       :`<p class="note">${l.evaluated?"No evaluated run failed a check.":"No run has ended yet."}</p>`}</div>`;
 }
-async function agentMatrix(el,run,baseline){
+// Where runs broke: one line per place, in plain words, most first. Every count opens its runs. `agree` is
+// the failing agent runs "What failed" counted: when the two disagree, the panel says so.
+async function agentMatrix(el,run,baseline,agree){
   const m=await api(`/v1/agents/matrix?${q({source:src(),run,baseline})}`).catch(()=>null);
-  if(!m||!m.cells.some(c=>c.count||c.change)){el.innerHTML="";return}
-  const at={};m.cells.forEach(c=>at[c.from+"\u0000"+c.to]=c);
-  const rows=m.states.filter(s=>m.cells.some(c=>c.from===s)),cols=m.states.filter(s=>m.cells.some(c=>c.to===s));
-  const top=Math.max(...m.cells.map(c=>c.count),1);
-  const cell=(r,k)=>{const c=at[r+"\u0000"+k];if(!c)return`<td class="ref" style="text-align:center">·</td>`;
-    const ch=m.baseline&&c.change?` <span class="${c.change>0?"worse":"better"}">${c.change>0?"+":""}${c.change}</span>`:"";
-    return`<td style="text-align:center;background:color-mix(in srgb,var(--bad) ${Math.round(c.count/top*45)}%,transparent)" title="${esc(Object.entries(c.how).map(([h,n])=>h+" "+n).join(", "))}">${c.count}${ch}</td>`};
-  const hot=(m.baseline?m.worse:m.hotspots)||[];
-  el.innerHTML=`<h3 style="margin:14px 0 6px">Transition failures</h3><p class="sub">Rows: the last step that went right. Columns: the first that failed (goal checkpoints, where a case has them). ${m.failed} of ${m.runs} runs failed${m.baseline?`; the change is against ${esc(m.baseline)}`:""}.</p>
-    <div class="scroll"><table><tr><th>last ok \\ failed</th>${cols.map(k=>`<th class="mono">${esc(k)}</th>`).join("")}</tr>
-    ${rows.map(r=>`<tr><th class="mono" style="text-align:left">${esc(r)}</th>${cols.map(k=>cell(r,k)).join("")}</tr>`).join("")}</table></div>
-    ${hot.length?`<p class="note">${m.baseline?"Got worse":"Where most fail"}: ${hot.map(c=>`<b class="mono">${esc(c.from)} → ${esc(c.to)}</b> ${c.count}${m.baseline?` (${c.change>0?"+":""}${c.change})`:""}`).join(" · ")}</p>`:""}`;
+  if(!m){el.innerHTML="";return}
+  if(!m.runs&&!m.baseline_failed){el.innerHTML=m.plain_left_out?`<h3 style="margin:14px 0 6px">Where runs broke</h3><p class="note">No agent runs here: all ${m.plain_left_out} are plain tests, judged by their own asserts (under Every run).</p>`:"";return}
+  const left=m.plain_left_out?` ${m.plain_left_out} plain test${m.plain_left_out===1?"":"s"} left out: their own asserts judge them, under Every run.`:"";
+  const now=m.cells.filter(c=>c.count).sort((a,b)=>m.baseline?(b.change||0)-(a.change||0)||b.count-a.count:b.count-a.count);
+  const gone=m.cells.filter(c=>!c.count&&c.before);
+  const open=id=>`<a href="#trace/${encodeURIComponent(id)}" class="mono">`;
+  const ex=c=>c.runs.find(r=>r.detail);
+  const row=(c,i)=>{const ch=m.baseline&&c.change?` <span class="${c.change>0?"worse":"better"}">${c.change>0?"+":""}${c.change}</span>`:"";
+    const e=ex(c),more=c.runs.length-3;
+    return`<tr><td class="num" style="white-space:nowrap"><b>${c.count}</b>${ch}</td>
+      <td><b>${esc(c.sentence)}</b> <span class="ref">${esc(Object.entries(c.how).map(([h,n])=>c.count>1?`${h} ${n}`:h).join(", "))}</span>
+        ${e?`<div class="ref">e.g. ${open(e.trajectory_id)}${esc(e.case)}</a>: ${esc(e.detail.length>200?e.detail.slice(0,200)+"…":e.detail)}</div>`:""}</td>
+      <td><span id="mx-runs-${i}">${c.runs.slice(0,3).map(r=>`${open(r.trajectory_id)}${esc(r.case)}</a>`).join(", ")}</span>${more>0?` <button type="button" class="linkish" data-more="${i}">+${more} more</button>`:""}</td></tr>`};
+  // The self-check: the runs placed here and the runs "What failed" counted are the same runs.
+  let check="";
+  if(agree){const here=new Set(now.flatMap(c=>c.runs.map(r=>r.trajectory_id))),there=new Set(agree.map(t=>t.trajectory_id));
+    const extra=[...here].filter(id=>!there.has(id)),missing=agree.filter(t=>!here.has(t.trajectory_id));
+    const list=xs=>xs.slice(0,5).map(t=>`${open(t.trajectory_id)}${esc(t.case_id||t.trajectory_id)}</a>`).join(", ")+(xs.length>5?` and ${xs.length-5} more`:"");
+    if(extra.length)check+=`<p class="flag"><span class="chip bad">numbers disagree</span>${extra.length} run${extra.length===1?" is":"s are"} counted here but passed every check under What failed: ${list(extra.map(id=>({trajectory_id:id,case_id:now.flatMap(c=>c.runs).find(r=>r.trajectory_id===id).case})))}. One of the two is wrong, and it's a bug in Assay: please open an issue.</p>`;
+    if(missing.length)check+=`<p class="note">${missing.length} failing run${missing.length===1?" has":"s have"} no line here: every checkpoint was met, or what failed (safety, a contract) isn't a step. ${list(missing)}</p>`}
+  el.innerHTML=`<h3 style="margin:14px 0 6px">Where runs broke</h3>
+    <p class="sub">Each line is a place agent runs broke: the last step that worked, then the first that went wrong (or the case's checkpoints, where it has them). ${m.failed} of ${m.runs} agent runs failed${m.baseline?`, against ${m.baseline_failed} in ${esc(m.baseline)}`:""}.${left}</p>
+    ${check}
+    ${now.length?`<div class="scroll"><table><tr><th class="num">Runs</th><th>What happened</th><th>Open one</th></tr>${now.map(row).join("")}</table></div>`:`<p class="note">No agent run failed.</p>`}
+    ${gone.length?`<p class="note">No longer breaking since ${esc(m.baseline)}: ${gone.map(c=>`${esc(c.sentence)} <span class="better">(was ${c.before})</span>`).join(" · ")}</p>`:""}`;
+  el.querySelectorAll("[data-more]").forEach(b=>b.onclick=()=>{const c=now[+b.dataset.more];
+    $(`#mx-runs-${b.dataset.more}`).innerHTML=c.runs.map(r=>`${open(r.trajectory_id)}${esc(r.case)}</a>`).join(", ");b.remove()});
 }
 async function renderAgents(){
   const box=$("#tab-agents");
@@ -1545,7 +1601,7 @@ async function renderAgents(){
       ${badCases.length>TOP?`<p class="note">${TOP} of ${badCases.length} shown, most often failing first. Every run is under Details.</p>`:""}`:""}
   </div>
   ${anyLive?live:""}
-  <details class="panel" id="agent-details"><summary><b>Details</b> <span class="note">· where runs first went wrong, transitions, efficiency, every run</span></summary>
+  <details class="panel" id="agent-details"><summary><b>Details</b> <span class="note">· where runs first went wrong, where runs broke, efficiency, every run</span></summary>
     <div class="stack" style="margin-top:12px">
     <div><h3 style="margin-bottom:6px">Where failing runs first went wrong</h3>
       ${Object.keys(c.mechanisms).length?`<div class="kindbar">${Object.entries(c.mechanisms).map(([m,n])=>`<i style="width:${n/mechTotal*100}%;background:${MECH[m][1]}" title="${esc(MECH[m][0])}: ${n}"></i>`).join("")}</div>
@@ -1577,7 +1633,7 @@ async function renderAgents(){
   bad.onchange=()=>{store.set("assay-agent-bad",bad.checked?"1":"0");page=0;drawList()};
   // Details is drawn when it's opened: the transition matrix is a request of its own.
   const det=$("#agent-details");let drawn=false;
-  const openDetails=()=>{if(drawn)return;drawn=true;drawList();agentMatrix($("#agent-matrix"),run,s.baseline||undefined)};
+  const openDetails=()=>{if(drawn)return;drawn=true;drawList();agentMatrix($("#agent-matrix"),run,s.baseline||undefined,all.filter(t=>Object.entries(t.checks).some(([k,v])=>k!=="recorded"&&v==="fail")))};
   det.ontoggle=()=>{store.set("assay-agent-details",det.open?"1":"0");if(det.open)openDetails()};
   if(store.get("assay-agent-details")==="1"){det.open=true;openDetails()}
   trendChart($("#agent-trend"));
@@ -2156,13 +2212,29 @@ async function renderAlerts(){
 }
 
 /* ---------- gates ---------- */
+const NEW=`<span class="chip new">New</span>`;
+const gnum=v=>v==null?"—":Math.abs(v)>=100?Math.round(v).toLocaleString():(+v.toFixed(4)).toString();
+// Every slice of one decision: the statistic compared, the margin it got, and the absolute limit.
+function gateSlices(d){
+  const S=d.slices||[];if(!S.length)return"";
+  const tone=o=>o==="advance"?"good":o==="hold"?"warn":"bad";
+  return `<details><summary>${S.length} slice${S.length===1?"":"s"}</summary><div class="scroll"><table>
+    <tr><th>Measure / slice</th><th>Outcome</th><th>Statistic${NEW}</th><th>Margin${NEW}</th><th>Absolute limit${NEW}</th><th>Change (95% CI)</th><th>n</th></tr>
+    ${S.map(s=>`<tr><td><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}</td><td><span class="chip ${tone(s.outcome)}">${esc(s.outcome)}</span></td>
+      <td class="mono">${esc(s.statistic||"mean")}</td>
+      <td class="num">${s.tolerance==null?"—":gnum(s.tolerance)}${s.own_margin?` <span class="chip neutral" title="This slice set its own margin, in place of the measure's">own</span>`:""}</td>
+      <td class="num">${s.absolute_limit==null?"—":`${gnum(s.absolute_limit)}${s.candidate_value==null?"":`<br><span class="note">candidate ${gnum(s.candidate_value)}${s.candidate_ci?` (${gnum(s.candidate_ci[0])} to ${gnum(s.candidate_ci[1])})`:""}</span>`}`}</td>
+      <td class="num">${s.worsening==null?"—":`${s.worsening>0?"worse":"better"} by ${gnum(Math.abs(s.worsening))}${s.ci?`<br><span class="note">${gnum(s.ci[0])} to ${gnum(s.ci[1])}</span>`:""}`}</td>
+      <td class="num">${s.n_baseline} → ${s.n_candidate}</td></tr>
+      <tr><td></td><td colspan="6" class="note">${esc(s.reason)}</td></tr>`).join("")}</table></div></details>`}
 async function renderGates(){
   const g=await api("/v1/gates").catch(()=>[]);
-  $("#tab-gates").innerHTML=`<div class="panel"><div class="panel-head"><div><h2>Release gates</h2><p class="sub">Every promote, hold or rollback decision, with the lineage that produced it. CI submits them to <code>POST /v1/gates/evaluate</code> (<a href="/docs#/default/evaluate_gate_v1_gates_evaluate_post">API docs</a>).</p></div></div>
+  $("#tab-gates").innerHTML=`<div class="panel"><div class="panel-head"><div><h2>Release gates</h2><p class="sub">Every promote, hold or rollback decision, with the lineage that produced it. CI submits them to <code>POST /v1/gates/evaluate</code> (<a href="/docs#/default/evaluate_gate_v1_gates_evaluate_post">API docs</a>).</p>
+    <p class="sub">${NEW} A rule can compare a percentile (<code>"statistic": "p95"</code>), set an absolute limit the candidate must keep whatever the baseline did (<code>"absolute_limit"</code>), and give a high-risk slice its own margin (<code>"slices"</code>). Open a decision's slices to see each one.</p></div></div>
     ${g.length?`<div class="scroll"><table><tr><th>When</th><th>Outcome</th><th>Lineage</th><th>Deciding slices</th></tr>
     ${g.map(d=>`<tr><td class="ref">${esc(d.created_at.slice(0,16).replace("T"," "))}</td><td><span class="chip ${d.outcome==="advance"?"good":d.outcome==="hold"||d.outcome==="rerun"?"warn":"bad"}">${d.outcome}</span></td>
       <td class="ref">${Object.entries(d.lineage).map(([k,v])=>`${esc(k)}=${esc(v)}`).join("<br>")}</td>
-      <td>${d.reasons?d.reasons.map(r=>`<div>${esc(r)}</div>`).join(""):d.slices.filter(s=>s.outcome!=="advance").map(s=>`<div><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}: ${esc(s.reason)}</div>`).join("")||"All slices within limits."}</td></tr>`).join("")}</table></div>`
+      <td>${d.reasons?d.reasons.map(r=>`<div>${esc(r)}</div>`).join(""):d.slices.filter(s=>s.outcome!=="advance").map(s=>`<div><b>${esc(s.measure_id)}</b> / ${esc(s.slice)}: ${esc(s.reason)}</div>`).join("")||"All slices within limits."}${d.reasons?"":gateSlices(d)}</td></tr>`).join("")}</table></div>`
     :`<div class="empty">No gate decisions yet. Wire <code>POST /v1/gates/evaluate</code> into CI so every prompt, model or pipeline change is judged before it ships.</div>`}</div>`;
 }
 

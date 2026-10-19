@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import and_, delete, desc, or_, select
 
 from assay import (agents, alerts, audit, auth, connect, schema, contracts, cost, coverage, failures, gates, integrations, learn, ingest, lifecycle, prompts, rootcause, runner, store, trace, views, workflow)
@@ -61,12 +61,34 @@ class RunRequest(BaseModel):
     measures: Optional[List[str]] = None
 
 
+class SliceMarginIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tolerance: Optional[float] = None
+    severity: Optional[str] = None
+    min_n: Optional[int] = None
+    absolute_limit: Optional[float] = None
+
+
 class RuleIn(BaseModel):
     measure_id: str
     higher_is_better: bool = True
     tolerance: float = 0.01
     min_n: int = 30
     severity: str = "normal"
+    statistic: str = Field("mean", description='"mean", or a percentile such as "p95" for latency')
+    absolute_limit: Optional[float] = Field(
+        None, description="The worst value the candidate's statistic may have, whatever the baseline did: "
+                          "a maximum when lower is better, a minimum when higher is better")
+    slices: Dict[str, SliceMarginIn] = Field(
+        default_factory=dict, description="A slice's own margin, in place of the measure's: "
+                                          '{"high_value": {"tolerance": 0.005, "severity": "high"}}. '
+                                          "A slice named here must be measured, or the release holds")
+
+    @field_validator("statistic")
+    @classmethod
+    def _known_statistic(cls, v: str) -> str:
+        gates.percentile_of(v)
+        return v
 
 
 class GateRequest(BaseModel):
@@ -301,7 +323,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def dashboard():
-        return FileResponse(STATIC / "index.html")
+        # Ask the server every time: without this, a browser guesses how long to keep the page from
+        # its age, and an upgrade's dashboard doesn't show until that runs out.
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     # ---------- single sign-on, people, and the audit log ----------
 
@@ -1562,9 +1586,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if missing:
             raise HTTPException(422, f"Lineage must record: {', '.join(missing)}. "
                                      "Every promote or rollback has to be traceable.")
-        floors = {r.measure_id: gates.noise_floor(req.identical_runs.get(r.measure_id, []))
-                  for r in req.rules}
-        decision = gates.evaluate([gates.GateRule(**r.model_dump()) for r in req.rules],
+        rules = [gates.GateRule(**{**r.model_dump(exclude={"slices"}),
+                                   "slices": {k: v.model_dump(exclude_none=True) for k, v in r.slices.items()}})
+                 for r in req.rules]
+        floors = {r.key: gates.noise_floor(req.identical_runs.get(r.measure_id, []), r.statistic) for r in rules}
+        decision = gates.evaluate(rules,
                                   req.samples, floors, req.required_slices)
         body = decision.to_dict()
         warnings = []

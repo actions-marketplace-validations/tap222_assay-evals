@@ -74,6 +74,38 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
   Without pytest, record each case with `assay.run(..., test="<case>")` and
   `run.expect(...)`. For pipelines, send field results with
   `run.check("invoice_date", "pass" | "fail", expected=..., actual=...)`.
+- **Every test, not only AI ones (opt-in):** `pytest --assay --assay-all`, or `[pytest] record =
+  "all"` in `assay.toml`, records each test as a case, with or without the fixture: its pass or
+  fail, its time, and the outbound HTTP calls it made (through `urllib`, `requests` or `httpx`),
+  each as a step named after its method, host and path (`HTTP POST api.stripe.com/v1/charges`).
+  Ids in the path become `{id}` and query values are dropped, so the same call has the same name
+  every run; headers and bodies are never kept. Calls to model APIs (recorded by `instrument()`)
+  and to the Assay server are skipped. The behavior diff then shows a test that now fails, a call
+  that's new or gone, or one made twice instead of once ("HTTP POST api.x.com/charges: twice
+  instead of once"). Assay's own checks (contracts, PII) still apply only to tests that take the
+  fixture. Each run also records who ran it: a Claude Code session (from `CLAUDECODE` and
+  `CLAUDE_CODE_SESSION_ID`), GitHub Actions, or a person, with the branch, the commit and whether
+  there were uncommitted changes. With `ASSAY_BASE_REF` set, the tests the change weakened go
+  with the run too, so the dashboard's Overview shows both.
+- **Every Jest test, and what it writes to the database (opt-in):** `setupFilesAfterEnv:
+  ["assay-evals/jest"]` in the Jest config records each test under `assay test` as a case, with
+  its pass or fail and what it wrote to Postgres through `pg` (so TypeORM, Knex and others built on
+  it too). Each INSERT, UPDATE and DELETE is a step named after its table (`DB INSERT bookings`)
+  with the columns it set and the ones it left empty: DEFAULT, NULL or a parameter bound to null.
+  Values are never kept. Reads are only counted per table. The behavior diff then says what
+  changed in the same write ("DB INSERT bookings: no longer sets locationId", "now leaves amount
+  empty"), a write made twice instead of once, and reads of a table that at least doubled and
+  grew by 5 or more ("reads of services: 12 instead of 1"). Writes in a test's own `beforeEach`
+  and `afterEach` count as the test's; those in `beforeAll` and `afterAll` aren't recorded.
+- **New writes, checked (Jest):** a write that saves wrong data is usually wrong from the commit
+  that added it, with nothing to diff against. `assay test` lists "New writes to check": a column
+  set to a placeholder ("Unknown", "", a timezone of UTC), money left empty on an INSERT, a
+  reference left empty while its twin is set (`clinic_id` and `clinicId`), and a value the test
+  sent that no query used, or that reached the database only inside a JSON column. Sent values
+  come from JSON requests to the app in the same process, or `assay.sent(input)`; only field names
+  are recorded. At most three lines, one per finding however many tests show it, ranked money,
+  then times, then ids. Writes the test makes itself aren't checked, and the run still passes.
+  [Details](../sdk/js/README.md#new-writes-checked).
 - **Safety rules:** go in `assay.toml` as path contracts, e.g. `never delete_order`, or
   `refund only_after get_order`. Every agent run is checked against them.
 - **PII:** personal data (email, card, IBAN, SSN, phone) in a tool's arguments fails the PII
@@ -93,7 +125,9 @@ SDK), and adds `--repeat N` for flaky cases and `--junit report.xml` for CI. Its
   each check is judged by its pass rate against its baseline's, corrected for how many checks
   there are. 8/8 → 7/8 is what an unchanged agent does: flaky, not blocking. A drop that could be
   real but can't be told yet (8/8 → 4/8 on one of five tasks) is inconclusive, exit 3, with the
-  number of attempts that would settle it. A drop beyond chance, or a check that passed every
+  number of attempts that would settle it; `assay test --rerun-unsure` runs those attempts for
+  the cases that need them, in the same run ([more attempts only where they're
+  needed](repeats.md#more-attempts-only-where-theyre-needed)). A drop beyond chance, or a check that passed every
   attempt before and fails every one now (three or more each), is a regression, exit 1. A drop
   that follows the model a call was routed to is a regression too, however few the attempts.
   With one attempt there's nothing to tell chance by: a pass that became a failure is a

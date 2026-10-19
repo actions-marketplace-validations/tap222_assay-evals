@@ -174,6 +174,7 @@ CONFIG_TEMPLATE = '''\
 [test]
 command = "pytest -q tests/ai"   # what `assay test` runs
 repeat = 1        # attempts per case; 3 or more lets Assay tell a flaky case from a broken one
+rerun_unsure = false  # more attempts only for the cases that could be worse, until each is clear
 tolerance = 0.01  # a drop in the pass rate smaller than this doesn't fail the run
 timeout = 900     # seconds per attempt; a command still running then is stopped (0: no limit)
 
@@ -348,11 +349,13 @@ def load_config(root: Path, path: Optional[Path] = None, policy: bool = True) ->
         if not isinstance(allowed, list) or set(allowed) - kinds:
             raise SetupError(f"{CONFIG}, [pii] allow.{tool}: a list of kinds from {', '.join(learn.PII)}.")
     out = {"command": test.get("command"), "repeat": int(test.get("repeat", 1)),
+           "rerun_unsure": bool(test.get("rerun_unsure", False)),
             "timeout": float(test["timeout"]) if test.get("timeout") else None,
             "tolerance": float(test.get("tolerance", 0.01)), "contracts": rules,
             "pii": {"check": bool(pii.get("check", True)), "allow": {k: set(v) for k, v in allow.items()},
                     "answers": bool(pii.get("answers", True)), "answer_allow": set(answer_allow)},
-            "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True))},
+            "pytest": {"checks": bool((cfg.get("pytest") or {}).get("checks", True)),
+                       "record": str((cfg.get("pytest") or {}).get("record", "cases"))},
             "behavior": _behavior_config(cfg.get("behavior") or {}), "judge": _judge_config(cfg.get("judge") or {}),
             "prices": _prices_config(cfg.get("prices")), "calibrate": _calibrate_config(cfg.get("calibrate") or {}),
             "documents": _documents_config(cfg.get("documents") or {})}
@@ -653,8 +656,8 @@ def _behavior_config(b: dict) -> dict:
             "limits": {k: float(b[k]) for k in behavior.LIMITS if k in b}}
 
 
-DEFAULT_CONFIG = {"command": None, "repeat": 1, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
-                  "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True},
+DEFAULT_CONFIG = {"command": None, "repeat": 1, "rerun_unsure": False, "timeout": None, "tolerance": 0.01, "contracts": [],  # no assay.toml
+                  "pii": {"check": True, "allow": {}, "answers": True, "answer_allow": set()}, "pytest": {"checks": True, "record": "cases"},
                   "prices": None, "acks": [], "calibrate": None, "documents": {"auto_approve": None, "target": 0.99}, "behavior": {"fail": True, "ratios": {}, "suite": behavior.SUITE_RATIO, "limits": {}},
                   "judge": {"enabled": False, "model": "claude-opus-5", "redact": True, "provider": "anthropic"}}
 
@@ -849,9 +852,11 @@ TIMED_OUT = 124  # the exit code `timeout` uses
 
 
 def run_command(command: str, events: Path, run_id: str, repeat: int, timeout: Optional[float] = None,
-                rerun_failed: bool = False, prices: Optional[dict] = None) -> List[int]:
+                rerun_failed: bool = False, prices: Optional[dict] = None, first: int = 0,
+                cases: Optional[List[str]] = None) -> List[int]:
     """Run the command once per attempt, with the SDK recording to `events`. Returns the exit codes;
-    TIMED_OUT for an attempt stopped at `timeout` seconds (with everything it started)."""
+    TIMED_OUT for an attempt stopped at `timeout` seconds (with everything it started). `first`: the
+    first attempt's number; `cases`: only these cases (ASSAY_RERUN_CASES, read by the pytest plugin)."""
     import signal
     env = {k: v for k, v in os.environ.items() if k != "ASSAY_URL"}  # record locally, never to a server
     env.update(ASSAY_PATH=str(events), ASSAY_TEST_RUN=run_id)
@@ -859,9 +864,11 @@ def run_command(command: str, events: Path, run_id: str, repeat: int, timeout: O
         env["ASSAY_PRICES"] = json.dumps(prices)
     if rerun_failed:
         env["ASSAY_RERUN"] = "failed"  # the pytest plugin runs only what didn't pass last time
+    if cases is not None:
+        env["ASSAY_RERUN_CASES"] = json.dumps(sorted(cases))
     codes = []
     posix = os.name == "posix"
-    for attempt in range(repeat):
+    for attempt in range(first, first + repeat):
         env["ASSAY_TEST_ATTEMPT"] = str(attempt)
         # Its own process group (Unix) or console group (Windows): a timeout stops it and all it started.
         group = {"start_new_session": True} if posix else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -885,6 +892,42 @@ def run_command(command: str, events: Path, run_id: str, repeat: int, timeout: O
                     proc.kill()
             codes.append(TIMED_OUT)
     return codes
+
+
+def rerun_unsure(root: Path, cfg: dict, run_id: str, command: str, repeat: int, codes: List[int],
+                 baseline: Optional[str], timeout: Optional[float], prices: Optional[dict]) -> Tuple[List[int], int]:
+    """`assay test --rerun-unsure`: after the first attempts, only the cases that need reruns (could be
+    worse, too few attempts to tell) run again, a batch at a time. A case that's clearly chance or
+    clearly worse stops at the first batch it's clear in. It stops one attempt short of
+    flaky.MAX_ATTEMPTS, where a check that could be worse stops asking for reruns and counts as
+    flaky: a case still unclear then stays inconclusive, never passes because the loop ran out.
+    Returns every exit code and how many looks were taken, which `finish` splits the bar for "got
+    worse" across."""
+    home = ensure_home(root)
+    events = home / "runs" / f"{run_id}.jsonl"
+    engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
+    state = _migrate(engine, home, _state(home))
+    base = None if baseline == "none" else baseline or (BASELINE if state.get("baseline_cases") else None)
+    sync_contracts(engine, cfg["contracts"])
+    batch, done, looks, cap = max(2, repeat), repeat, 1, flaky.MAX_ATTEMPTS - 1
+    while done < cap:
+        _, bad = load_file(engine, str(events), TENANT)
+        if bad:
+            break
+        with flaky.looks(looks):
+            result = evaluate(engine, run_id, base, cfg["tolerance"], cfg["pii"], cfg["behavior"], None, cfg.get("acks"))
+        if result is None or not base:
+            break
+        c = classify(result, True)
+        unsure = {p["case_id"] for p in c["unsure"]} - {p["case_id"] for p in c["problems"]}
+        if not unsure:
+            break
+        n = min(batch, cap - done)
+        print(f"\n{_n(len(unsure), 'case')} could be worse, too few attempts to tell: {n} more attempts of "
+              f"{'it' if len(unsure) == 1 else 'them'} ({done + n} each).", file=sys.stderr)
+        codes = codes + run_command(command, events, run_id, n, timeout, prices=prices, first=done, cases=sorted(unsure))
+        done, looks = done + n, looks + 1
+    return codes, looks
 
 
 def sync_contracts(engine, rules: List[dict]) -> None:
@@ -963,10 +1006,11 @@ def check_pii(engine, source, run_id: str, pii: dict) -> None:
     heads = agents.run_trajectories(engine, TENANT, run_id)
     trajs = source.trajectories([h["trajectory_id"] for h in heads])
     requests = learn._inputs(engine, TENANT, [h["trajectory_id"] for h in heads])
+    plain = agents.plain_runs(engine, TENANT, list(trajs))  # plain tests (--assay-all) aren't agents
     rows = []
     for h in heads:
         traj = trajs.get(h["trajectory_id"])
-        if traj is None:
+        if traj is None or h["trajectory_id"] in plain:
             continue
         found = pii_findings(traj, pii["allow"], (requests.get(h["trajectory_id"]) or {}).get("input"),
                              pii.get("answers", True), pii.get("answer_allow"))
@@ -1055,7 +1099,9 @@ def compare(engine, run_id: str, baseline: Optional[str], tolerance: float, beha
     rows = [r for r in rows if r.result_id not in found and flaky.check_key(r) not in skip]
     base_found = audit.audit_rows(engine, tenant, base_rows)  # once: per row, it was n² on a big run
     base_rows = [r for r in base_rows if r.result_id not in base_found]
+    from assay.upkeep import is_judge
     out = {"stability": a["stability"], "fields": field_rates(rows, base_rows), "failing": failing(rows),
+           "judged": {(r.case_id, r.field or "result") for r in rows if is_judge(r)},
            "attempts": attempts(rows), "base_attempts": attempts(base_rows),
            "not_judged": not_judged, **_behavior_changes(engine, run_id, baseline, ran, behavior_cfg, tenant),
            "judge_changed": judge_changes(rows, base_rows), **routing(engine, tenant, rows, base_rows)}
@@ -1779,6 +1825,43 @@ def verdict(result: dict, has_baseline: bool) -> Tuple[bool, dict]:
         and not gates_failed(result), c
 
 
+def witnesses(result: dict, c: dict) -> Optional[dict]:
+    """Code checks and judged checks apart, code checks first: a model swap gets a signal no judge's
+    noise reaches. None when the run has only one kind."""
+    judged, att = result.get("judged") or set(), result["attempts"]
+    kinds = {"code": [k for k in att if k not in judged], "judged": [k for k in att if k in judged]}
+    if not kinds["code"] or not kinds["judged"]:
+        return None
+    out = {}
+    for kind, keys in kinds.items():
+        mine = set(keys)
+        x = {"checks": len(keys), "passing": sum(1 for k in keys if all(att[k]))}
+        for name, items in (("failing", c["problems"]), ("needs reruns", c["unsure"]), ("flaky", c["flaky"]),
+                            ("judge unstable", c["judge_unstable"])):
+            x[name] = sum(1 for i in items if (i["case_id"], i["field"]) in mine)
+        out[kind] = x
+    code, judge = out["code"], out["judged"]
+    moved = lambda x: x["failing"] + x["needs reruns"]
+    out["note"] = ("Code checks held: what moved is judged. Check the judge before the AI (`assay rejudge`)."
+                   if moved(judge) and not moved(code) else
+                   "Code checks moved, and no judge decides those: the AI's behavior changed."
+                   if moved(code) else None)
+    return out
+
+
+def paired_text(pc: dict) -> str:
+    """The cases in both runs, each one pass or fail, and whether more broke than were fixed beyond chance."""
+    lost, gained = len(pc["lost"]), len(pc["gained"])
+    sure = "more broke than were fixed, beyond chance" if pc["p"] <= 0.05 else "within chance"
+    return (f"{_n(pc['cases'], 'case')} in both runs: {lost} pass → fail, {gained} fail → pass "
+            f"(exact McNemar p = {pc['p']:.2g}, {sure}; a case passes when each check passes most attempts)")
+
+
+def witness_text(x: dict) -> str:
+    rest = [f"{x[k]} {k}" for k in ("failing", "needs reruns", "flaky", "judge unstable") if x[k]]
+    return f"{x['passing']}/{x['checks']} passing" + (" · " + ", ".join(rest) if rest else "")
+
+
 def gates_failed(result: dict) -> List[dict]:
     """The documents' per-field gates that failed ([documents.gates]; line items by default)."""
     from assay import documents
@@ -2260,6 +2343,13 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     head = "Checks weakened: this PR loosens the checks that judge it" if policy and policy["weakened"] else \
         HEADLINES.get(code, "AI regression detected")
     out = [MARKER, f"## {head}", "", " · ".join(counts), ""]
+    w = result.get("_witnesses")
+    if w:
+        out += [f"Code checks: {witness_text(w['code'])} · Judged checks: {witness_text(w['judged'])}"
+                + (f". {w['note']}" if w["note"] else ""), ""]
+    pc = result.get("_paired")
+    if pc and (pc["lost"] or pc["gained"]):
+        out += [f"Paired cases: {paired_text(pc)}", ""]
     if policy and policy["changes"]:
         title = ('Policy changes (not applied: add the `assay-policy-change` label to accept them)' if policy['weakened']
                  else 'Policy changes (accepted)' if policy['accepted']
@@ -2282,6 +2372,11 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     if result.get("documents"):
         from assay import documents
         out += [f"**Documents:** {_md(documents.markdown(result['documents'], result.get('documents_before'), result.get('documents_cfg')))}", ""]
+    if result.get("write_checks"):  # new writes that look wrong (assay/diff.py)
+        from assay.diff import write_checks_lines
+        wc = result["write_checks"]
+        out += [f"**New writes to check ({len(wc)})**", "",
+                *(f"- {_md(x)}" for x in write_checks_lines(wc, _short)), ""]
     if result.get("kinds"):
         out += [f"**Failures by kind:** {_md(kinds_text(result['kinds']))}", ""]
     if result.get("fixed_context"):
@@ -2352,9 +2447,20 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     out = [_paint("Assay test", "bold") + f"  {run_id}", "─" * 44]
     against = (against or f"compared with the baseline, {baseline}") if baseline else \
         "no baseline yet: every failing check counts"
-    out += [f"{_n(cases, 'case')} · {_n(repeat, 'attempt')} each · {against}", ""]
+    more = {case for (case, _), a in result["attempts"].items() if len(a) > repeat}  # --rerun-unsure
+    most = max((len(a) for a in result["attempts"].values()), default=repeat)
+    each = f"{_n(repeat, 'attempt')} each" + (f", up to {most} for the {_n(len(more), 'case')} that needed more"
+                                              if more else "")
+    out += [f"{_n(cases, 'case')} · {each} · {against}", ""]
     result["summary"] = summarize(result, c, baseline)
     out += summary_block(result["summary"])
+    w = result["_witnesses"] = witnesses(result, c)
+    if w:
+        out += [f"Code checks    {witness_text(w['code'])}", f"Judged checks  {witness_text(w['judged'])}"]
+        out += ([_paint(w["note"], "dim")] if w["note"] else []) + [""]
+    pc = result["_paired"] = flaky.paired_cases(result["attempts"], result["base_attempts"]) if baseline else None
+    if pc and (pc["lost"] or pc["gained"]):
+        out += [_paint("Paired cases", "bold"), f"  {paired_text(pc)}", ""]
     everywhere = (result.get("setup") or {}).get("everywhere") or []
     if everywhere:
         out += [_paint("Changed in every case", "bold")] + [f"  {change_text(x)}" for x in everywhere] + [""]
@@ -2528,7 +2634,7 @@ def new_run_id() -> str:
 
 def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Optional[str],
          send: Optional[dict] = None, junit: Optional[str] = None, timeout: Optional[float] = None,
-         failed: bool = False, judge: bool = False) -> int:
+         failed: bool = False, judge: bool = False, unsure: bool = False) -> int:
     """`assay test`. Prints the report; returns the exit code."""
     try:  # no assay.toml: the defaults, still held to a pull request's trusted policy
         cfg = load_config(root) if (root / CONFIG).exists() else with_trusted_policy(
@@ -2584,7 +2690,11 @@ def test(root: Path, command: Optional[str], repeat: Optional[int], baseline: Op
         print(f"\n`{command}` recorded nothing. Does it record its cases: with the assay_case fixture or "
               "assay.run(..., test=\"<case>\") in Python, assayCase() in JavaScript?", file=sys.stderr)
         return guard_only(root, home)
-    return _finish_test(root, cfg, run_id, repeat, codes, baseline, junit, timeout, failed, command, send)
+    looks = 1
+    if unsure or cfg.get("rerun_unsure"):
+        codes, looks = rerun_unsure(root, cfg, run_id, command, repeat, codes, baseline, timeout, cfg.get("prices"))
+    with flaky.looks(looks):
+        return _finish_test(root, cfg, run_id, repeat, codes, baseline, junit, timeout, failed, command, send)
 
 
 def guard_only(root: Path, home: Path) -> int:
@@ -2696,7 +2806,12 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     inconclusive = passed and bool(result["not_judged"] or result["summary"]["buckets"]["needs reruns"]
                                    or any(p["worse"] for p in result.get("_judge_unstable") or []))
     baseline_before = dict(state.get("baseline_cases") or {})
+    if baseline:  # read before a passing run replaces the per-case baseline with itself
+        from assay import diff
+        flows_before = diff.flows(engine, TENANT, baseline)
     if passed and not inconclusive:
+        if baseline == BASELINE and baseline_before:  # what `assay diff` compares this run with once it's the baseline
+            state["compared"] = {"run": run_id, "cases": baseline_before}
         # A pass rate that dropped within chance passes, but isn't the new bar: otherwise a few such runs
         # in a row would walk a case from 8/8 down to 4/8 without ever failing.
         state["baseline_cases"] = {**(state.get("baseline_cases") or {}),
@@ -2721,6 +2836,7 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
     from assay import weakening
     found = weakening.scan(root, weakening.base_ref(root))
     result["weakened_tests"] = found
+    _save_meta(home, run_id, {"ran_by": ran_by(root), "weakened_tests": found})
     if found:
         loose, notes = weakening.weakening(found), [f for f in found if f["kind"] == "rewritten"]
         if policy is not None:  # a PR: a weakened test loosens the checks like removing a contract
@@ -2742,15 +2858,28 @@ def finish(root: Path, cfg: dict, run_id: str, repeat: int, codes: List[int], ba
         if passed:
             state["baseline_cases"] = baseline_before
     result["policy"] = policy
+    from assay import diff
+    flows_now = diff.flows(engine, TENANT, run_id)
+    # New writes, checked on their own: wrong data is usually wrong from the commit that added the write.
+    checks = diff.all_write_checks(flows_before if baseline else {}, flows_now)
+    result["write_checks"] = checks
+    if checks:
+        text += "\n" + _paint("\n".join([f"New writes to check ({len(checks)}):",
+                                          *(f"  {x}" for x in diff.write_checks_lines(checks, _short))]), "yellow")
     if baseline:  # what each case did, next to what its baseline did
-        from assay import diff
-        before, now = diff.flows(engine, TENANT, baseline), diff.flows(engine, TENANT, run_id)
+        before, now = flows_before, flows_now
         result["flows"] = {c: (before[c]["flow"], now[c]["flow"]) for c in before.keys() & now.keys()
                            if before[c]["flow"] != now[c]["flow"]}
         moved = len(result["flows"])
         if moved:
             text += "\n" + _paint(f"{_n(moved, 'case')} took a different path than {'its' if moved == 1 else 'their'} "
                                    f"baseline: `assay diff` shows what changed.", "dim")
+        wrote = sorted(c for c in before.keys() & now.keys() - result["flows"].keys()
+                       if diff.database_change(before[c]["db"], now[c]["db"]))
+        if wrote:
+            text += "\n" + _paint(f"{_n(len(wrote), 'case')} wrote to the database differently than "
+                                   f"{'its' if len(wrote) == 1 else 'their'} baseline: `assay diff` shows what changed.",
+                                   "dim")
     # What's left to rerun (`--failed`): everything that didn't simply pass.
     state["rerun"] = sorted(set().union(*(v for k, v in result["summary"]["buckets"].items() if k != "passed")))
     _save_state(home, state)
@@ -3311,7 +3440,7 @@ def upload(root: Path, run_id: Optional[str], url: Optional[str], key: Optional[
         print(f"No recording for run {run_id} in {home / 'runs'}.", file=sys.stderr)
         return 2
     events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    where = run_origin(root)
+    where = {**run_origin(root), **meta_tags(home, run_id)}
     for e in events:  # so the dashboard can say which repository and folder a run came from
         if e.get("type") == "run.start" and e.get("test"):
             e["tags"] = {**(e.get("tags") or {}), **where}
@@ -3355,6 +3484,57 @@ def project_name(root: Path) -> str:
         name = re.sub(r"\.git$", "", re.split(r"[/:]", remote)[-1]) if remote else ""
     name = name or root.resolve().name
     return re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")[:48] or "default"
+
+
+def ran_by(root: Path) -> dict:
+    """Who ran the tests, and on what: a coding agent's session (Claude Code sets CLAUDECODE and
+    CLAUDE_CODE_SESSION_ID in the shell it runs commands in), CI, or a person (no agent), and the branch
+    and commit, with whether there were uncommitted changes. Only ids: nothing from the session itself."""
+    out: Dict[str, Any] = {}
+    if os.environ.get("CLAUDECODE"):
+        out["agent"] = "Claude Code"
+        if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+            out["session"] = os.environ["CLAUDE_CODE_SESSION_ID"][:64]
+    elif os.environ.get("GITHUB_ACTIONS"):
+        out["agent"] = "GitHub Actions"
+    branch = (_git(root, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+    commit = (_git(root, "rev-parse", "--short", "HEAD") or "").strip()
+    if branch and branch != "HEAD":
+        out["branch"] = branch[:200]
+    if commit:
+        out["commit"] = commit
+        out["uncommitted"] = bool((_git(root, "status", "--porcelain", "--untracked-files=no") or "").strip())
+    return out
+
+
+META_FINDINGS = 20  # weakened tests kept with an uploaded run; the PR comment has them all
+
+
+def _save_meta(home: Path, run_id: str, meta: dict) -> None:
+    """What a run's events don't carry (who ran it, the weakened tests), beside its recording for `assay upload`."""
+    try:
+        (home / "runs" / f"{run_id}.meta.json").write_text(json.dumps(meta, default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def meta_tags(home: Path, run_id: str) -> dict:
+    """The saved meta as run tags (plain values only): ran_by_agent, agent_session, branch, commit,
+    uncommitted, and weakened_tests as JSON text."""
+    try:
+        meta = json.loads((home / "runs" / f"{run_id}.meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    by = meta.get("ran_by") or {}
+    tags = {k: by[f] for k, f in (("ran_by_agent", "agent"), ("agent_session", "session"), ("branch", "branch"),
+                                   ("commit", "commit"), ("uncommitted", "uncommitted")) if by.get(f) is not None}
+    found = meta.get("weakened_tests") or []
+    if found:
+        keep = [{k: (str(f.get(k))[:300] if isinstance(f.get(k), str) else f.get(k))
+                 for k in ("file", "test", "kind", "line", "before", "after")} for f in found[:META_FINDINGS]]
+        tags["weakened_tests"] = json.dumps(keep)
+        tags["weakened_total"] = len(found)
+    return tags
 
 
 def run_origin(root: Path) -> dict:

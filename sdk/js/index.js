@@ -12,18 +12,28 @@
  *   }));
  *
  * Run it with `assay test` (`[test] command = "npx jest test/ai"` in assay.toml). Events are written
- * to ASSAY_PATH, which `assay test` sets; with no ASSAY_PATH nothing is written, and the run is kept
- * in memory for the test's own asserts. Nothing is ever sent to a server from here: `assay test
- * --upload` sends the whole run once it's checked.
+ * to ASSAY_PATH, which `assay test` sets; `assay test --upload` sends the whole run once it's checked.
+ *
+ * In the app itself, with ASSAY_URL set (and ASSAY_PATH not), runs go to the server: track() opens
+ * one per request, and an instrument()ed client records its model calls on it.
+ *
+ *   const reply = await track("whatsapp_reply", () => receptionist.reply(message), { conversationId });
+ *
+ * With neither set, nothing is written or sent, and the run is kept in memory.
  */
 
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { instrument, assayMiddleware, currentRun, storage } = require("./instrument");
+const { instrument, assayMiddleware, currentRun, storage, setPlainRun, plainRun } = require("./instrument");
+const { summarize: summarizeSql } = require("./sql");
+const { Tracker } = require("./writes");
 const { costOf } = require("./llm");
+const { sender } = require("./send");
 
 const MAX_TEXT = 20000;
+const DB_READS = "DB reads"; // one step per run: reads per table, left out of the flow
+const DB_UNWRITTEN = "DB unwritten"; // one step per run: sent values no query used (writes.js)
 const EXPECT = "assay.expect@1";
 
 function id() {
@@ -52,10 +62,18 @@ function clean(value, depth = 0) {
 
 function emit(event) {
   const file = process.env.ASSAY_PATH;
-  if (!file) return;
-  const line = JSON.stringify({ v: 1, id: id(), ts: new Date().toISOString(), ...event }) + "\n";
+  const send = file ? null : sender();
+  if (!file && !send) return;
+  const full = { v: 1, id: id(), ts: new Date().toISOString(), ...event };
+  if (send) return send.add(full);
   fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
-  fs.appendFileSync(file, line); // one write per event: test workers sharing the file don't split lines
+  fs.appendFileSync(file, JSON.stringify(full) + "\n"); // one write per event: test workers sharing the file don't split lines
+}
+
+/** Sends what's queued now (with ASSAY_URL); resolves true once nothing is left. For shutdown hooks. */
+function flush() {
+  const send = sender();
+  return send ? send.flush() : Promise.resolve(true);
 }
 
 const MAX_CASE = 128;
@@ -168,7 +186,7 @@ function toolNames(tools) {
 }
 
 class Run {
-  constructor(task, { caseId, tags, kind = "agent" } = {}) {
+  constructor(task, { caseId, tags, kind = "agent", input, version, segment, conversationId, turn, user } = {}) {
     this.id = id();
     this.task = task;
     this.caseId = caseId;
@@ -180,7 +198,10 @@ class Run {
     this._expectations = [];
     this._ended = false;
     emit({ type: "run.start", run_id: this.id, kind, task, ...(caseId ? { test: testRef(caseId) } : {}),
-           ...(tags ? { tags: clean(tags) } : {}) });
+           ...(tags ? { tags: clean(tags) } : {}), ...(input !== undefined ? { input: clean(input) } : {}),
+           ...(version ? { version: clean(version) } : {}), ...(segment ? { segment } : {}),
+           ...(conversationId ? { conversation_id: String(conversationId).slice(0, 128) } : {}),
+           ...(turn != null ? { turn } : {}), ...(user ? { user: String(user).slice(0, 128) } : {}) });
   }
 
   _step(kind, fields, started) {
@@ -241,6 +262,36 @@ class Run {
     this._step("answer", { text });
   }
 
+  /** A database write, from summarize() in sql.js: recorded as the step "DB INSERT bookings" with the
+   * columns it set, the ones it left empty and those set to a placeholder ("Unknown"), never the values.
+   * fixture: the test wrote it itself, not the app. */
+  dbWrite({ op, table, set, empty, placeholder, fixture }, error) {
+    this.tool(`DB ${op} ${table}`.slice(0, 128), { set, empty, placeholder, fixture: fixture || undefined }, undefined,
+              { error: error ? `${error.code ? `${error.code} ` : ""}${error.message || error}`.slice(0, 500) : undefined });
+  }
+
+  /** A database read: only counted per table, and recorded once as "DB reads" when the run ends. */
+  dbRead(table) {
+    this._reads = this._reads || {};
+    this._reads[table] = (this._reads[table] || 0) + 1;
+  }
+
+  /** A query's values, kept in memory to check against what the test sent (writes.js). */
+  dbUsed(summary, values) {
+    if (this._sent) this._sent.query(summary, values);
+  }
+
+  /** What the test gave the code under test: a request body, a service's input. When the run ends,
+   * a value in it that no later query used is recorded by name (never by value) as "DB unwritten". */
+  sent(input, label = "input") {
+    try {
+      this._sent = this._sent || new Tracker();
+      this._sent.send(input, String(label).slice(0, 128));
+    } catch {
+      // recording must never break the test
+    }
+  }
+
   /** "resolved", "unresolved" or "escalated". */
   outcome(value) {
     this.outcomeValue = value;
@@ -262,6 +313,9 @@ class Run {
   end(status = "completed", error) {
     if (this._ended) return;
     this._ended = true;
+    if (this._reads) this.tool(DB_READS, this._reads, undefined);
+    const unwritten = this._sent && this._sent.unwritten();
+    if (unwritten) this.tool(DB_UNWRITTEN, unwritten, undefined);
     emit({ type: "run.end", run_id: this.id, status, ...(this.outcomeValue ? { outcome: this.outcomeValue } : {}),
            ...(error ? { error: clean(error) } : {}) });
   }
@@ -270,6 +324,28 @@ class Run {
 /** A run outside a test case, e.g. recorded by the app itself. */
 function startRun(task, options = {}) {
   return new Run(task, options);
+}
+
+/**
+ * One request of the app as a run: opens it, calls fn(run) with it current (so an instrument()ed
+ * client records its model calls on it), and ends it, failed if fn throws. Returns fn's result,
+ * and rethrows what it throws. Recording never breaks fn.
+ */
+async function track(task, fn, options = {}) {
+  let run;
+  try {
+    run = new Run(task, options);
+  } catch {
+    return fn(undefined);
+  }
+  try {
+    const result = await storage.run(run, () => fn(run));
+    run.end("completed");
+    return result;
+  } catch (e) {
+    run.end("failed", `${e && e.name ? e.name : "Error"}: ${e && e.message ? e.message : e}`.slice(0, 2000));
+    throw e;
+  }
 }
 
 /** The current test's id, "<file>::<name>", from Jest's or Vitest's expect.getState() (the global
@@ -319,5 +395,14 @@ async function assayCase(name, fn, { tags } = {}) {
   return result;
 }
 
-module.exports = { assayCase, startRun, prompt, caseIdOf, toolSchemas, instrument, assayMiddleware, currentRun,
-                   Run, Expectations };
+/** What the test gave the code under test, e.g. a service's input: assay.sent(dto). Inside a recorded
+ * test (assay-evals/jest, or an assayCase), a value in it that no later query used is reported by
+ * name; elsewhere it does nothing. A JSON request to the app in the same process needs no call. */
+function sent(input, label) {
+  const run = currentRun() || plainRun();
+  if (run) run.sent(input, label);
+}
+
+module.exports = { assayCase, sent, startRun, track, flush, prompt, caseIdOf, toolSchemas, instrument, assayMiddleware,
+                   currentRun, Run, Expectations, currentTest, setPlainRun, plainRun, summarizeSql,
+                   recordPg: (...a) => require("./pg").recordPg(...a) };

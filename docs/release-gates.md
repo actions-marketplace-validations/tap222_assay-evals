@@ -12,6 +12,50 @@ if even the optimistic end of the confidence interval is worse than max(toleranc
 floor). It holds if the interval straddles that limit, and advances otherwise.
 `severity: "high"` halves the tolerance. The worst slice decides.
 
+**Percentiles.** A rule compares means by default. For latency, a slow tail can grow while the
+average holds: most calls get a little faster and one in twelve now takes four seconds. Set
+`statistic: "p95"` (any percentile from `p1` to `p99.9`) and the rule compares that percentile
+instead, with the tolerance in the measure's units:
+
+```json
+{"measure_id": "latency_ms", "higher_is_better": false, "tolerance": 200, "min_n": 200, "statistic": "p95"}
+```
+
+The interval comes from resampling the cases (the same ones on both sides when they're paired),
+and the noise floor from each baseline run's own p95. A percentile rests on the values beyond
+it, so a slice holds until at least 5 lie there: 100 cases for p95, 500 for p99. One measure can
+have a mean rule and a p95 rule at the same time; each gets its own noise floor.
+
+**Absolute limits.** Tolerance only limits how much worse the candidate is than the baseline,
+so a baseline that's already slow lets a slow candidate through. Set `absolute_limit` and the
+candidate also has to keep that value, whatever the baseline did: a maximum when lower is
+better ("p95 under 20 s"), a minimum when higher is better ("accuracy at least 0.9"):
+
+```json
+{"measure_id": "latency_ms", "higher_is_better": false, "tolerance": 200, "min_n": 200, "statistic": "p95", "absolute_limit": 20000}
+```
+
+The candidate's statistic gets its own interval, from resampling its cases. The slice rolls back
+if even the optimistic end is past the limit, holds if the interval reaches past it, and
+otherwise keeps the decision against the baseline: the worse of the two decides. A candidate
+past the limit rolls back even before there's a baseline or a noise floor; one within it still
+needs both to advance. Each slice reports `candidate_value` and `candidate_ci`.
+
+**A margin per slice.** `tolerance`, `severity`, `min_n` and `absolute_limit` apply to every
+slice of a measure. A high-risk slice (high-value invoices, one regulated document type) can
+have its own, agreed with the customer before the runs:
+
+```json
+{"measure_id": "field_accuracy", "tolerance": 0.05, "min_n": 100,
+ "slices": {"high_value": {"tolerance": 0.01, "severity": "high"}}}
+```
+
+Here a 3-point drop advances on routine documents and rolls back on high-value ones, and the
+worst slice decides, so that slice blocks the release on its own. A slice named in `slices`
+has to be measured: a missing one holds the release, as if it were in `required_slices`. A
+slice can set only those four fields; a misspelt one is rejected. Each slice reports the
+`tolerance` it got, after severity, and `own_margin`.
+
 **The noise floor** is how far apart two runs of the same version on the same corpus usually
 land. With two baseline runs, it's their difference. With three or more, it's 1.96 × √2 × the
 standard deviation of the run means, which is the 95% range of the gap between two runs. It

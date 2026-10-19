@@ -119,6 +119,99 @@ def test_how_a_flow_changed():
     assert ch["approval_moved"] and not ch["added"]
     ch = diff.flow_change(("search", "refund"), ("search", "escalate"))
     assert (ch["added"], ch["removed"], ch["reordered"]) == (["escalate"], ["refund"], False)
+    twice = diff.flow_change(("search", "HTTP POST api.x.com/charges"),
+                             ("search", "HTTP POST api.x.com/charges", "HTTP POST api.x.com/charges"))
+    assert not twice["reordered"] and twice["counts"] == {"HTTP POST api.x.com/charges": [1, 2]}
+    assert diff._describe(twice) == "HTTP POST api.x.com/charges: twice instead of once"
+
+
+def test_a_tool_call_that_moved_to_another_mcp_server_is_a_change():
+    before = {"steps": [{"kind": "tool", "name": "search", "server": "db"}, {"kind": "tool", "name": "refund"}]}
+    now = {"steps": [{"kind": "tool", "name": "search", "server": "github"}, {"kind": "tool", "name": "refund"}]}
+    assert diff.flow(before) == ("db.search", "refund") and diff.flow(now) == ("github.search", "refund")
+    ch = diff.flow_change(diff.flow(before), diff.flow(now))
+    assert ch["added"] == ["github.search"] and ch["removed"] == ["db.search"]
+    assert diff.flow_change(diff.flow(before), diff.flow(before)) is None
+
+
+def _db(*steps, reads=None):
+    out = [{"kind": "tool", "name": n, "args": {"set": st, "empty": em}} for n, st, em in steps]
+    if reads is not None:
+        out.append({"kind": "tool", "name": "DB reads", "args": reads})
+    return {"steps": out}
+
+
+def test_what_a_run_wrote_to_the_database():
+    traj = _db(("DB INSERT bookings", ["amount", "locationId"], ["locationId"]),
+               ("DB INSERT bookings", ["amount", "locationId", "note"], []), reads={"services": 3})
+    assert diff.database(traj) == {"writes": {"DB INSERT bookings": {"set": ["amount", "locationId", "note"],
+                                                                     "empty": [], "placeholder": {}}},
+                                   "reads": {"services": 3}, "unwritten": {}}
+    assert diff.flow(traj) == ("DB INSERT bookings", "DB INSERT bookings")  # reads aren't steps of the flow
+
+
+def test_how_the_database_writes_changed():
+    before = diff.database(_db(("DB INSERT bookings", ["amount", "locationId", "status"], []), reads={"services": 1}))
+    now = diff.database(_db(("DB INSERT bookings", ["amount", "status", "note"], ["amount"]), reads={"services": 12}))
+    assert diff.database_change(before, now) == [
+        "DB INSERT bookings: no longer sets locationId; now leaves amount empty; now also sets note",
+        "reads of services: 12 instead of 1"]
+    assert diff.database_change(before, before) == []
+    small = diff.database(_db(reads={"services": 3}))  # a few more reads isn't a change
+    assert diff.database_change(before, small) == []
+    filled = diff.database(_db(("DB INSERT bookings", ["amount", "locationId", "status"], ["locationId"])))
+    assert diff.database_change(filled, before) == ["DB INSERT bookings: now fills locationId"]
+    ch = diff.change({"flow": ("DB INSERT bookings",), "db": before}, {"flow": ("DB INSERT bookings",), "db": now})
+    assert not ch["added"] and diff._describe(ch).startswith("DB INSERT bookings: no longer sets locationId")
+    assert diff.change({"flow": ("a",), "db": before}, {"flow": ("a",), "db": before}) is None
+
+
+def _w(name, set_, empty=(), placeholder=None):
+    return {"kind": "tool", "name": name, "args": {"set": list(set_), "empty": list(empty),
+                                                   **({"placeholder": placeholder} if placeholder else {})}}
+
+
+def test_new_writes_are_checked_on_their_own():
+    # The booking app's bugs: a branch sent but kept only in metadata, a pin dropped, a timezone saved as
+    # UTC, a name saved as "Unknown", an amount left empty.
+    now = diff.database({"steps": [
+        _w("DB INSERT bookings", ["metadata", "branchId", "amountDue", "note", "cancelledAt", "startsAt", "practitionerId"],
+           ["branchId", "amountDue", "note", "cancelledAt", "startsAt", "practitionerId"]),
+        _w("DB INSERT locations", ["clinicId", "clinic_id"], ["clinic_id"]),
+        {"kind": "tool", "name": "DB INSERT services", "args": {"set": ["name"], "empty": [], "placeholder": {"name": ""},
+                                                                "fixture": True}},
+        _w("DB INSERT clinics", ["name", "timezone"], placeholder={"timezone": "UTC"}),
+        _w("DB UPDATE staff", ["name"], placeholder={"name": "Unknown"}),
+        {"kind": "tool", "name": "DB unwritten", "args": {
+            "createBooking": {"json": {"branchId": "bookings.metadata"}},
+            "createLocation": {"never": ["pin.lat"]}}}]})
+    assert diff.flow({"steps": [{"kind": "tool", "name": "DB unwritten", "args": {}}]}) == ()
+    found = diff.write_checks(None, now)
+    assert [f["text"] for f in found] == [
+        "INSERT bookings leaves amountDue empty",
+        'INSERT clinics sets timezone to "UTC"',
+        "createBooking sent branchId; it reached only bookings.metadata (inside JSON), no column of its own, "
+        "and INSERT bookings left branchId empty",
+        "INSERT locations leaves clinic_id empty but sets clinicId",
+        "createLocation sent pin.lat; no query used it",
+        'UPDATE staff sets name to "Unknown"']
+    # note, cancelledAt, startsAt and practitionerId can be empty by design; branchId is told once, with
+    # what was sent; the service the test inserted itself (a fixture) isn't checked
+    assert diff.write_checks(now, now) == []  # what the baseline did too isn't new
+    only_amount = diff.database({"steps": [_w("DB INSERT bookings", ["amountDue"], ["amountDue"])]})
+    assert [f["field"] for f in diff.write_checks(only_amount, now)] == ["timezone", "branchId", "clinic_id",
+                                                                         "pin.lat", "name"]
+
+
+def test_new_write_checks_are_ranked_and_cut_to_three():
+    now = {"a": {"db": diff.database({"steps": [_w("DB INSERT t", ["location_id", "locationId", "price", "tz", "title"],
+                                                   ["location_id", "price"], {"title": "N/A", "tz": "UTC"})]})}}
+    found = diff.all_write_checks({}, {**now, "b": now["a"], "c": {"db": {}}})
+    assert [f["field"] for f in found] == ["price", "tz", "location_id", "title"]  # money, time, id, the rest
+    assert found[0]["cases"] == ["a", "b"]  # one finding in two tests is one item
+    lines = diff.write_checks_lines(found, lambda c: c)
+    assert lines[0] == "INSERT t leaves price empty (a, and 1 more test)" and len(lines) == 4
+    assert lines[-1].startswith("(+1 more")
 
 
 # ---------- on the server ----------

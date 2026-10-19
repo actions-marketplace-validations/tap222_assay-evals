@@ -294,3 +294,57 @@ def test_an_open_server_keeps_the_demo_views_as_they_are(client):
 def test_the_dashboard_is_sent_compressed(client):
     r = client.get("/", headers={"Accept-Encoding": "gzip"})
     assert r.status_code == 200 and r.headers["content-encoding"] == "gzip" and "<title>Assay</title>" in r.text
+
+
+def test_the_browser_checks_for_a_new_dashboard_on_every_load(client):
+    # Otherwise it keeps an old page by its age, and an upgrade doesn't show (seen after a local upgrade).
+    r = client.get("/")
+    assert r.headers["cache-control"] == "no-cache"
+
+
+def test_gate_takes_a_percentile_statistic(client):
+    base = [1000.0 + i for i in range(200)]
+    body = {
+        "lineage": {"prompt": "idx-v12", "model": "claude-sonnet-5", "build": "abc123", "corpus": "cert-2026-09"},
+        "rules": [{"measure_id": "latency_ms", "higher_is_better": False, "tolerance": 50, "min_n": 100,
+                   "statistic": "p95"}],
+        "samples": {"latency_ms": {"overall": {"baseline": base, "candidate": base[:180] + [9000.0] * 20}}},
+        "identical_runs": {"latency_ms": [base, base]},
+    }
+    d = client.post("/v1/gates/evaluate", json=body).json()
+    assert d["outcome"] == "rollback" and d["slices"][0]["statistic"] == "p95"
+    body["rules"][0]["statistic"] = "median"
+    assert client.post("/v1/gates/evaluate", json=body).status_code == 422
+
+
+def test_gate_takes_an_absolute_limit(client):
+    slow = [25000.0 if i % 10 == 0 else 1000.0 + i for i in range(200)]
+    body = {
+        "lineage": {"prompt": "idx-v12", "model": "claude-sonnet-5", "build": "abc123", "corpus": "cert-2026-09"},
+        "rules": [{"measure_id": "latency_ms", "higher_is_better": False, "tolerance": 50, "min_n": 100,
+                   "statistic": "p95", "absolute_limit": 20000}],
+        "samples": {"latency_ms": {"overall": {"baseline": slow, "candidate": slow}}},
+        "identical_runs": {"latency_ms": [slow, slow]},
+    }
+    d = client.post("/v1/gates/evaluate", json=body).json()
+    s = d["slices"][0]
+    assert d["outcome"] == "rollback" and s["absolute_limit"] == 20000 and s["candidate_value"] == 25000
+
+
+def test_gate_takes_a_margin_per_slice(client):
+    base = [1.0] * 190 + [0.0] * 10
+    cand = [1.0] * 180 + [0.0] * 20
+    body = {
+        "lineage": {"prompt": "idx-v12", "model": "claude-sonnet-5", "build": "abc123", "corpus": "cert-2026-09"},
+        "rules": [{"measure_id": "accuracy", "tolerance": 0.1, "min_n": 100,
+                   "slices": {"high_value": {"tolerance": 0.01}}}],
+        "samples": {"accuracy": {"routine": {"baseline": base, "candidate": cand},
+                                 "high_value": {"baseline": base, "candidate": cand}}},
+        "identical_runs": {"accuracy": [base, base[::-1]]},
+    }
+    d = client.post("/v1/gates/evaluate", json=body).json()
+    by = {s["slice"]: s for s in d["slices"]}
+    assert d["outcome"] == "rollback" and by["high_value"]["own_margin"] and by["high_value"]["tolerance"] == 0.01
+    assert by["routine"]["outcome"] == "advance" and not by["routine"]["own_margin"]
+    body["rules"][0]["slices"] = {"high_value": {"tolerence": 0.01}}
+    assert client.post("/v1/gates/evaluate", json=body).status_code == 422

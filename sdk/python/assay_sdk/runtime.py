@@ -148,13 +148,27 @@ def price_of(prices: Dict[str, tuple], model: Optional[str]) -> Optional[tuple]:
     return prices[max(keys, key=len)] if keys else None
 
 
+def unanswered(resp) -> bool:
+    """A call that failed without the provider answering: a timeout or a dropped connection, not an
+    HTTP error. It may have run and been billed, so its cost is unknown. A call that was never sent
+    carries cost=0.0 and isn't one."""
+    if not getattr(resp, "error", None) or getattr(resp, "cost", None) is not None:
+        return False
+    exc = getattr(resp, "exception", None)
+    if exc is not None:
+        return _code(exc) is None
+    return getattr(resp, "error_kind", None) == "timeout"
+
+
 def cost_of(resp, prices: Dict[str, tuple]) -> Optional[float]:
     """Dollars for one call: the provider's figure, or tokens times the price. None if unknown."""
     if getattr(resp, "cost", None) is not None:
         return float(resp.cost)
     u = resp.usage or {}
     if getattr(resp, "error", None) and u.get("input") is None and u.get("output") is None:
-        return 0.0  # a request that failed before any tokens (a 429, a 5xx): nothing to pay
+        # The provider answered with an error (a 429, a 5xx): nothing to pay. No answer at all (a timeout,
+        # a dropped connection): it may have run the call and billed it, so the cost is unknown, not 0.
+        return None if unanswered(resp) else 0.0
     p = price_of(prices, resp.model)
     if p is None or u.get("input") is None:
         return None
@@ -302,7 +316,7 @@ class _Scope:
                 s.tokens[k] += u.get(k) or 0
             if cost is None:
                 s.unpriced += 1
-                s.unpriced_models[resp.model or "unknown"] += 1
+                s.unpriced_models[NO_ANSWER if unanswered(resp) else resp.model or "unknown"] += 1
             else:
                 s.cost += cost
                 s.priced += 1
@@ -358,6 +372,7 @@ class _Scope:
 
 
 UNSEEN = "(calls not seen)"
+NO_ANSWER = "(no answer)"  # sent, then a timeout or a dropped connection: the provider may have billed it
 
 
 class _Unseen:
@@ -371,7 +386,7 @@ def observe(provider: str, resp: Any = None, exc: Optional[BaseException] = None
         return
     from assay_sdk.llm import Response, normalize
     try:
-        r = normalize(resp, provider) if exc is None else Response(provider=provider, error=str(exc))
+        r = normalize(resp, provider) if exc is None else Response(provider=provider, error=str(exc), exception=exc)
     except Exception:
         r = _Unseen()
     scope.counted(r)
@@ -485,11 +500,14 @@ class Report:
         tok = f"{t.get('input', 0):,} in, {t.get('output', 0):,} out" + \
               (f" ({t['cached']:,} cached)" if t.get("cached") else "")
         out += [f"LLM calls:      {self.llm_calls:,}", f"Retries:        {self.retries:,}", f"Tokens:         {tok}"]
-        named = sorted(m for m in self.unpriced_models if m != UNSEEN)
-        why = (f"no price for {', '.join(named)} (pass prices=, or set ASSAY_PRICES)" if named else "") + \
-              ("; " if named and UNSEEN in self.unpriced_models else "") + \
-              ("the judge's calls aren't seen (ask through assay_sdk.Judge, or turn on assay.instrument())"
-               if UNSEEN in self.unpriced_models else "")
+        named = sorted(m for m in self.unpriced_models if m not in (UNSEEN, NO_ANSWER))
+        why = "; ".join(x for x in (
+            f"no price for {', '.join(named)} (pass prices=, or set ASSAY_PRICES)" if named else "",
+            "the judge's calls aren't seen (ask through assay_sdk.Judge, or turn on assay.instrument())"
+            if UNSEEN in self.unpriced_models else "",
+            f"{_n(self.unpriced_models[NO_ANSWER], 'call')} got no answer (a timeout or a dropped connection), "
+            f"and the provider may have billed {'it' if self.unpriced_models[NO_ANSWER] == 1 else 'them'}"
+            if self.unpriced_models.get(NO_ANSWER) else "") if x)
         if self.cost_usd is None:
             cost = f"unknown: {why}" if why else "$0.00"
         else:

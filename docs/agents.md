@@ -261,9 +261,26 @@ expect(assay_case).handles_failure(max_retries=2)
 
 For a tool recorded with `@assay.tool` or `run.call`: `empty` returns `[]`, `error` raises, `timeout`
 raises `TimeoutError`, `error:N` fails the first N calls and then calls it for real (does it retry?),
-`{"return": value}` returns that. The step records which fault it was. `handles_failure()` passes when
+`{"return": value}` returns that, and `lost` calls it for real, then raises `TimeoutError` (it
+went through, but the reply never arrived). The step records which fault it was. `handles_failure()` passes when
 the answer doesn't claim success, no tool is retried more than `max_retries` times, and the user is
 told (or the run escalated, or a retry worked).
+
+**Charged twice for one operation.** A payment that went through, with its reply lost, is the
+retry that charges twice. `lost` makes it happen; `at_most_once` checks the agent didn't do it
+again:
+
+```python
+with assay.faults(charge="lost"):
+    reply = my_agent("Pay for order 17", run=assay_case)
+expect(assay_case).at_most_once("charge", key="order_id")
+```
+
+It fails when `charge` went through more than once for the same `order_id` (more than once in
+all, without `key`): "charge went through 2 times for order_id='O-17' (steps 3, 5); once
+expected." A call counts when it ran: it succeeded, or `lost` dropped its reply. One that failed
+before it ran (`error`, `timeout`) doesn't. The same check fits a booking, an email or anything
+else that mustn't happen twice.
 
 **The world changing while the agent works.** An approval checked when the agent plans can be stale
 by the time it acts. `{"returns": [a, b, ...]}` gives a tool one value per call, the last one from
@@ -282,28 +299,33 @@ list, so several sources can change in the same run, and a related record can ch
 approved one stays the same. The substituted call is recorded as `fault="return"`, so
 `handles_failure()` also checks the agent told the user it didn't go ahead.
 
-**Where failures cluster: the transition failure matrix.** Rows are the last step that went right,
-columns the first that failed: the goal checkpoints when a case has them, else the last tool call
-that worked and the first bad step credit assignment found.
+**Where runs broke.** One line per place agent runs broke, in plain words: the last step that
+worked, then the first that went wrong ("gen_sql worked, then exec_sql went wrong"). Where a case
+has goal checkpoints, the line names them instead ("Reached “order found”, then missed “order
+cancelled”"). Each line has how many runs broke there, how, what went wrong in one of them, and
+every run, to open. Against a baseline, what got worse comes first, and places that no longer
+break are listed below.
 
 ```
 assay matrix                          # the latest test run; --run, --task, --format json
-assay matrix --baseline t-0924-1100   # the change in each cell: which transition got worse
+assay matrix --baseline t-0924-1100   # what got worse since the baseline
 ```
 
 ```
-4 of 5 runs failed (baseline r0: 2).
+4 of 5 runs failed (r0: 2). Agent runs only: 1 plain tests left out.
 
-last ok / failed  exec_sql  answer
-gen_sql                3+2       .
-exec_sql                 .       1
-
-Got worse:
-  gen_sql → exec_sql: 3 (+2), Tool error, not recovered 3; e.g. a, b, c
+Where runs broke (the last step that worked, then the first that went wrong):
+    3 (+2)  gen_sql worked, then exec_sql went wrong: Tool error, not recovered 3
+            e.g. a: exec_sql failed: syntax error
+         1  exec_sql worked, then the answer went wrong: Wrong answer 1
+            e.g. d: …
 ```
 
-It's in the Agents tab, under **Details** for the run, and at `GET /v1/agents/matrix?source=…&run=…&baseline=…`.
-Without `run`, it's built from the first failures people marked in the Review tab.
+Plain tests recorded with `pytest --assay-all` aren't agents: they're left out, and the count says
+how many. It's in the Agents tab, under **Details** for the run, and at
+`GET /v1/agents/matrix?source=…&run=…&baseline=…` (each cell has its `sentence` and its `runs`).
+There, it checks itself: if a run it counts passed every check under **What failed**, it says the
+two disagree. Without `run`, it's built from the first failures people marked in the Review tab.
 
 ### Simulated users: the whole conversation, not one message
 
@@ -359,6 +381,10 @@ run.mcp_prompt("refund_policy_check", {"order": "O-17"}, messages, server="docs"
 
 A resource's contents count as what the agent retrieved, so a judge given that policy as its
 context passes the context check.
+
+An MCP tool is named by its server and its name in the flow and the diff (`shop.refund`). Two
+servers can both offer `search`, so a call that moved from one server to the other is a change,
+though the tool's name is the same.
 
 An MCP server's tools change under the agent: a description reworded, an argument made required.
 Offer the model the server's `tools/list` as it is, and record it with the call:

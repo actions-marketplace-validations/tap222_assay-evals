@@ -36,6 +36,7 @@ of its own (invoice_number 98% → 91%).
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Tuple
 
@@ -50,9 +51,18 @@ RULE = "─" * 32
 
 # ---------- flows ----------
 
+DB_READS = "DB reads"  # a run's reads per table (assay-evals/jest): counted, left out of the flow
+DB_UNWRITTEN = "DB unwritten"  # values a test sent that no query used, by field name (assay-evals/jest)
+READS_GREW = (2, 5)  # reads of a table that at least doubled and grew by 5 or more are a change
+
+
 def _step_label(s: dict) -> Optional[str]:
     if s["kind"] == "tool":
-        return s["name"]
+        if s["name"] in (DB_READS, DB_UNWRITTEN):
+            return None
+        # An MCP tool is its server and its name: two servers can both offer `search`, and a call that
+        # moved from one to the other is a change, though the name is the same.
+        return f"{s['server']}.{s['name']}" if s.get("server") else s["name"]
     if s["kind"] == "approval":
         decision = (s.get("args") or {}).get("decision")
         return f"approval({s['name']})" if decision in (None, "approved") else f"approval({s['name']}: {decision})"
@@ -63,6 +73,195 @@ def _step_label(s: dict) -> Optional[str]:
 
 def flow(traj: dict) -> Tuple[str, ...]:
     return tuple(x for x in (_step_label(s) for s in traj["steps"]) if x)
+
+
+def database(traj: dict) -> dict:
+    """What a run did to the database: {"writes": {"DB INSERT bookings": {"set": [...], "empty": [...],
+    "placeholder": {column: word}, "fixture": True when the test made it, not the app}}, "reads": {table: n},
+    "unwritten": {sent: {"never": [field], "json": {field: "table.column"}}}}. A write made more than once
+    sets every column any of them set, and leaves empty only what all of them left empty."""
+    writes, reads, unwritten = {}, {}, {}
+    for s in traj["steps"]:
+        if s["kind"] != "tool" or not str(s.get("name") or "").startswith("DB "):
+            continue
+        a = s.get("args") or {}
+        if s["name"] == DB_READS:
+            reads = {k: v for k, v in a.items() if isinstance(v, int)}
+            continue
+        if s["name"] == DB_UNWRITTEN:
+            unwritten = {k: v for k, v in a.items() if isinstance(v, dict)}
+            continue
+        w = writes.setdefault(s["name"], {"set": set(), "empty": None, "placeholder": {}, "fixture": True})
+        w["fixture"] = w["fixture"] and bool(a.get("fixture"))  # the test's own setup, every time
+        w["set"] |= set(a.get("set") or [])
+        empty = set(a.get("empty") or [])
+        w["empty"] = empty if w["empty"] is None else w["empty"] & empty
+        if isinstance(a.get("placeholder"), dict):
+            w["placeholder"].update({str(k): str(v) for k, v in a["placeholder"].items()})
+    return {"writes": {k: {"set": sorted(w["set"]), "empty": sorted(w["empty"] or []), "placeholder": w["placeholder"],
+                           **({"fixture": True} if w["fixture"] else {})}
+                       for k, w in writes.items()},
+            "reads": reads, "unwritten": unwritten}
+
+
+def database_change(before: dict, now: dict) -> List[str]:
+    """How the same writes changed (a write added or dropped is in the flow), and reads that grew a lot."""
+    out = []
+    for name in sorted(set(before["writes"]) & set(now["writes"])):
+        b, n = before["writes"][name], now["writes"][name]
+        parts = []
+        dropped = [c for c in b["set"] if c not in n["set"]]
+        empty = [c for c in n["empty"] if c not in b["empty"]]
+        filled = [c for c in b["empty"] if c not in n["empty"] and c in n["set"]]
+        also = [c for c in n["set"] if c not in b["set"] and c not in n["empty"]]
+        if dropped:
+            parts.append(f"no longer sets {', '.join(dropped)}")
+        if empty:
+            parts.append(f"now leaves {', '.join(empty)} empty")
+        if filled:
+            parts.append(f"now fills {', '.join(filled)}")
+        if also:
+            parts.append(f"now also sets {', '.join(also)}")
+        if parts:
+            out.append(f"{name}: {'; '.join(parts)}")
+    times, more = READS_GREW
+    for table in sorted(set(before["reads"]) | set(now["reads"])):
+        was, is_ = before["reads"].get(table, 0), now["reads"].get(table, 0)
+        if is_ >= times * max(was, 1) and is_ - was >= more:
+            out.append(f"reads of {table}: {is_} instead of {was}")
+    return out
+
+
+# ---------- new writes, checked ----------
+#
+# The booking-app replay (docs/p0-findings.md) found the writes that saved wrong data were wrong from
+# the commit that added them: a diff had nothing to compare them with. So new writes are checked on
+# their own: a value the test sent that never reached a row, a column set to a placeholder, a money
+# column left empty, and a reference left empty next to its twin. Ranked money first, then times and
+# timezones, then ids. Writes the test made itself (fixtures) aren't checked.
+
+MONEY = {"amount", "price", "total", "subtotal", "cost", "fee", "fees", "paid", "balance", "currency", "charge",
+         "refund", "tax", "discount", "cents", "payment", "payout", "wallet", "credit", "credits"}
+TIME = {"timezone", "tz", "zone", "start", "starts", "end", "ends", "date", "time", "scheduled", "schedule", "due",
+        "hour", "hours", "slot"}
+WHEN = {"start", "starts", "end", "ends", "scheduled", "due"}  # an "...At" that isn't an event's time
+OPTIONAL = {"created", "updated", "deleted", "cancelled", "canceled", "parent", "previous", "replaced", "last", "by"}
+CHECK_KINDS = {"unwritten": 0, "json": 0, "placeholder": 1, "empty": 2}
+SHOW_CHECKS = 3
+
+
+def _leaf(field: str) -> str:
+    return re.sub(r"\[\d+\]", "", field.split(".")[-1])
+
+
+def _words(name: str) -> List[str]:
+    """bookingAmountDue, booking_amount_due -> ["booking", "amount", "due"]."""
+    return [w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name)]
+
+
+def _key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _topic(name: str) -> int:
+    """0 money, 1 times and timezones, 2 ids, 3 the rest: the order the checks are shown in."""
+    words = _words(_leaf(name))
+    if words and words[-1] in ("at", "on") and not WHEN & set(words):
+        return 3  # when something happened (paidAt, createdAt): empty until it does
+    if MONEY & set(words):
+        return 0
+    if TIME & set(words):
+        return 1
+    if len(words) > 1 and words[-1] == "id":
+        return 2
+    return 3
+
+
+def _empty_matters(column: str, write: dict) -> Optional[str]:
+    """Why an empty column on a new INSERT is worth a look, or None. Money left empty, and a reference
+    left empty while the same write sets its twin (clinic_id empty, clinicId set: the relation reads
+    the empty one). Optional dates and references are empty by design, so they aren't flagged alone."""
+    topic = _topic(column)
+    if topic == 0:
+        return f"leaves {column} empty"
+    if topic == 2:
+        twin = next((c for c in write.get("set") or [] if c != column and _key(c) == _key(column)
+                     and c not in (write.get("empty") or [])), None)
+        if twin:
+            return f"leaves {column} empty but sets {twin}"
+    return None
+
+
+def write_checks(before: Optional[dict], now: dict) -> List[dict]:
+    """What's wrong-looking in a case's writes and wasn't in its baseline's: [{"kind", "write", "field",
+    "text", "topic"}], ranked. before: the baseline's database(), or None for a case without one."""
+    before = before or {"writes": {}, "unwritten": {}}
+    found, seen = [], set()
+
+    def add(kind: str, write: str, field: str, text: str, was: bool):
+        if not was and (kind, write, field) not in seen:
+            seen.add((kind, write, field))
+            found.append({"kind": kind, "write": write, "field": field, "text": text, "topic": _topic(field)})
+
+    writes = {k: w for k, w in (now.get("writes") or {}).items() if not w.get("fixture")}  # the app's, not the test's
+    empty_by_key = {}  # a sent field's name -> the INSERT that left that column empty
+    for name, w in writes.items():
+        for c in w.get("empty") or []:
+            if name.startswith("DB INSERT "):
+                empty_by_key.setdefault(_key(c), (name, c))
+    told = set()
+    for sent, where in (now.get("unwritten") or {}).items():
+        old = (before.get("unwritten") or {}).get(sent) or {}
+        for field, column in sorted((where.get("json") or {}).items()):
+            text = f"{sent} sent {field}; it reached only {column} (inside JSON), no column of its own"
+            hit = empty_by_key.get(_key(_leaf(field)))
+            if hit:
+                text += f", and {hit[0][3:]} left {hit[1]} empty"
+                told.add(hit)
+            add("json", sent, field, text, field in (old.get("json") or {}))
+        for field in where.get("never") or []:
+            text = f"{sent} sent {field}; no query used it"
+            hit = empty_by_key.get(_key(_leaf(field)))
+            if hit:
+                text = f"{sent} sent {field}, but {hit[0][3:]} left {hit[1]} empty"
+                told.add(hit)
+            add("unwritten", sent, field, text, field in (old.get("never") or []))
+    for name, w in sorted(writes.items()):
+        b = (before.get("writes") or {}).get(name)
+        for c, word in sorted((w.get("placeholder") or {}).items()):
+            add("placeholder", name[3:], c, f"{name[3:]} sets {c} to {json.dumps(word)}",
+                b is not None and c in (b.get("placeholder") or {}))
+        if not name.startswith("DB INSERT "):
+            continue
+        for c in w.get("empty") or []:
+            why = _empty_matters(c, w)
+            if why and (name, c) not in told:
+                add("empty", name[3:], c, f"{name[3:]} {why}", b is not None and c in b.get("empty", []))
+    found.sort(key=lambda f: (f["topic"], CHECK_KINDS[f["kind"]], f["write"], f["field"]))
+    return found
+
+
+def all_write_checks(before: Dict[str, dict], now: Dict[str, dict]) -> List[dict]:
+    """write_checks() for every case of a run, from flows(), one item per finding however many cases
+    show it: [{..., "cases": [case, ...]}], ranked, the most widespread first within a rank."""
+    found: Dict[tuple, dict] = {}
+    for case in sorted(now):
+        b = before[case].get("db") if case in before else None
+        for f in write_checks(b, now[case].get("db") or {}):
+            found.setdefault((f["kind"], f["write"], f["field"]), {**f, "cases": []})["cases"].append(case)
+    return sorted(found.values(), key=lambda f: (f["topic"], CHECK_KINDS[f["kind"]], -len(f["cases"]), f["write"],
+                                                 f["field"]))
+
+
+def write_checks_lines(found: List[dict], short, limit: int = SHOW_CHECKS) -> List[str]:
+    """At most `limit` lines, then how many more."""
+    lines = []
+    for f in found[:limit]:
+        n = len(f["cases"])
+        lines.append(f"{f['text']} ({short(f['cases'][0])}" + (f", and {n - 1} more test{'s' * (n > 2)})" if n > 1 else ")"))
+    if len(found) > limit:
+        lines.append(f"(+{len(found) - limit} more: `assay diff --format json` lists them)")
+    return lines
 
 
 def flows(engine, tenant: str, run_id: str) -> Dict[str, dict]:
@@ -83,22 +282,38 @@ def flows(engine, tenant: str, run_id: str) -> Dict[str, dict]:
             top, n = seen.most_common(1)[0]
             trace = min(d for d in ds if d in trajs and flow(trajs[d]) == top)  # one run that took it
             out[case] = {"flow": top, "distinct": len(seen), "attempts": sum(seen.values()), "top_count": n,
-                         "trace": trace}
+                         "trace": trace, "db": database(trajs[trace])}
     return out
 
 
 def flow_change(before: Tuple[str, ...], now: Tuple[str, ...]) -> Optional[dict]:
-    """How a flow changed: {"added", "removed", "reordered", "approval_moved"}; None if it didn't."""
+    """How a flow changed: {"added", "removed", "reordered", "approval_moved", "counts"}; None if it didn't.
+    counts: steps both flows have, made a different number of times ({"HTTP GET x/charges": [1, 2]}): a
+    charge sent twice isn't "another order"."""
     if before == now:
         return None
     added = sorted(set(now) - set(before))
     removed = sorted(set(before) - set(now))
-    common_before = [x for x in before if x in now]
-    common_now = [x for x in now if x in before]
-    reordered = sorted(set(common_before)) == sorted(set(common_now)) and common_before != common_now
+    # The order steps first appear in, so a repeat doesn't read as a reorder.
+    common_before = [x for x in dict.fromkeys(before) if x in now]
+    common_now = [x for x in dict.fromkeys(now) if x in before]
+    reordered = common_before != common_now
     approval_moved = reordered and any(x.startswith("approval(") and
                                        common_before.index(x) != common_now.index(x) for x in common_before)
-    return {"added": added, "removed": removed, "reordered": reordered, "approval_moved": approval_moved}
+    nb, nn = Counter(before), Counter(now)
+    counts = {x: [nb[x], nn[x]] for x in sorted(set(before) & set(now)) if nb[x] != nn[x]}
+    return {"added": added, "removed": removed, "reordered": reordered, "approval_moved": approval_moved,
+            "counts": counts}
+
+
+def change(before: dict, now: dict) -> Optional[dict]:
+    """How a case's behavior changed: its flow, and what it wrote to the database ("db")."""
+    ch = flow_change(before["flow"], now["flow"])
+    db = database_change(before.get("db") or {"writes": {}, "reads": {}}, now.get("db") or {"writes": {}, "reads": {}})
+    if not db:
+        return ch
+    ch = ch or {"added": [], "removed": [], "reordered": False, "approval_moved": False, "counts": {}}
+    return {**ch, "db": db}
 
 
 def _describe(ch: dict) -> str:
@@ -111,7 +326,14 @@ def _describe(ch: dict) -> str:
         parts.append(f"new: {', '.join(ch['added'])}")
     if ch["removed"]:
         parts.append(f"no longer: {', '.join(ch['removed'])}")
+    for step, (was, is_) in (ch.get("counts") or {}).items():
+        parts.append(f"{step}: {_times(is_)} instead of {_times(was)}")
+    parts += ch.get("db") or []
     return "; ".join(parts) or "changed"
+
+
+def _times(n: int) -> str:
+    return "once" if n == 1 else "twice" if n == 2 else f"{n} times"
 
 
 # ---------- runs ----------
@@ -168,7 +390,7 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
     worse = {x["case_id"]: x["changes"] for x in result.get("behavior") or []}
 
     def entry(case: str) -> dict:
-        ch = flow_change(before[case]["flow"], now[case]["flow"]) if case in before and case in now else None
+        ch = change(before[case], now[case]) if case in before and case in now else None
         checks = [(f, r) for f, r in failing_fields.get(case, [])]
         fields = [f for f, _ in checks]
         reasons = [local._tidy(f"{local._label(f)}: {r.splitlines()[0][:200]}") for f, r in checks]
@@ -202,7 +424,7 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
     regressions.sort(key=lambda e: (rank[e["severity"]], "field" in e, e["name"]))
     improved = set(s["improved"])
     changed = [entry(case) for case in b["passed"] if case not in improved and case in before and case in now
-               and before[case]["flow"] != now[case]["flow"]]
+               and change(before[case], now[case])]
     for e in changed:
         e["severity"] = None
     flaky = []
@@ -214,6 +436,7 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
                            for f, x in varied)
         flaky.append({"case": case, "name": local._short(case), "detail": detail or "varied across attempts"})
     unchanged = len(b["passed"]) - len(improved & set(b["passed"])) - len(changed)
+    checks = all_write_checks(before, now)
     return {"baseline": {"run_id": baseline, "label": label(runs.get(baseline), baseline)},
             "current": {"run_id": current, "label": label(runs.get(current), current)},
             "scenarios": s["cases"],
@@ -224,7 +447,8 @@ def compute(engine, tenant: str, current: str, baseline: str, cfg: dict, source=
                        "acknowledged": len(b.get("acknowledged") or []), "judge_changed": len(b.get("judge changed") or []),
                        "judge_unstable": len(b.get("judge unstable") or [])},
             "regressions": regressions, "new_failures": [entry(c) for c in b["new failure"]],
-            "changed": changed, "flaky": flaky, "improved": [local._short(c) for c in sorted(improved)],
+            "changed": changed, "flaky": flaky,
+            "write_checks": [{**x, "names": [local._short(c) for c in x["cases"]]} for x in checks], "improved": [local._short(c) for c in sorted(improved)],
             "not_judged": [{"name": local._short(x["case_id"]), "field": x["field"], "reason": x["reason"]}
                            for x in result["not_judged"]],
             "judge_changed": [{"name": local._short(p["case_id"]), "field": p["field"], "before": p["before"],
@@ -250,9 +474,10 @@ def _entry_lines(i: int, e: dict, paint) -> List[str]:
     if "field" in e:
         return out + [f"   {e['change']}", f"   Severity: {e['severity']}"]
     if e.get("flow_change"):
-        out += [f"   Expected: {' → '.join(e['expected']) or '(no calls)'}",
-                f"   Actual:   {' → '.join(e['actual']) or '(no calls)'}" + (" (varies across attempts)" if e["varies"] else ""),
-                paint(f"   {e['flow_change']['text'][:1].upper()}{e['flow_change']['text'][1:]}", "dim")]
+        if e["expected"] != e["actual"]:  # the same steps, with other columns: only the text says how
+            out += [f"   Expected: {' → '.join(e['expected']) or '(no calls)'}",
+                    f"   Actual:   {' → '.join(e['actual']) or '(no calls)'}" + (" (varies across attempts)" if e["varies"] else "")]
+        out.append(paint(f"   {e['flow_change']['text'][:1].upper()}{e['flow_change']['text'][1:]}", "dim"))
     for r in e["reasons"][:2]:
         out.append(f"   {r}")
     if len(e["reasons"]) > 2:
@@ -309,6 +534,10 @@ def text(d: dict) -> str:
             out.append(f"- {x['text']}")
             if x.get("most"):
                 out.append(paint("  grew most: " + ", ".join(m.get("name") or m["case_id"] for m in x["most"]), "dim"))
+    if d.get("write_checks"):
+        from assay.local import _short
+        out += ["", paint("NEW WRITES TO CHECK", "bold"), ""]
+        out += [f"- {x}" for x in write_checks_lines(d["write_checks"], _short)]
     if d.get("judge_changed"):
         pairs = sorted({(x["before"], x["now"]) for x in d["judge_changed"]})
         out += ["", paint("JUDGE CHANGED", "bold"), "",
@@ -359,10 +588,16 @@ def markdown(d: dict) -> str:
                 continue
             out.append(f"{i}. {_code(e['name'])}{sev}")
             if e.get("flow_change"):
-                out += [f"   - Expected: {_code(' → '.join(e['expected']) or '(no calls)', 300)}",
-                        f"   - Actual: {_code(' → '.join(e['actual']) or '(no calls)', 300)}"]
+                if e["expected"] != e["actual"]:
+                    out += [f"   - Expected: {_code(' → '.join(e['expected']) or '(no calls)', 300)}",
+                            f"   - Actual: {_code(' → '.join(e['actual']) or '(no calls)', 300)}"]
+                if e["flow_change"].get("db"):  # the flow can't show a column a write stopped setting
+                    out += [f"   - {_md(x)}" for x in e["flow_change"]["db"]]
             out += [f"   - {_md(r)}" for r in e["reasons"][:2]]
             out += [f"   - Changed: {_md(x)}" for x in e.get("setup") or []]
+    if d.get("write_checks"):
+        from assay.local import _short
+        out += ["", "### New writes to check", ""] + [f"- {_md(x)}" for x in write_checks_lines(d["write_checks"], _short)]
     if d.get("judge_unstable"):
         out += ["", "### Judge unstable", ""] + [f"- {_code(x['name'])}: {_md(x['detail'])}" for x in d["judge_unstable"]]
         out += ["", "More attempts of the AI won't settle these: make the judge steadier."]
@@ -383,24 +618,31 @@ def regressed(d: dict) -> bool:
 
 # ---------- the command ----------
 
-def main(root, baseline_ref: Optional[str], current_ref: Optional[str], fmt: str = "text") -> int:
-    """`assay diff [BASELINE] [CURRENT]`: 0 nothing regressed, 1 something did, 2 nothing to compare."""
+def latest(root, baseline_ref: Optional[str] = None, current_ref: Optional[str] = None, quiet: bool = False):
+    """compute() for the runs `assay diff` would compare: (diff, None), or (None, why there's nothing).
+    quiet: don't say which baseline was picked."""
     import sys
     from assay import local
     from assay.failures import eval_runs
     home = local.ensure_home(root)
     if not (home / "assay.db").exists():
-        print("Nothing to compare yet: run `pytest --assay` or `assay test` first.", file=sys.stderr)
-        return 2
+        return None, "Nothing to compare yet: run `pytest --assay` or `assay test` first."
     engine = store.make_engine(f"sqlite:///{home / 'assay.db'}")
     state = local._state(home)
     runs = [r for r in eval_runs(engine, local.TENANT) if r["run_id"] != local.BASELINE]
     if not runs:
-        print("Nothing to compare yet: run `pytest --assay` or `assay test` first.", file=sys.stderr)
-        return 2
+        return None, "Nothing to compare yet: run `pytest --assay` or `assay test` first."
     current = resolve(runs, current_ref) if current_ref else (state.get("last") or runs[0]["run_id"])
     if baseline_ref:
         baseline = resolve(runs, baseline_ref)
+    elif (state.get("compared") or {}).get("run") == current and state.get("last") == current:
+        # The run passed and became the baseline itself: compare it with the run its cases were compared with.
+        cases = Counter(state["compared"]["cases"].values())
+        known = {r["run_id"] for r in runs}
+        baseline = next((run for run, _ in cases.most_common() if run in known), None) or local.BASELINE
+        if len(cases) > 1 and not quiet:
+            print(f"Compared with {baseline}, the baseline of {cases[baseline]} of {sum(cases.values())} cases.",
+                  file=sys.stderr)
     elif state.get("baseline_cases"):
         baseline = local.BASELINE  # each case's last passing run, as `assay test` compares
     else:
@@ -408,20 +650,26 @@ def main(root, baseline_ref: Optional[str], current_ref: Optional[str], fmt: str
     for ref, got in ((baseline_ref, baseline), (current_ref, current)):
         if ref and not got:
             known = ", ".join(label(r, r["run_id"]) for r in runs[:5])
-            print(f"No run is {ref!r}: give a run id or a version recorded with the runs (version=...). "
-                  f"Recent runs: {known}.", file=sys.stderr)
-            return 2
+            return None, (f"No run is {ref!r}: give a run id or a version recorded with the runs (version=...). "
+                          f"Recent runs: {known}.")
     if not baseline:
-        print("Only one run so far: there's nothing to compare it with.", file=sys.stderr)
-        return 2
+        return None, "Only one run so far: there's nothing to compare it with."
     try:
         cfg = local.find_config(root)
     except local.SetupError as exc:
-        print(exc, file=sys.stderr)
-        return 2
+        return None, str(exc)
     d = compute(engine, local.TENANT, current, baseline, cfg)
     if "error" in d:
-        print(d["error"], file=sys.stderr)
+        return None, d["error"]
+    return d, None
+
+
+def main(root, baseline_ref: Optional[str], current_ref: Optional[str], fmt: str = "text") -> int:
+    """`assay diff [BASELINE] [CURRENT]`: 0 nothing regressed, 1 something did, 2 nothing to compare."""
+    import sys
+    d, why = latest(root, baseline_ref, current_ref)
+    if d is None:
+        print(why, file=sys.stderr)
         return 2
     print({"text": text, "markdown": markdown, "json": as_json}[fmt](d), end="")
     return 1 if regressed(d) else 0

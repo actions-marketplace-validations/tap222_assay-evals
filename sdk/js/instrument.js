@@ -5,9 +5,9 @@
  *   const client = instrument(new Anthropic());        // or new OpenAI()
  *   const model = wrapLanguageModel({ model: openai("gpt-x"), middleware: assayMiddleware() });  // Vercel AI SDK
  *
- * Inside assayCase(), every call is recorded on the case's run: model, tokens, cost (ASSAY_PRICES),
+ * Inside assayCase() or track(), every call is recorded on that run: model, tokens, cost (ASSAY_PRICES),
  * text, the tool definitions it was offered, the tool calls it asked for, and why it stopped.
- * Outside a case nothing is recorded, so an instrumented client can be the app's own. Streams are
+ * Outside a run nothing is recorded, so an instrumented client can be the app's own. Streams are
  * left alone: the caller reads them, and there's nothing whole to record.
  */
 const { AsyncLocalStorage } = require("async_hooks");
@@ -15,9 +15,22 @@ const llm = require("./llm");
 
 const storage = new AsyncLocalStorage();
 
-/** The run of the assayCase() this code runs inside, or undefined. */
+/** The run of the assayCase() or track() this code runs inside, or undefined. */
 function currentRun() {
   return storage.getStore();
+}
+
+// The plain test running now, when every test is recorded (assay-evals/jest). Jest runs a file's
+// tests one at a time, so one slot is enough; an assayCase() inside it has a run of its own.
+let plain;
+
+function setPlainRun(run) {
+  plain = run || undefined;
+}
+
+/** The plain test running now, or undefined, also when the code runs inside an assayCase(). */
+function plainRun() {
+  return storage.getStore() ? undefined : plain;
 }
 
 function record(run, read, params, started, error) {
@@ -109,4 +122,4 @@ function assayMiddleware() {
   };
 }
 
-module.exports = { instrument, assayMiddleware, currentRun, storage };
+module.exports = { setPlainRun, plainRun, instrument, assayMiddleware, currentRun, storage };

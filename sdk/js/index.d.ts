@@ -80,6 +80,8 @@ export class Run {
   /** A decision to allow an action; contracts (requires_approval) and mustGetApprovalBefore() check it. */
   approval(action: string, decision?: "approved" | "rejected" | "pending", options?: { by?: string; reason?: string }): void;
   answer(text: string): void;
+  /** What the test gave the code under test; see sent(). */
+  sent(input: unknown, label?: string): void;
   outcome(value: "resolved" | "unresolved" | "escalated"): void;
   /** A check of the run's own: a domain rule, or a test's assert. */
   check(field: string, passed: boolean, reason?: string, evaluator?: string): void;
@@ -100,8 +102,34 @@ export function assayCase<T>(fn: (run: Run) => T | Promise<T>): Promise<T>;
 export function assayCase<T>(context: { name?: string; fullName?: string; expect?: unknown }, fn: (run: Run) => T | Promise<T>,
                              options?: { tags?: Record<string, Scalar> }): Promise<T>;
 
+export interface RunOptions {
+  caseId?: string;
+  tags?: Record<string, Scalar>;
+  kind?: "agent";
+  /** What the run was asked, e.g. the customer's message. */
+  input?: unknown;
+  /** What it ran on, e.g. { prompt: "receptionist@3", model: "claude-opus-5" }. */
+  version?: Record<string, string>;
+  segment?: string;
+  /** The conversation this run is a turn of, and its place in it from 0. */
+  conversationId?: string;
+  turn?: number;
+  /** Who asked, as a pseudonymous id. */
+  user?: string;
+}
+
 /** A run outside a test case, e.g. recorded by the app itself. */
-export function startRun(task: string, options?: { caseId?: string; tags?: Record<string, Scalar>; kind?: "agent" }): Run;
+export function startRun(task: string, options?: RunOptions): Run;
+
+/**
+ * One request of the app as a run: opens it, calls fn(run) with it current (an instrument()ed client
+ * records its model calls on it), and ends it, failed if fn throws. With ASSAY_URL set (and not
+ * ASSAY_PATH) the run is sent to the server in the background.
+ */
+export function track<T>(task: string, fn: (run: Run) => T | Promise<T>, options?: Omit<RunOptions, "caseId">): Promise<T>;
+
+/** Sends what's queued now (with ASSAY_URL); resolves true once nothing is left. For shutdown hooks. */
+export function flush(): Promise<boolean>;
 
 /** A prompt template, registered by version. Returns "id@version", for run.llm({ prompt }). */
 export function prompt(id: string, version: string | number, template?: string): string;
@@ -114,8 +142,8 @@ export function toolSchemas(tools?: Array<string | ToolDefinition>): Record<stri
 
 /**
  * Records the model calls an Anthropic or OpenAI client makes (messages.create, chat.completions.create,
- * responses.create) on the current assayCase's run. Returns the same client. Outside a case, and
- * for streams, nothing is recorded.
+ * responses.create) on the current run: an assayCase's, or a track()'s. Returns the same client.
+ * Outside a run, and for streams, nothing is recorded.
  */
 export function instrument<T>(client: T): T;
 
@@ -124,5 +152,22 @@ export function assayMiddleware(): {
   wrapGenerate: (options: { doGenerate: () => Promise<any>; params: any; model: any }) => Promise<any>;
 };
 
-/** The run of the assayCase() the calling code runs inside, or undefined. */
+/** The run of the assayCase() or track() the calling code runs inside, or undefined. */
 export function currentRun(): Run | undefined;
+
+/** What a SQL statement does: its operation, table, the columns it sets and the ones it leaves empty
+ * (DEFAULT, NULL, or a parameter bound to null), and those set to a placeholder ("Unknown", "N/A", a
+ * timezone of UTC). null for anything that isn't a read or a write. */
+export function summarizeSql(sql: string, values?: unknown[]): {
+  op: "INSERT" | "UPDATE" | "DELETE" | "SELECT"; table: string; set: string[]; empty: string[];
+  placeholder?: Record<string, string>;
+} | null;
+
+/** What the test gave the code under test, e.g. a service's input: sent(dto). Inside a recorded test,
+ * a value in it that no later query used is reported by field name ("DB unwritten"), never by value.
+ * A JSON request to the app in the same process (supertest) needs no call. */
+export function sent(input: unknown, label?: string): void;
+
+/** Records what plain tests write to Postgres through pg (assay-evals/jest calls it). Pass pg itself, or
+ * leave it out for the project's own. Returns whether pg was found. */
+export function recordPg(pg?: unknown): boolean;

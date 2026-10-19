@@ -150,6 +150,194 @@ def test_repeated_attempts_tell_chance_from_a_regression(project, capsys, monkey
     assert main(["test"]) == 1 and "task_0" in capsys.readouterr().out
 
 
+
+UNSURE = '''
+import json, os
+import assay_sdk as assay
+assay.init()
+attempt, mode = int(os.environ["ASSAY_TEST_ATTEMPT"]), os.environ.get("MODE", "same")
+only = set(json.loads(os.environ.get("ASSAY_RERUN_CASES", "null")) or [])
+for i in range(5):
+    if only and f"task_{i}" not in only:
+        continue
+    # task_0 after the change: fails every other attempt of the first 6, then keeps failing every other one
+    # ("worse") or stops failing ("chance")
+    ok = not (mode != "same" and i == 0 and attempt % 2 and (attempt < 6 or mode == "worse"))
+    assay.check(None, f"task_{i}", "pass" if ok else "fail", field="solved", expected="yes", actual="yes" if ok else "no")
+'''
+
+
+def _attempts(project, case):
+    rows = [json.loads(l) for l in sorted((project / ".assay" / "runs").glob("*.jsonl"))[-1].read_text().splitlines()]
+    return sum(1 for r in rows if (r.get("test") or {}).get("case") == case)
+
+
+def test_rerun_unsure_gives_more_attempts_only_to_the_cases_that_need_them(project, capsys, monkeypatch):
+    (project / "agent.py").write_text(UNSURE, encoding="utf-8")
+    config(project, f"{sys.executable} agent.py", repeat=6)
+    assert main(["test", "--repeat", "16"]) == 0  # the baseline: 16/16 each
+    monkeypatch.setenv("MODE", "worse")
+    assert main(["test"]) == 3  # 16/16 → 3/6 on its own: inconclusive
+    capsys.readouterr()
+
+    assert main(["test", "--rerun-unsure"]) == 1  # 3/6, then 6/12: worse, settled without a human rerun
+    out = capsys.readouterr()
+    assert "1 case could be worse, too few attempts to tell: 6 more attempts of it (12 each)." in out.err
+    assert "5 cases · 6 attempts each, up to 12 for the 1 case that needed more" in out.out and "Failed." in out.out
+    assert (_attempts(project, "task_0"), _attempts(project, "task_1")) == (12, 6)  # only the unsure case ran again
+
+    monkeypatch.setenv("MODE", "chance")
+    assert main(["test", "--rerun-unsure"]) == 0  # 3/6, then 9/12: no worse than chance
+    assert "6 more attempts of it" in capsys.readouterr().err
+
+
+def test_rerun_unsure_never_passes_a_case_because_it_ran_out(project, capsys, monkeypatch):
+    (project / "agent.py").write_text(UNSURE, encoding="utf-8")
+    config(project, f"{sys.executable} agent.py", repeat=4)
+    assert main(["test", "--repeat", "12"]) == 0  # 12 attempts of baseline can't tell 50% from chance here
+    monkeypatch.setenv("MODE", "worse")
+    assert main(["test", "--rerun-unsure"]) == 3  # still unclear at 19 attempts: inconclusive, not flaky
+    assert _attempts(project, "task_0") == 19 and _attempts(project, "task_1") == 4
+
+
+def test_more_looks_raise_the_bar_for_got_worse():
+    from types import SimpleNamespace as N
+    from assay import flaky
+    def rows(p, n):
+        return [N(status="pass" if i < p else "fail", attempt=i, ts=i, actual="x", case_id="c", field="f",
+                  evaluator="", judgements=None, judgements_passed=None) for i in range(n)]
+    cand, base = {("c", "f", ""): rows(12, 20)}, {("c", "f", ""): rows(20, 20)}
+    assert flaky.assess(cand, base)[("c", "f", "")]["state"] == "got_worse"  # 20/20 → 12/20, one look
+    with flaky.looks(4):  # q ≈ 0.002 still clears 0.05/4; the bar moved, the clear case stays clear
+        assert flaky.assess(cand, base)[("c", "f", "")]["state"] == "got_worse"
+    cand = {("c", "f", ""): rows(15, 20)}
+    q = flaky.assess(cand, base)[("c", "f", "")]["q_worse"]
+    assert 0.05 / 3 < q <= 0.05  # 20/20 → 15/20: worse on one look, not after three
+    assert flaky.assess(cand, base)[("c", "f", "")]["state"] == "got_worse"
+    with flaky.looks(3):
+        assert flaky.assess(cand, base)[("c", "f", "")]["state"] != "got_worse"
+
+
+SAVED = '''
+import assay_sdk as assay
+assay.init()
+answers = ["Refunds take 5 days.", "We can refund it.", "Ask support.", "No refund after 30 days."]
+for i, a in enumerate(answers):
+    passed = "refund" in a.lower()
+    assay.check(None, f"q{i}", "pass" if passed else "fail", field="helpful", evaluator="helpful@1",
+                inputs={"answer": a}, judge_model="m-1", judge_prompt="rubric@1")
+'''
+
+JUDGES = '''
+calls = {"n": 0}
+
+def same(answer):
+    return "refund" in answer.lower()
+
+def stricter(answer):
+    return "refund" in answer.lower() and "days" in answer.lower()
+
+def wobbly(answer):
+    calls["n"] += 1
+    return same(answer) if "Ask" not in answer else calls["n"] % 2 == 0
+
+def broken(answer):
+    return "not a verdict"
+'''
+
+
+def test_rejudge_a_saved_run_without_calling_the_ai(project, capsys):
+    (project / "agent.py").write_text(SAVED, encoding="utf-8")
+    (project / "judges.py").write_text(JUDGES, encoding="utf-8")
+    config(project, f"{sys.executable} agent.py")
+    main(["test"])
+    capsys.readouterr()
+
+    assert main(["rejudge", "--judge", "judges.py:same"]) == 0  # the same judge, frozen: no flips
+    out = capsys.readouterr().out
+    assert "Re-judged 4 saved answers from t-" in out and "No calls to the AI." in out
+    assert "Saved verdicts came from m-1 / rubric@1." in out
+    assert "Agrees with the saved verdicts  4/4 (100%), Cohen's kappa 1.00" in out and "Flipped" not in out
+
+    assert main(["rejudge", "--judge", "judges.py:stricter", "--min-agreement", "0.9"]) == 1  # a new rubric, tried first
+    out = capsys.readouterr().out
+    assert "Agrees with the saved verdicts  3/4 (75%)" in out and "pass → fail 1   fail → pass 0" in out
+    assert "q1  helpful  pass → fail" in out and "Below --min-agreement 90%." in out
+
+    assert main(["rejudge", "--judge", "judges.py:wobbly", "--times", "3", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["split"] == 1 and data["times"] == 3 and data["answers"] == 4
+
+    assert main(["rejudge", "--judge", "judges.py:broken"]) == 0  # no verdict isn't a flip
+    out = capsys.readouterr().out
+    assert "Couldn't be judged  4: not counted as flips" in out and "Agrees" not in out
+
+    assert main(["rejudge", "--judge", "judges.py:same", "--field", "polite"]) == 2
+    assert "Nothing to re-judge" in capsys.readouterr().err
+    assert main(["rejudge", "--judge", "judges.py:nope"]) == 2
+    assert "--judge: judges.py has no function nope." in capsys.readouterr().err
+
+
+def test_paired_cases_and_mcnemar():
+    from assay import flaky
+    assert flaky.mcnemar(0, 3) == 1.0 and abs(flaky.mcnemar(6, 0) - 1 / 64) < 1e-9
+    assert abs(flaky.mcnemar(8, 2) - 0.0546875) < 1e-9
+    now = {("a", "x"): [True, True, False], ("a", "y"): [True], ("b", "x"): [False, False, True], ("c", "x"): [True, False]}
+    before = {("a", "x"): [True], ("b", "x"): [True], ("c", "x"): [True], ("d", "x"): [False]}
+    pc = flaky.paired_cases(now, before)  # a: most attempts pass; b: most fail; c: a tie isn't most
+    assert pc["cases"] == 3 and pc["lost"] == ["b", "c"] and pc["gained"] == [] and pc["p"] == 0.25
+    assert flaky.paired_cases(now, {("z", "x"): [True]}) is None
+
+
+def test_kappa_discounts_agreement_by_chance():
+    from assay.rejudge import kappa
+    assert kappa([(True, True)] * 9 + [(False, False)]) == 1.0
+    assert kappa([(True, True)] * 9 + [(False, True)]) == 0.0  # 90% agreement, all of it what chance gives
+    assert kappa([(True, True)] * 10) is None and kappa([]) is None
+
+
+MIXED = '''
+import os
+import assay_sdk as assay
+assay.init()
+judge_fails, code_fails = os.environ.get("JUDGE_FAILS") == "1", os.environ.get("CODE_FAILS") == "1"
+for i in range(4):
+    assay.check(None, f"task_{i}", "fail" if code_fails and i == 0 else "pass", field="refund_amount",
+                expected="40", actual="40")
+    assay.check(None, f"task_{i}", "fail" if judge_fails and i < 2 else "pass", field="helpful",
+                judge_model="m-1", judge_prompt="rubric@1")
+'''
+
+
+def test_code_checks_and_judged_checks_are_reported_apart(project, capsys, monkeypatch):
+    (project / "agent.py").write_text(MIXED, encoding="utf-8")
+    config(project, f"{sys.executable} agent.py")
+    assert main(["test"]) == 0
+    out = capsys.readouterr().out
+    assert "Code checks    4/4 passing" in out and "Judged checks  4/4 passing" in out
+
+    monkeypatch.setenv("JUDGE_FAILS", "1")  # only the judge's verdicts moved
+    assert main(["test"]) == 1
+    out = capsys.readouterr().out
+    assert "Code checks    4/4 passing\nJudged checks  2/4 passing · 2 failing" in out
+    assert "Code checks held: what moved is judged. Check the judge before the AI (`assay rejudge`)." in out
+    md = (project / ".assay" / "summary.md").read_text(encoding="utf-8")
+    assert "Code checks: 4/4 passing · Judged checks: 2/4 passing · 2 failing. Code checks held" in md
+
+    monkeypatch.setenv("CODE_FAILS", "1")
+    assert main(["test"]) == 1
+    out = capsys.readouterr().out
+    assert "Code checks moved, and no judge decides those: the AI's behavior changed." in out
+    # task_0 and task_1 went pass → fail, none the other way: two can't show it's beyond chance
+    assert "4 cases in both runs: 2 pass → fail, 0 fail → pass (exact McNemar p = 0.25, within chance" in out
+
+
+def test_one_kind_of_check_isnt_split(project, capsys):
+    (project / "agent.py").write_text(UNSURE, encoding="utf-8")
+    config(project, f"{sys.executable} agent.py")
+    main(["test"])
+    assert "Code checks" not in capsys.readouterr().out
+
 JUDGED = '''
 import os
 import assay_sdk as assay
@@ -310,6 +498,8 @@ def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_p
 
 def test_an_uploaded_run_says_which_repository_and_folder_it_came_from(project, capsys, tmp_path_factory,
                                                                       monkeypatch):
+    for k in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "GITHUB_ACTIONS"):  # who ran it: nobody in particular
+        monkeypatch.delenv(k, raising=False)
     from fastapi.testclient import TestClient
     from assay.api import create_app
     from assay.config import Settings
@@ -710,6 +900,123 @@ def test_a_node_project_is_tested_and_a_regression_caught(project, capsys, monke
     out = capsys.readouterr().out
     assert "2 regressed" in out and "No longer: approval" in out
     assert "expect.must_call_before(approval, refund)" in out
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
+def test_the_change_report_leads_with_a_regression_from_the_last_run(project, capsys, monkeypatch):
+    import subprocess
+    git = lambda *a: subprocess.run(["git", *a], cwd=project, check=True, capture_output=True)
+    (project / "agent.js").write_text(JS_AGENT.format(sdk=json.dumps(str(JS_SDK))), encoding="utf-8")
+    config(project, "node agent.js")
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    git("add", "agent.js", "assay.toml")
+    git("commit", "-q", "-m", "base")
+    git("checkout", "-q", "-b", "feature")
+    monkeypatch.delenv("ASSAY_BASE_REF", raising=False)
+    assert main(["test"]) == 0
+    monkeypatch.setenv("SKIP_APPROVAL", "1")  # the refund no longer waits for approval
+    assert main(["test"]) == 1
+    capsys.readouterr()
+    assert main(["changes", "--base", "main"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "NOT SAFE TO MERGE: 1 THING BROKE OR STOPPED BEING CHECKED"  # two cases, one cause: one item
+    assert out[1] == ("  1. expect.must_call_before(approval, refund): refund() ran before approval() "
+                      "(refund O-17, and 1 more case) (MEDIUM)")
+    assert "tests: " in out[-1]
+    (project / "agent.js").write_text("// changed after the run\n", encoding="utf-8")
+    git("commit", "-qam", "later")
+    assert main(["changes", "--base", "main"]) == 0  # the run was on another commit: left out, and said so
+    out = capsys.readouterr().out
+    assert "NOT SAFE" not in out and "the last test run was on" in out
+
+
+# --- what a plain JavaScript test writes to the database ----------------------------------------
+
+JS_DB = """
+const assay = require({sdk});
+const {{ recordPg }} = require({pg});
+class Client {{ query() {{ return Promise.resolve({{ rows: [] }}); }} }}  // pg's Client, as pg.js sees it
+recordPg({{ Client }});
+const db = new Client();
+const drop = process.env.DROP_BRANCH;
+async function plainTest(name, body) {{  // what assay-evals/jest does around each test
+  const run = new assay.Run(name, {{ caseId: `bookings.test.js::${{name}}`, tags: {{ assay_record: "plain" }} }});
+  assay.setPlainRun(run);
+  await body();
+  run.check("test", true);
+  run.end("completed");
+  assay.setPlainRun(null);
+}}
+(async () => {{
+  await plainTest("books a slot", async () => {{
+    await db.query('INSERT INTO "bookings"("amount", "locationId") VALUES ($1, $2)', [500, drop ? null : "b-1"]);
+    for (let i = 0; i < (process.env.N_PLUS_ONE ? 12 : 1); i++) await db.query("SELECT * FROM services WHERE id = $1", [i]);
+  }});
+  await plainTest("seeds three slots", async () => {{  // three identical writes: not an agent's loop
+    for (let i = 0; i < 3; i++) await db.query("INSERT INTO slots (starts_at) VALUES ($1)", [i]);
+  }});
+}})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
+def test_a_plain_js_tests_database_writes_are_compared(project, capsys, monkeypatch):
+    (project / "db.js").write_text(JS_DB.format(sdk=json.dumps(str(JS_SDK)), pg=json.dumps(str(JS_SDK / "pg.js"))),
+                                   encoding="utf-8")
+    config(project, "node db.js")
+    assert main(["test"]) == 0
+    out = capsys.readouterr().out
+    assert "Looped" not in out  # plain tests aren't held to agent checks
+
+    monkeypatch.setenv("DROP_BRANCH", "1")
+    monkeypatch.setenv("N_PLUS_ONE", "1")
+    assert main(["test"]) == 0  # still passing: the diff says what changed
+    out = capsys.readouterr().out
+    assert "1 case wrote to the database differently than its baseline" in out
+    main(["diff"])
+    out = capsys.readouterr().out
+    assert "DB INSERT bookings: now leaves locationId empty" in out
+    assert "reads of services: 12 instead of 1" in out
+    assert "seeds three slots" not in out
+    main(["diff", "--format", "markdown"])
+    assert "now leaves locationId empty" in capsys.readouterr().out
+
+
+JS_NEW_WRITES = """
+const assay = require({sdk});
+const {{ recordPg }} = require({pg});
+class Client {{ query() {{ return Promise.resolve({{ rows: [] }}); }} }}
+recordPg({{ Client }});
+const db = new Client();
+(async () => {{
+  const run = new assay.Run("creates a clinic", {{ caseId: "clinics.test.js::creates a clinic", tags: {{ assay_record: "plain" }} }});
+  assay.setPlainRun(run);
+  assay.sent({{ name: "Salon", country: "IN", branchId: "branch-9" }}, "createClinic");
+  await db.query('INSERT INTO "clinics"("name", "timezone", "branchId") VALUES ($1, $2, DEFAULT)', ["Salon", "UTC"]);
+  run.check("test", true);
+  run.end("completed");
+  assay.setPlainRun(null);
+}})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node")
+def test_a_new_write_that_looks_wrong_is_shown_once(project, capsys):
+    (project / "db.js").write_text(JS_NEW_WRITES.format(sdk=json.dumps(str(JS_SDK)),
+                                                        pg=json.dumps(str(JS_SDK / "pg.js"))), encoding="utf-8")
+    config(project, "node db.js")
+    assert main(["test"]) == 0  # passing: these are to look at, not failures
+    out = capsys.readouterr().out
+    assert "New writes to check (3):" in out
+    assert 'INSERT clinics sets timezone to "UTC" (creates a clinic)' in out
+    assert "createClinic sent branchId, but INSERT clinics left branchId empty" in out
+    assert "createClinic sent country; no query used it" in out
+    assert "branch-9" not in (project / ".assay" / "assay.db").read_bytes().decode("latin-1")  # names, never values
+    assert "New writes to check (3)" in (project / ".assay" / "summary.md").read_text(encoding="utf-8")
+    assert main(["test"]) == 0  # the same writes again: nothing new to check
+    assert "New writes to check" not in capsys.readouterr().out
 
 
 # --- a tool's definition changed: what the model reads to choose it ---------------------------
