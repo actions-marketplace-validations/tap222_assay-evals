@@ -275,6 +275,8 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 
 ## Not built yet
 
+- **Cross-cutting agent reliability scenarios:** turn the reliability checks below into reusable end-to-end cases that can run before a prompt, model, tool-router or orchestration change, and on a schedule. Each handoff has an explicit input/output contract, permission scope and owner; each run is checked for the right terminal state, not just the agent's claim that it succeeded. Inject timeouts, lost acknowledgements, crashes and duplicate deliveries, then verify the external state and side effects: no lost task, no duplicate charge or write, no action after a handoff, and no job marked complete while work remains. When a run fails, report the first broken transition and its downstream effects. Reuse the existing trajectory, `faults()`, `at_most_once()`, read-back, recovery and recorded-run replay mechanisms rather than building a separate tracing system or an autonomous reviewer agent. Promote reviewed production failures into permanent cases through [Learning from production](learning.md).
+
 - **SDKs for other languages:** there are SDKs for Python and for TypeScript and JavaScript.
   Other languages write the events `assay test` reads ([any language](any-language.md)), send
   them to `POST /v1/ingest` directly, or use OpenTelemetry.
