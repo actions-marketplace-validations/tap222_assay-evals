@@ -21,12 +21,14 @@ from dataclasses import asdict, dataclass, field, replace
 from statistics import fmean, stdev
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-ADVANCE, HOLD, ROLLBACK = "advance", "hold", "rollback"
-_RANK = {ADVANCE: 0, HOLD: 1, ROLLBACK: 2}
+ADVANCE, ADVANCE_WITH_CONDITIONS, HOLD, ROLLBACK = (
+    "advance", "advance_with_conditions", "hold", "rollback"
+)
+_RANK = {ADVANCE: 0, ADVANCE_WITH_CONDITIONS: 1, HOLD: 2, ROLLBACK: 3}
 # A percentile rests on the values beyond it: p99 of 100 values is one value.
 MIN_TAIL = 5
 # What a slice can set for itself, in place of the measure's value.
-SLICE_FIELDS = ("tolerance", "severity", "min_n", "absolute_limit")
+SLICE_FIELDS = ("tolerance", "severity", "min_n", "absolute_limit", "fallback_stability")
 
 
 def percentile_of(statistic: str) -> Optional[float]:
@@ -70,6 +72,9 @@ class GateRule:
     # A slice's own margin, agreed before the runs: {"high_value": {"tolerance": 0.005}}. A slice
     # named here must be measured, or the release holds.
     slices: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # When True (or when None and severity == "high"), slices under min_n fall back to
+    # the stability gate's per-case rules: no case that passed reliably may now fail, and any collapse blocks.
+    fallback_stability: Optional[bool] = None
 
     def __post_init__(self) -> None:
         percentile_of(self.statistic)
@@ -91,6 +96,12 @@ class GateRule:
     @property
     def effective_tolerance(self) -> float:
         return self.tolerance / 2 if self.severity == "high" else self.tolerance
+
+    @property
+    def is_high_risk(self) -> bool:
+        if self.fallback_stability is not None:
+            return self.fallback_stability
+        return self.severity == "high"
 
 
 @dataclass
@@ -204,8 +215,21 @@ def _too_few(rule: GateRule, n: int) -> Optional[str]:
 
 def _against_limit(rule: GateRule, candidate: Sequence[float], d: SliceDecision) -> Optional[Tuple[str, str]]:
     """(outcome, reason) for the candidate against the rule's absolute limit; None when it can't be checked."""
-    if rule.absolute_limit is None or not candidate or _too_few(rule, len(candidate)):
+    if rule.absolute_limit is None or not candidate:
         return None
+    too_few = _too_few(rule, len(candidate))
+    if too_few:
+        if not rule.is_high_risk:
+            return None
+        stat = stat_fn(rule.statistic)
+        val = stat(candidate)
+        d.candidate_value = val
+        limit, what = rule.absolute_limit, f"The candidate's {rule.statistic}"
+        side = "minimum" if rule.higher_is_better else "maximum"
+        past = (val < limit) if rule.higher_is_better else (val > limit)
+        if past:
+            return ROLLBACK, f"{what} is {val:.4f}; past the absolute {side} {limit:.4f}."
+        return ADVANCE, f"{what} is {val:.4f}; within the absolute {side} {limit:.4f}."
     value, lo, hi = bootstrap_ci(candidate, statistic=rule.statistic)
     d.candidate_value, d.candidate_ci = value, (lo, hi)
     limit, what = rule.absolute_limit, f"The candidate's {rule.statistic}"
@@ -238,6 +262,62 @@ def evaluate_slice(rule: GateRule, slice_name: str, baseline: Optional[Sequence[
     return d
 
 
+def _stability_fallback(rule: GateRule, slice_name: str, baseline: Sequence[float],
+                        candidate: Sequence[float], floor: Optional[float],
+                        base: SliceDecision) -> SliceDecision:
+    """Fallback for small high-risk slices under min_n:
+    Per-case stability rules: no case that passed reliably may now fail, and any collapse blocks."""
+    n = len(baseline)
+    b_mean = fmean(baseline)
+    c_mean = fmean(candidate)
+    sign = -1 if rule.higher_is_better else 1
+    base.worsening = sign * (c_mean - b_mean)
+
+    # 1. Any collapse blocks immediately:
+    if rule.higher_is_better:
+        if c_mean == 0.0 and b_mean > 0.0:
+            base.outcome = ROLLBACK
+            base.reason = (f"High-risk slice {slice_name!r} ({n} cases < min_n {rule.min_n}) collapsed: "
+                           f"candidate scored 0.0.")
+            return base
+        if b_mean > 0.0 and c_mean < 0.5 * b_mean:
+            base.outcome = ROLLBACK
+            base.reason = (f"High-risk slice {slice_name!r} ({n} cases < min_n {rule.min_n}) collapsed: "
+                           f"score dropped from {b_mean:.4f} to {c_mean:.4f} (more than 50% loss).")
+            return base
+    else:
+        if c_mean == 1.0 and b_mean < 1.0:
+            base.outcome = ROLLBACK
+            base.reason = (f"High-risk slice {slice_name!r} ({n} cases < min_n {rule.min_n}) collapsed: "
+                           f"100% error rate in candidate.")
+            return base
+
+    # 2. Per-case check: no case that passed reliably may now fail
+    regressions: List[Tuple[int, float, float]] = []
+    for i in range(n):
+        b, c = baseline[i], candidate[i]
+        if rule.higher_is_better:
+            if b >= 1.0 and c < 1.0:
+                regressions.append((i, b, c))
+        else:
+            if b == 0.0 and c > 0.0:
+                regressions.append((i, b, c))
+
+    if regressions:
+        base.outcome = ROLLBACK
+        idx, b_val, c_val = regressions[0]
+        base.reason = (f"High-risk slice {slice_name!r} ({n} cases < min_n {rule.min_n}) failed stability check: "
+                       f"{len(regressions)} case(s) that passed reliably now failed "
+                       f"(case {idx + 1}: baseline {b_val:.2f} -> candidate {c_val:.2f}).")
+        return base
+
+    # 3. Passed stability per-case check
+    base.outcome = ADVANCE
+    base.reason = (f"High-risk slice {slice_name!r} ({n} cases < min_n {rule.min_n}) passed stability per-case check: "
+                   f"no case that passed reliably failed, and no collapse.")
+    return base
+
+
 def _against_baseline(rule: GateRule, slice_name: str, baseline: Optional[Sequence[float]],
                       candidate: Optional[Sequence[float]], floor: Optional[float],
                       paired: bool) -> SliceDecision:
@@ -254,6 +334,8 @@ def _against_baseline(rule: GateRule, slice_name: str, baseline: Optional[Sequen
     n = min(len(baseline), len(candidate))
     why = _too_few(rule, n)
     if why:
+        if rule.is_high_risk and paired and len(baseline) == len(candidate) and n > 0:
+            return _stability_fallback(rule, slice_name, baseline, candidate, floor, base)
         base.reason = why
         return base
     if paired and len(baseline) != len(candidate):
@@ -309,3 +391,174 @@ def evaluate(rules: Sequence[GateRule],
             decisions.append(d)
     outcome = max((d.outcome for d in decisions), key=_RANK.__getitem__, default=HOLD)
     return GateDecision(outcome, decisions)
+
+
+@dataclass
+class ReleaseGateRow:
+    gate: str              # e.g. "quality:accuracy", "operation:latency_ms:p95", "stability:pass_rate", "operation:timeouts"
+    kind: str              # "quality" | "operation" | "stability"
+    slice: str             # e.g. "overall", "high_value"
+    value: Optional[float] # measured candidate value or change
+    limit: Optional[str]   # limit or tolerance description
+    verdict: str           # "advance" | "advance_with_conditions" | "hold" | "rollback"
+    reason: str            # explanatory note
+    condition: Optional[str] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ReleaseDecision:
+    outcome: str
+    rows: List[ReleaseGateRow] = field(default_factory=list)
+    conditions: List[str] = field(default_factory=list)
+    summary: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "outcome": self.outcome,
+            "conditions": self.conditions,
+            "summary": self.summary,
+            "rows": [asdict(r) for r in self.rows],
+        }
+
+
+def _is_operational_measure(measure_id: str, statistic: str = "mean") -> bool:
+    mid = measure_id.lower()
+    return (
+        statistic != "mean"
+        or any(k in mid for k in ("latency", "cost", "timeout", "fallback", "duration", "time", "tokens", "memory"))
+    )
+
+
+def build_release_decision(
+    slice_decisions: Sequence[SliceDecision],
+    stability: Optional[dict] = None,
+    operations: Optional[Dict[str, Any]] = None,
+) -> ReleaseDecision:
+    """Build a unified release decision table across quality per slice, operational metrics, and stability.
+    Quality and operations stay on separate rows and are never blended into one score.
+    Returns one call: advance, advance_with_conditions, hold, or rollback.
+    """
+    rows: List[ReleaseGateRow] = []
+    conditions: List[str] = []
+
+    # 1. Quality & operational slice gate rows
+    for d in slice_decisions:
+        is_op = _is_operational_measure(d.measure_id, d.statistic)
+        kind = "operation" if is_op else "quality"
+        gate_name = f"{d.measure_id}:{d.statistic}" if d.statistic != "mean" else d.measure_id
+
+        limit_desc = []
+        if d.tolerance is not None:
+            limit_desc.append(f"tolerance {d.tolerance:.4f}")
+        if d.absolute_limit is not None:
+            limit_desc.append(f"ceiling {d.absolute_limit:.4f}")
+        limit_str = "; ".join(limit_desc) or "N/A"
+
+        verdict = d.outcome
+        row_cond = None
+
+        # Check for advance_with_conditions:
+        # e.g., an operational metric worsened, but stayed under the ceiling or within tolerance
+        if verdict == ADVANCE and is_op and d.worsening is not None and d.worsening > 0:
+            verdict = ADVANCE_WITH_CONDITIONS
+            pct = ""
+            if d.candidate_value and d.worsening:
+                base_approx = d.candidate_value - d.worsening
+                if base_approx > 0:
+                    pct = f" (up {d.worsening / base_approx:.1%})"
+            row_cond = f"{gate_name} in {d.slice} up by {d.worsening:.2f}{pct}, under ceiling: watch it in canary"
+            conditions.append(row_cond)
+
+        rows.append(ReleaseGateRow(
+            gate=f"{kind}:{gate_name}",
+            kind=kind,
+            slice=d.slice,
+            value=d.candidate_value if d.candidate_value is not None else d.worsening,
+            limit=limit_str,
+            verdict=verdict,
+            reason=d.reason,
+            condition=row_cond,
+            details={"worsening": d.worsening, "ci": d.ci, "candidate_ci": d.candidate_ci},
+        ))
+
+    # 2. Stability gate row
+    if stability:
+        st_outcome = stability.get("outcome", HOLD)
+        verdict = st_outcome
+        st_cond = None
+        if st_outcome == "rerun":
+            verdict = HOLD
+        elif st_outcome == ADVANCE:
+            ch = stability.get("change") or {}
+            tol = stability.get("tolerance", 0.01)
+            if ch.get("low") is not None and ch.get("low") < -tol:
+                verdict = ADVANCE_WITH_CONDITIONS
+                st_cond = f"pass rate within tolerance, but 95% CI reaches {ch['low']:.2%}: watch in canary"
+                conditions.append(st_cond)
+
+        reasons = "; ".join(stability.get("reasons", [])) or "Pass rate evaluated."
+        rows.append(ReleaseGateRow(
+            gate="stability:pass_rate",
+            kind="stability",
+            slice="overall",
+            value=stability.get("pass_rate"),
+            limit=f"tolerance {stability.get('tolerance', 0.01):.2%}",
+            verdict=verdict,
+            reason=reasons,
+            condition=st_cond,
+            details={
+                "change": stability.get("change"),
+                "noise": stability.get("noise"),
+                "checks": stability.get("checks"),
+            },
+        ))
+
+    # 3. Additional operations (timeouts, fallbacks, etc.)
+    if operations:
+        for op_name, op_data in operations.items():
+            if isinstance(op_data, dict):
+                count = op_data.get("count", 0)
+                limit = op_data.get("limit")
+                reason = op_data.get("reason", "")
+            else:
+                count = float(op_data)
+                limit = None
+                reason = ""
+
+            verdict = ADVANCE
+            cond = None
+            if limit is not None:
+                if count > limit:
+                    verdict = ROLLBACK
+                    reason = reason or f"{op_name} count ({count}) exceeded limit ({limit})."
+                elif count > 0:
+                    verdict = ADVANCE_WITH_CONDITIONS
+                    cond = f"{op_name} ({count}) observed, under limit ({limit}): watch in canary"
+                    conditions.append(cond)
+                    reason = reason or cond
+
+            rows.append(ReleaseGateRow(
+                gate=f"operation:{op_name}",
+                kind="operation",
+                slice="overall",
+                value=count,
+                limit=f"<= {limit}" if limit is not None else None,
+                verdict=verdict,
+                reason=reason or f"{op_name}: {count}",
+                condition=cond,
+            ))
+
+    # 4. Overall outcome: worst verdict wins
+    outcome = max((r.verdict for r in rows), key=_RANK.__getitem__, default=ADVANCE)
+
+    if outcome == ADVANCE:
+        summary = "All quality, operational and stability gates passed: advance."
+    elif outcome == ADVANCE_WITH_CONDITIONS:
+        summary = f"Advance with conditions ({len(conditions)}): {'; '.join(conditions)}."
+    elif outcome == HOLD:
+        summary = "Release held: one or more gates require investigation, additional samples or reruns."
+    else:
+        summary = "Roll back: one or more quality, operational or stability gates failed."
+
+    return ReleaseDecision(outcome=outcome, rows=rows, conditions=conditions, summary=summary)
