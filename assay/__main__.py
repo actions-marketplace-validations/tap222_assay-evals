@@ -88,8 +88,10 @@ def main(argv=None) -> int:
     i = sub.add_parser("init", help="Set up local testing here: assay.toml and a runnable example")
     i.add_argument("--claude-code", action="store_true",
                    help="Also add a Claude Code skill: Claude runs these tests after it changes a prompt or the agent")
+    i.add_argument("--antigravity", action="store_true",
+                   help="Also add an Antigravity skill: Antigravity runs these tests after it changes a prompt or the agent")
     i.add_argument("--global", dest="global_", action="store_true",
-                   help="With --claude-code: install the skill for every project (~/.claude), and nothing here")
+                   help="With --claude-code or --antigravity: install the skill for every project, and nothing here")
     i.add_argument("--hook", action="store_true",
                    help="Also install a git pre-push hook: every push is checked for weakened tests and regressions")
     i.add_argument("--lang", choices=["python", "ts", "js"],
@@ -420,16 +422,22 @@ def main(argv=None) -> int:
             return local.test(root, local.split_command(args.command), args.repeat, args.baseline, send,
                               args.junit, args.timeout, args.failed, args.judge, args.rerun_unsure)
         if args.global_:
-            if not args.claude_code:
-                print("--global goes with --claude-code: `assay init --claude-code --global`.", file=sys.stderr)
+            if not (args.claude_code or args.antigravity):
+                print("--global goes with --claude-code or --antigravity: `assay init --claude-code --global` or `assay init --antigravity --global`.", file=sys.stderr)
                 return 2
-            path = local.install_claude_skill(Path.home())
-            print(f"Created {path}." if path else f"{Path.home() / local.CLAUDE_SKILL} is already here; nothing changed.")
-            print("Claude Code now runs Assay tests in every project that has them. To send every run to your "
-                  "dashboard, filed by repository, set ASSAY_URL and ASSAY_UPLOAD=1 (in ~/.claude/settings.json "
-                  "under \"env\").")
+            if args.antigravity:
+                path = local.install_antigravity_skill(Path.home())
+                print(f"Created {path}." if path else f"{Path.home() / local.ANTIGRAVITY_SKILL} is already here; nothing changed.")
+                print("Antigravity now runs Assay tests in every project that has them. To send every run to your "
+                      "dashboard, filed by repository, set ASSAY_URL and ASSAY_UPLOAD=1.")
+            if args.claude_code:
+                path = local.install_claude_skill(Path.home())
+                print(f"Created {path}." if path else f"{Path.home() / local.CLAUDE_SKILL} is already here; nothing changed.")
+                print("Claude Code now runs Assay tests in every project that has them. To send every run to your "
+                      "dashboard, filed by repository, set ASSAY_URL and ASSAY_UPLOAD=1 (in ~/.claude/settings.json "
+                      "under \"env\").")
             return 0
-        made = local.init(root, args.claude_code, args.lang)
+        made = local.init(root, args.claude_code, args.lang, antigravity=args.antigravity)
         print(f"Created {', '.join(made)}." if made else f"{local.CONFIG} is already here; nothing changed.")
         if args.hook:
             from assay import workspace
@@ -438,6 +446,10 @@ def main(argv=None) -> int:
         if local.CLAUDE_SKILL in made:
             print(f"Claude Code now runs {'`assay test`' if js else '`pytest --assay`'} after changing a prompt or the "
                   "agent, and never accepts a new baseline on its own. Commit .claude/skills/assay so your team gets "
+                  "it too.")
+        if local.ANTIGRAVITY_SKILL in made:
+            print(f"Antigravity now runs {'`assay test`' if js else '`pytest --assay`'} after changing a prompt or the "
+                  "agent, and never accepts a new baseline on its own. Commit .agent/skills/assay so your team gets "
                   "it too.")
         if js:
             runner = {"vitest": "Vitest", "jest": "Jest", "node": "Node's test runner"}[js["runner"]]
