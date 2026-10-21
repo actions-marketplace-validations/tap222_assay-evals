@@ -499,7 +499,9 @@ def test_upload_sends_the_run_and_has_the_server_check_it(project, capsys, tmp_p
 
 def test_an_uploaded_run_says_which_repository_and_folder_it_came_from(project, capsys, tmp_path_factory,
                                                                       monkeypatch):
-    for k in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "GITHUB_ACTIONS"):  # who ran it: nobody in particular
+    for k in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "GITHUB_ACTIONS",
+              "ANTIGRAVITY", "ANTIGRAVITY_AGENT", "AGY", "GEMINI_CLI",
+              "ANTIGRAVITY_SESSION_ID", "AGY_SESSION_ID", "CONVERSATION_ID"):  # who ran it: nobody in particular
         monkeypatch.delenv(k, raising=False)
     from fastapi.testclient import TestClient
     from assay.api import create_app
@@ -820,6 +822,25 @@ def test_init_adds_the_claude_code_skill_when_asked(project, capsys):
     assert main(["init", "--claude-code"]) == 0 and skill.read_text(encoding="utf-8") == "mine"  # left alone
 
 
+def test_init_adds_the_antigravity_skill_when_asked(project, capsys):
+    skill = project / local.ANTIGRAVITY_SKILL
+    assert main(["init"]) == 0 and not skill.exists()  # only when asked
+    assert main(["init", "--antigravity"]) == 0
+    assert local.ANTIGRAVITY_SKILL in capsys.readouterr().out
+    text = skill.read_text(encoding="utf-8")
+    assert text.startswith("---\nname: assay\ndescription: ") and "Never run `assay accept`" in text
+    skill.write_text("mine", encoding="utf-8")
+    assert main(["init", "--antigravity"]) == 0 and skill.read_text(encoding="utf-8") == "mine"  # left alone
+
+
+def test_ran_by_detects_antigravity(project, monkeypatch):
+    monkeypatch.setenv("ANTIGRAVITY_AGENT", "1")
+    monkeypatch.setenv("CONVERSATION_ID", "conv-999")
+    info = local.ran_by(project)
+    assert info["agent"] == "Antigravity"
+    assert info["session"] == "conv-999"
+
+
 def test_a_project_is_named_after_its_repository(project, monkeypatch):
     import re
     import subprocess
@@ -852,11 +873,14 @@ def test_assay_upload_env_sends_every_run(project, monkeypatch):
 def test_init_global_installs_the_skill_for_every_project(project, monkeypatch, capsys):
     home = project / "home"
     monkeypatch.setattr(Path, "home", lambda: home)
-    assert main(["init", "--global"]) == 2  # only with --claude-code
+    assert main(["init", "--global"]) == 2  # only with --claude-code or --antigravity
     assert main(["init", "--claude-code", "--global"]) == 0
     assert (home / local.CLAUDE_SKILL).exists() and not (project / "assay.toml").exists()  # nothing in the project
     assert "ASSAY_UPLOAD=1" in capsys.readouterr().out
     assert main(["init", "--claude-code", "--global"]) == 0 and "nothing changed" in capsys.readouterr().out
+    assert main(["init", "--antigravity", "--global"]) == 0
+    assert (home / local.ANTIGRAVITY_SKILL).exists()
+    assert main(["init", "--antigravity", "--global"]) == 0 and "nothing changed" in capsys.readouterr().out
 
 # --- the JavaScript SDK (sdk/js) under `assay test`: a Node project is checked like pytest -----
 

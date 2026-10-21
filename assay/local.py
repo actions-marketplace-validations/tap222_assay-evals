@@ -113,6 +113,10 @@ broke something. Skip it for changes that can't reach the AI, such as docs or st
   under this repository's name. Nothing to do for that.
 """
 
+ANTIGRAVITY_SKILL = ".agent/skills/assay/SKILL.md"
+# An Antigravity skill (`assay init --antigravity`): Antigravity runs the tests after it changes what the AI does.
+ANTIGRAVITY_SKILL_TEMPLATE = CLAUDE_SKILL_TEMPLATE
+
 CONFIG_HEAD = """\
 # Assay: your AI tests are pytest tests. `pytest --assay` runs them, checks every run, and
 # compares each test with its last passing run; `assay test` does the same, with repeats.
@@ -736,6 +740,19 @@ def install_claude_skill(home: Path) -> Optional[str]:
     return str(path)
 
 
+def install_antigravity_skill(home: Path) -> Optional[str]:
+    """The Antigravity skill for every project: ~/.gemini/antigravity-cli/skills/assay/SKILL.md or ~/.agent/skills/assay/SKILL.md."""
+    if (home / ".gemini" / "antigravity-cli").exists():
+        path = home / ".gemini" / "antigravity-cli" / "skills" / "assay" / "SKILL.md"
+    else:
+        path = home / ANTIGRAVITY_SKILL
+    if path.exists():
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(ANTIGRAVITY_SKILL_TEMPLATE, encoding="utf-8")
+    return str(path)
+
+
 def js_project(root: Path, lang: Optional[str] = None) -> Optional[dict]:
     """How a JavaScript or TypeScript project runs its tests, or None for a Python one:
     {"lang": "ts" | "js", "runner": "vitest" | "jest" | "node", "command", "example", "installed"}.
@@ -781,16 +798,20 @@ def js_example(runner: str, ts: bool) -> str:
     return text
 
 
-def init(root: Path, claude_code: bool = False, lang: Optional[str] = None) -> List[str]:
-    """Write assay.toml and the example (and the Claude Code skill, if asked), leaving anything that
-    already exists alone. A JavaScript or TypeScript project (js_project) gets its own example and
-    test command."""
+def init(root: Path, claude_code: bool = False, lang: Optional[str] = None, antigravity: bool = False) -> List[str]:
+    """Write assay.toml and the example (and the Claude Code or Antigravity skill, if asked), leaving
+    anything that already exists alone. A JavaScript or TypeScript project (js_project) gets its own
+    example and test command."""
     ensure_home(root)
     made = []
     if claude_code and not (root / CLAUDE_SKILL).exists():
         (root / CLAUDE_SKILL).parent.mkdir(parents=True, exist_ok=True)
         (root / CLAUDE_SKILL).write_text(CLAUDE_SKILL_TEMPLATE, encoding="utf-8")
         made.append(CLAUDE_SKILL)
+    if antigravity and not (root / ANTIGRAVITY_SKILL).exists():
+        (root / ANTIGRAVITY_SKILL).parent.mkdir(parents=True, exist_ok=True)
+        (root / ANTIGRAVITY_SKILL).write_text(ANTIGRAVITY_SKILL_TEMPLATE, encoding="utf-8")
+        made.append(ANTIGRAVITY_SKILL)
     js = js_project(root, lang)
     example, text = (js["example"], js_example(js["runner"], js["lang"] == "ts")) if js else (EXAMPLE, EXAMPLE_TEMPLATE)
     if not (root / example).exists():
@@ -3495,6 +3516,12 @@ def ran_by(root: Path) -> dict:
         out["agent"] = "Claude Code"
         if os.environ.get("CLAUDE_CODE_SESSION_ID"):
             out["session"] = os.environ["CLAUDE_CODE_SESSION_ID"][:64]
+    elif os.environ.get("ANTIGRAVITY") or os.environ.get("ANTIGRAVITY_AGENT") or os.environ.get("AGY") or os.environ.get("GEMINI_CLI"):
+        out["agent"] = "Antigravity"
+        session = (os.environ.get("ANTIGRAVITY_SESSION_ID") or os.environ.get("AGY_SESSION_ID") or
+                   os.environ.get("CONVERSATION_ID"))
+        if session:
+            out["session"] = session[:64]
     elif os.environ.get("GITHUB_ACTIONS"):
         out["agent"] = "GitHub Actions"
     branch = (_git(root, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()

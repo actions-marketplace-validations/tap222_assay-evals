@@ -288,13 +288,7 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
   Assay reads `gen_ai.*` spans and OpenInference spans (Arize Phoenix and other instrumentors),
   and becomes the regression gate on top of the tracing you already have. See
   [Sending data](docs/api.md#sending-data).
-- **Claude Code.** `assay init --claude-code` adds a skill: after Claude changes a prompt or the
-  agent, it runs your tests, reads `assay diff`, and tells you what regressed before you commit.
-  It never accepts a new baseline on its own. `--global` installs it for every project, and with
-  `ASSAY_URL` and `ASSAY_UPLOAD=1` set every run lands in one dashboard, filed by repository,
-  with an **All projects** view. The dashboard is one `assay serve` process with SQLite, no
-  Docker needed, and it shows each case's tool calls and the test's own checks, and which
-  repository and folder each run came from. See [Getting started](docs/getting-started.md#all-your-repositories-in-one-dashboard-optional).
+- **Antigravity and Claude Code.** `assay init --antigravity` adds an Antigravity skill (`.agent/skills/assay/SKILL.md`), and `assay init --claude-code` adds a Claude Code skill: after your coding agent changes a prompt, model, tool or pipeline code, it runs your tests, reads `assay diff`, and tells you what regressed before you commit. It never accepts a new baseline on its own. `--global` installs the skill across all projects (`~/.gemini/antigravity-cli/skills/` or `~/.claude/skills/`), and with `ASSAY_URL` and `ASSAY_UPLOAD=1` set, every run lands in one dashboard, filed by repository, with an **All projects** view. See [Getting started](docs/getting-started.md#let-antigravity-or-claude-code-run-it-for-you-optional).
 - **Existing apps.** `assay connect` attaches Assay to an app you already have, through its
   database, a few lines of code, or a proposed test per model call. See [Setup](docs/setup.md).
 - **Any model provider.**
@@ -334,7 +328,7 @@ at a time) is under **Details**, and loads when you open it.
 
 | Command | What it does |
 |---|---|
-| `assay init` | Set up local testing: `assay.toml` and a runnable example (`--claude-code` adds a Claude Code skill, `--hook` a pre-push hook that checks every push) |
+| `assay init` | Set up local testing: `assay.toml` and a runnable example (`--antigravity` adds an Antigravity skill, `--claude-code` a Claude Code skill, `--hook` a pre-push hook that checks every push) |
 | `assay doctor` | Check the setup and print the fix for each problem: versions, hook, base branch, dependencies, dashboard |
 | `assay test` | Run your tests with recording, check every run, and compare with the baseline (`--repeat N`, `--rerun-unsure`, `--junit`, `--failed`, `--base main` to also check for weakened tests) |
 | `assay diff` | What behavior changed between two runs |

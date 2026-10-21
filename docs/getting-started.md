@@ -105,19 +105,16 @@ nothing installed, it uses the main checkout's `node_modules` when the lockfile 
 otherwise installs from the lockfile (`npm ci`, or pnpm's or yarn's; `ASSAY_NO_INSTALL=1` to
 leave that to you). It never lets `npx` download a different test runner.
 
-## Let Claude Code run it for you (optional)
+## Let Antigravity or Claude Code run it for you (optional)
 
-If you use Claude Code, add a skill that has Claude run these tests whenever it changes a prompt,
-the model, a tool or the agent's code:
+If you use Antigravity or Claude Code, add an agent skill so the coding agent runs these tests whenever it changes a prompt, the model, a tool or the agent's code:
 
 ```bash
-assay init --claude-code
+assay init --antigravity      # writes .agent/skills/assay/SKILL.md for Antigravity
+assay init --claude-code      # writes .claude/skills/assay/SKILL.md for Claude Code
 ```
 
-This writes `.claude/skills/assay/SKILL.md`. Commit it, so everyone on your team gets it. After
-an edit, Claude runs `pytest --assay`, reads `assay diff`, and tells you what regressed and why,
-with a proposed fix. It never accepts a new baseline or loosens a test on its own; that stays
-your call.
+Commit the skill, so everyone on your team gets it. After an edit to your code or prompts, the agent runs `pytest --assay`, reads `assay diff`, and tells you what regressed and why, with a proposed fix. It never accepts a new baseline or loosens a test on its own; that stays your call.
 
 ## All your repositories in one dashboard (optional)
 
@@ -126,6 +123,7 @@ one dashboard, each under its own name:
 
 ```bash
 pipx install assay-server                       # the `assay` command, in its own environment
+assay init --antigravity --global               # the Antigravity skill, for every project
 assay init --claude-code --global               # the Claude Code skill, for every project
 mkdir -p ~/.assay-server
 ASSAY_STORE_URL=sqlite:///$HOME/.assay-server/assay.db assay serve   # the dashboard, at http://localhost:8400
