@@ -25,6 +25,7 @@ dependencies = [
   "pydantic>=2.5",
   "tomli>=2; python_version < '3.11'",
   "assay-evals>=0.4.0",  # the SDK: the server imports it; 0.4.0 has pytest --assay-all
+  "cryptography>=41.0.0",
 ]
 
 [project.optional-dependencies]

@@ -10,8 +10,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-from typing import Optional
-from cryptography.fernet import Fernet, InvalidToken
+from typing import Any, Optional
+
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except ImportError:  # pragma: no cover
+    Fernet = None  # type: ignore
+    InvalidToken = Exception  # type: ignore
 
 ENC_PREFIX = "enc:v1:"
 
@@ -22,7 +27,9 @@ def derive_key(secret: str) -> bytes:
     return base64.urlsafe_b64encode(digest)
 
 
-def get_cipher(key: Optional[str] = None) -> Optional[Fernet]:
+def get_cipher(key: Optional[str] = None) -> Optional[Any]:
+    if Fernet is None:
+        return None
     k = key or os.environ.get("ASSAY_SECRET_KEY")
     if not k:
         return None
