@@ -207,6 +207,11 @@ def evaluate(engine: Engine, heads: List[dict], abandon_minutes: float = ABANDON
             results += case_rows
             if h["run_id"]:
                 metrics.append(metric_row(tenant, h, traj))
+            try:
+                from assay import runaway
+                runaway.check_and_alert_runaway(engine, tenant, h["trajectory_id"], traj.get("steps", []))
+            except Exception:
+                pass
             checks.append({"tenant": tenant, "trajectory_id": h["trajectory_id"], "evaluated_at": now,
                            "status": h["status"], "checks": found,
                            "failed": sum(1 for c in found if c["status"] == "fail")})
