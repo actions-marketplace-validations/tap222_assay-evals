@@ -521,8 +521,26 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.post("/v1/auth/saml/acs", tags=["sso"], summary="SAML 2.0 Assertion Consumer Service")
     async def saml_acs(request: Request):
-        form = await request.form()
-        saml_resp = form.get("SAMLResponse")
+        import urllib.parse
+        content_type = request.headers.get("content-type", "")
+        saml_resp = None
+        if "application/x-www-form-urlencoded" in content_type:
+            raw = (await request.body()).decode("utf-8", errors="replace")
+            qs = urllib.parse.parse_qs(raw)
+            val = qs.get("SAMLResponse")
+            saml_resp = val[0] if val else None
+        elif "application/json" in content_type:
+            try:
+                body = await request.json()
+                saml_resp = body.get("SAMLResponse") if isinstance(body, dict) else None
+            except Exception:
+                pass
+        if not saml_resp:
+            try:
+                form = await request.form()
+                saml_resp = form.get("SAMLResponse")
+            except Exception:
+                pass
         if not saml_resp:
             raise HTTPException(400, "Missing SAMLResponse")
         try:

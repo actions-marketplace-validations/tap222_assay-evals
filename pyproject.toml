@@ -26,6 +26,7 @@ dependencies = [
   "tomli>=2; python_version < '3.11'",
   "assay-evals>=0.4.0",  # the SDK: the server imports it; 0.4.0 has pytest --assay-all
   "cryptography>=41.0.0",
+  "python-multipart>=0.0.7",
 ]
 
 [project.optional-dependencies]
