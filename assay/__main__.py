@@ -224,6 +224,7 @@ def main(argv=None) -> int:
     rc.add_argument("--url")
     rc.add_argument("--source", default="events:default")
     rc.add_argument("--days", type=float, default=7)
+    rc.add_argument("--allow-list", help="File of allowed secrets or patterns to ignore (allow-list)")
     rp = rs.add_parser("replay", help="Run recorded inputs through the app with personal data replaced, and compare")
     rp.add_argument("--app", help='The entry point, as "app/bot.py:answer" (default: [synthetic] app)')
     rp.add_argument("--file")
@@ -480,7 +481,8 @@ def main(argv=None) -> int:
             return 2
         run_id = runner.run_measures(engine, source, runner.window_for_days(args.days),
                                      notify=integrations.notifier(engine, source.name, settings.public_url,
-                                                                  settings.notifier()),
+                                                                  settings.notifier(),
+                                                                  secret_key=settings.secret_key),
                                      alert_min_n=settings.alert_min_n,
                                      alert_after_runs=settings.alert_after_runs)
         out = runner.latest_run(engine, source.name)

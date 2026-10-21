@@ -48,8 +48,9 @@ def _fields(e: dict) -> Iterable[tuple]:
         yield "claim_review", [e.get("claim"), e.get("correction"), e.get("note"), e.get("evidence")]
 
 
-def scan(events: Iterable[dict], sample: int = SAMPLE, seed: str = "redaction") -> dict:
-    """Personal data in recorded events: {"events", "runs", "runs_with", "found": [{"kind", "field",
+def scan(events: Iterable[dict], sample: int = SAMPLE, seed: str = "redaction",
+         allow_list: Optional[Set[str]] = None) -> dict:
+    """Personal data and credentials in recorded events: {"events", "runs", "runs_with", "found": [{"kind", "field",
     "count", "samples"}], "sample": [run ids to look over]}. Samples are masked."""
     found: Dict[tuple, dict] = {}
     runs, hit, n = set(), set(), 0
@@ -59,7 +60,7 @@ def scan(events: Iterable[dict], sample: int = SAMPLE, seed: str = "redaction") 
         if rid:
             runs.add(rid)
         for f, v in _fields(e):
-            for kind, value in learn.pii_matches(v):
+            for kind, value in learn.pii_matches(v, allow_list=allow_list):
                 x = found.setdefault((kind, f), {"kind": kind, "field": f, "count": 0, "samples": []})
                 x["count"] += 1
                 s = learn.pii_sample(value)
@@ -114,13 +115,13 @@ def text(r: dict, path: str) -> str:
     """A scan's report, for the terminal."""
     out = [f"{path}: {r['events']:,} events in {r['runs']:,} runs."]
     if not r["found"]:
-        out.append("No personal data found that the redactor knows how to find. It finds emails, card numbers, "
-                   "IBANs, US SSNs, IP addresses, phone numbers, street addresses, and names and birth dates after a "
+        out.append("No personal data or credentials found that the redactor knows how to find. It finds emails, card numbers, "
+                   "IBANs, US SSNs, IP addresses, phone numbers, street addresses, credentials (API keys, tokens, private keys, JWTs), and names and birth dates after a "
                    "cue (\"my name is\"); read the sample below for what it doesn't.")
     else:
-        out.append(f"Personal data got through in {r['runs_with']:,} run{'s' * (r['runs_with'] != 1)}:")
+        out.append(f"Personal data or credentials got through in {r['runs_with']:,} run{'s' * (r['runs_with'] != 1)}:")
         for x in r["found"]:
-            out.append(f"  {x['kind']:<11} in {x['field']:<18} {x['count']:>5}   e.g. {', '.join(x['samples'])}")
+            out.append(f"  {x['kind']:<14} in {x['field']:<18} {x['count']:>5}   e.g. {', '.join(x['samples'])}")
         out.append("Redact before it's recorded: assay_sdk.init(redact=...), e.g. redact=assay.learn.redact.")
     if r["sample"]:
         out.append("\nRead these yourself, since a redactor misses what it has no pattern for: " + ", ".join(r["sample"]))
@@ -271,7 +272,12 @@ def cli(root, args) -> int:
             print(f"No {path.relative_to(root) if path.is_relative_to(root) else path}: record something first, "
                   "or pass --file or --url.", file=sys.stderr)
             return 2
-        r = scan(read_file(path))
+        allow = None
+        if getattr(args, "allow_list", None):
+            ap = Path(args.allow_list)
+            if ap.exists():
+                allow = {line.strip() for line in ap.read_text(encoding="utf-8").splitlines() if line.strip()}
+        r = scan(read_file(path), allow_list=allow)
         print(text(r, str(path.relative_to(root)) if path.is_relative_to(root) else str(path)))
         return 1 if r["found"] else 0
     if args.redact_cmd == "replay":

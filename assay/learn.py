@@ -92,6 +92,20 @@ Z = 3.5
 
 # Most specific first: redaction applies them in order, and a card number also looks like a phone number.
 # A pattern with a group named v finds only that part: the name after "my name is", not the words.
+CREDENTIALS = {
+    "private_key": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY(?: BLOCK)?-----"),
+    "jwt": re.compile(r"\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b"),
+    "anthropic_key": re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b"),
+    "openai_key": re.compile(r"\bsk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
+    "google_api_key": re.compile(r"\bAIza[0-9A-Za-z-_]{35,}\b"),
+    "aws_access_key": re.compile(r"\b(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b"),
+    "github_token": re.compile(r"\b(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{82})\b"),
+    "slack_token": re.compile(r"\bxox[baprs]-[0-9a-zA-Z-]{10,72}\b"),
+    "bearer_token": re.compile(r"(?i:\bbearer\s+)(?P<v>[a-zA-Z0-9_\-\.]{24,})"),
+}
+
+SECRET_FIELD_RX = re.compile(r"(?i:api[_-]?key|secret|password|token|auth|credential|private[_-]?key)")
+
 PII = {
     "email": re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
     "card": re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)"),
@@ -113,13 +127,25 @@ def _luhn(digits: str) -> bool:
     return len(d) >= 13 and s % 10 == 0
 
 
-def pii_spans(text: str) -> List[tuple]:
-    """(start, end, kind) of each piece of personal data in a text, none overlapping, in order."""
+def pii_spans(text: str, allow_list: Optional[Set[str]] = None) -> List[tuple]:
+    """(start, end, kind) of each piece of personal data or credential in a text, none overlapping, in order."""
     out = []
+    for kind, rx in CREDENTIALS.items():
+        for m in rx.finditer(text):
+            a, b = m.span("v") if "v" in rx.groupindex else m.span()
+            v = text[a:b]
+            if allow_list and v in allow_list:
+                continue
+            if any(a < y and x < b for x, y, _ in out):
+                continue
+            out.append((a, b, kind))
+
     for kind, rx in PII.items():
         for m in rx.finditer(text):
             a, b = m.span("v") if "v" in rx.groupindex else m.span()
             v = text[a:b]
+            if allow_list and v in allow_list:
+                continue
             if kind == "email":
                 b -= len(v) - len(v.rstrip(".-"))  # not the sentence's full stop
             if any(a < y and x < b for x, y, _ in out):
@@ -132,14 +158,28 @@ def pii_spans(text: str) -> List[tuple]:
     return sorted(out)
 
 
-def pii_matches(value) -> List[tuple]:
-    """(kind, the value as found) for each piece of personal data in a value. Raw: for comparing,
+def pii_matches(value, allow_list: Optional[Set[str]] = None) -> List[tuple]:
+    """(kind, the value as found) for each piece of personal data or credential in a value. Raw: for comparing,
     never for showing."""
+    out = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(v, str) and len(v) >= 16 and SECRET_FIELD_RX.search(k) and not re.search(r"\s", v):
+                if not (allow_list and v in allow_list):
+                    out.append(("secret", v))
+            out.extend(pii_matches(v, allow_list=allow_list))
+        return out
+    if isinstance(value, list):
+        for item in value:
+            out.extend(pii_matches(item, allow_list=allow_list))
+        return out
     text = value if isinstance(value, str) else json.dumps(value, default=str) if value is not None else ""
-    return [(kind, text[a:b]) for a, b, kind in pii_spans(text)]
+    return [(kind, text[a:b]) for a, b, kind in pii_spans(text, allow_list=allow_list)]
 
 
 def pii_sample(v: str) -> str:
+    if v.startswith("-----BEGIN"):
+        return "-----...-----"
     return v[:3] + "…" + v[-2:] if len(v) > 6 else "…"
 
 
@@ -148,9 +188,9 @@ def pii_key(kind: str, v: str) -> str:
     return v.lower() if kind == "email" else re.sub(r"[^0-9A-Za-z]", "", v).upper()
 
 
-def pii_scan(value) -> List[dict]:
-    """Personal data an input seems to hold: [{"kind", "sample"}], sample partly masked."""
-    out = [{"kind": kind, "sample": pii_sample(v)} for kind, v in pii_matches(value)]
+def pii_scan(value, allow_list: Optional[Set[str]] = None) -> List[dict]:
+    """Personal data and credentials an input seems to hold: [{"kind", "sample"}], sample partly masked."""
+    out = [{"kind": kind, "sample": pii_sample(v)} for kind, v in pii_matches(value, allow_list=allow_list)]
     seen, uniq = set(), []
     for x in out:
         if (x["kind"], x["sample"]) not in seen:
@@ -159,24 +199,31 @@ def pii_scan(value) -> List[dict]:
     return uniq[:20]
 
 
-def _replace(value, fn):
-    """value with fn(kind, found) put in place of each piece of personal data, keeping its shape."""
+def _replace(value, fn, allow_list: Optional[Set[str]] = None):
+    """value with fn(kind, found) put in place of each piece of personal data or credential, keeping its shape."""
     if isinstance(value, dict):
-        return {k: _replace(v, fn) for k, v in value.items()}
+        res = {}
+        for k, v in value.items():
+            if isinstance(v, str) and len(v) >= 16 and SECRET_FIELD_RX.search(k) and not re.search(r"\s", v):
+                if not (allow_list and v in allow_list):
+                    res[k] = fn("secret", v)
+                    continue
+            res[k] = _replace(v, fn, allow_list=allow_list)
+        return res
     if isinstance(value, list):
-        return [_replace(v, fn) for v in value]
+        return [_replace(v, fn, allow_list=allow_list) for v in value]
     if not isinstance(value, str):
         return value
     out, at = [], 0
-    for a, b, kind in pii_spans(value):
+    for a, b, kind in pii_spans(value, allow_list=allow_list):
         out += [value[at:a], fn(kind, value[a:b])]
         at = b
     return "".join(out + [value[at:]])
 
 
-def redact(value):
-    """The input with personal data replaced by placeholders, keeping its shape."""
-    return _replace(value, lambda kind, v: f"<{kind}>")
+def redact(value, allow_list: Optional[Set[str]] = None):
+    """The input with personal data and credentials replaced by placeholders, keeping its shape."""
+    return _replace(value, lambda kind, v: f"<{kind}>", allow_list=allow_list)
 
 
 _NAMES = ["Alex Morgan", "Sam Rivera", "Jordan Lee", "Taylor Brooks", "Casey Quinn", "Riley Park", "Jamie Fox",
