@@ -454,3 +454,47 @@ class EventsSource:
         if not reported:
             return None
         return {r["file_hash"] for r in reported if r["delivered_downstream"] and r["file_hash"]}
+
+    def document_volume_sql(self, window: Window, dimensions: Sequence[str]) -> Any:
+        """Push document volume aggregation into SQL for production volume."""
+        from sqlalchemy import func
+        from assay.measures.base import SliceResult, MeasureOutput
+        from assay.models import UNRECORDED
+        t = store.event_documents
+        cond = [t.c.tenant == self.tenant, t.c.received_at >= window.start, t.c.received_at < window.end]
+        with self.engine.connect() as conn:
+            total_n = conn.execute(select(func.count()).where(and_(*cond))).scalar() or 0
+            results = [SliceResult(None, None, float(total_n), total_n)]
+            for dim in dimensions:
+                if hasattr(t.c, dim):
+                    col = getattr(t.c, dim)
+                    norm_col = func.coalesce(func.nullif(col, ""), UNRECORDED)
+                    q = select(norm_col.label("val"), func.count().label("cnt")).where(and_(*cond)).group_by(norm_col).order_by(norm_col)
+                    for r in conn.execute(q):
+                        results.append(SliceResult(dim, r.val, float(r.cnt), r.cnt))
+        return MeasureOutput("document_volume", "measured", results)
+
+    def stage_failure_rate_sql(self, window: Window, dimensions: Sequence[str]) -> Any:
+        """Push stage failure rate aggregation into SQL for production volume."""
+        from sqlalchemy import case, func
+        from assay.measures.base import SliceResult, MeasureOutput, unmeasured
+        from assay.models import UNRECORDED, FAILED_STATUSES
+        t = store.event_stage_runs
+        cond = [t.c.tenant == self.tenant, t.c.started_at >= window.start, t.c.started_at < window.end]
+        is_fail = case((t.c.status.in_(FAILED_STATUSES), 1), else_=0)
+        with self.engine.connect() as conn:
+            overall = conn.execute(select(func.count().label("n"), func.sum(is_fail).label("fails")).where(and_(*cond))).first()
+            if not overall or not overall.n:
+                return unmeasured("stage_failure_rate", "No records in this window.")
+            fails = overall.fails or 0
+            n = overall.n
+            results = [SliceResult(None, None, fails / n if n else 0.0, n, fails, n)]
+            for dim in dimensions:
+                if hasattr(t.c, dim):
+                    col = getattr(t.c, dim)
+                    norm_col = func.coalesce(func.nullif(col, ""), UNRECORDED)
+                    q = select(norm_col.label("val"), func.count().label("n"), func.sum(is_fail).label("fails")).where(and_(*cond)).group_by(norm_col).order_by(norm_col)
+                    for r in conn.execute(q):
+                        f_cnt = r.fails or 0
+                        results.append(SliceResult(dim, r.val, f_cnt / r.n if r.n else 0.0, r.n, f_cnt, r.n))
+        return MeasureOutput("stage_failure_rate", "measured", results)
