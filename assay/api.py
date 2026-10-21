@@ -1002,7 +1002,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if pattern is None:
             raise HTTPException(404, "No such pattern in this window.")
         try:
-            ticket = integrations.create_ticket(engine, source, pattern, base_url(request))
+            ticket = integrations.create_ticket(engine, source, pattern, base_url(request),
+                                                secret_key=settings.secret_key)
         except ValueError as e:
             raise HTTPException(422, str(e))
         except RuntimeError as e:
@@ -1534,7 +1535,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         source = resolve(p, req.source)
         run_id = runner.run_measures(engine, source, runner.window_for_days(req.days), req.measures,
                                      notify=integrations.notifier(engine, source.name, settings.public_url,
-                                                                  settings.notifier()),
+                                                                  settings.notifier(),
+                                                                  secret_key=settings.secret_key),
                                      alert_min_n=settings.alert_min_n,
                                      alert_after_runs=settings.alert_after_runs)
         return runner.latest_run(engine, source.name) | {"run_id": run_id}

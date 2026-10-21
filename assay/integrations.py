@@ -22,7 +22,7 @@ from typing import Callable, Dict, List, Optional
 from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Engine
 
-from assay import store
+from assay import crypto, store
 
 log = logging.getLogger(__name__)
 KINDS = {
@@ -40,7 +40,8 @@ def _mask(kind: str, cfg: dict) -> dict:
     return {k: (MASK if k in KINDS[kind]["secret"] and v else v) for k, v in cfg.items()}
 
 
-def get(engine: Engine, source: str, kind: str, reveal: bool = False) -> Optional[dict]:
+def get(engine: Engine, source: str, kind: str, reveal: bool = False,
+        secret_key: Optional[str] = None) -> Optional[dict]:
     """A source's own config, else the "*" one."""
     t = store.integrations
     with engine.connect() as conn:
@@ -49,26 +50,64 @@ def get(engine: Engine, source: str, kind: str, reveal: bool = False) -> Optiona
     r = rows.get(source) or rows.get("*")
     if r is None or not r.enabled:
         return None
-    return r.config if reveal else _mask(kind, r.config)
+    cfg = dict(r.config)
+    if reveal:
+        for s in KINDS[kind]["secret"]:
+            if cfg.get(s):
+                cfg[s] = crypto.decrypt_secret(cfg[s], secret_key)
+        return cfg
+    return _mask(kind, cfg)
 
 
-def list_(engine: Engine, source: str) -> Dict[str, Optional[dict]]:
-    return {k: get(engine, source, k) for k in KINDS}
+def list_(engine: Engine, source: str, secret_key: Optional[str] = None) -> Dict[str, Optional[dict]]:
+    return {k: get(engine, source, k, secret_key=secret_key) for k in KINDS}
 
 
-def save(engine: Engine, source: str, kind: str, config: dict) -> dict:
-    """Save a config; a field sent back masked keeps its stored secret."""
-    old = get(engine, source, kind, reveal=True) or {}
+def save(engine: Engine, source: str, kind: str, config: dict,
+         secret_key: Optional[str] = None) -> dict:
+    """Save a config; a field sent back masked keeps its stored secret.
+    Secret fields are encrypted at rest with the server key (ASSAY_SECRET_KEY)."""
+    old = get(engine, source, kind, reveal=True, secret_key=secret_key) or {}
     cfg = {k: (old.get(k) if v == MASK else v) for k, v in config.items() if k in KINDS[kind]["fields"]}
     missing = [k for k in KINDS[kind]["fields"] if not cfg.get(k) and k != "issue_type"]
     if missing:
         raise ValueError(f"{KINDS[kind]['label']} needs: {', '.join(KINDS[kind]['fields'][m] for m in missing)}.")
+
+    stored = dict(cfg)
+    for s in KINDS[kind]["secret"]:
+        if stored.get(s):
+            stored[s] = crypto.encrypt_secret(stored[s], secret_key)
+
     t = store.integrations
     with engine.begin() as conn:
         conn.execute(t.delete().where(and_(t.c.source == source, t.c.kind == kind)))
-        conn.execute(t.insert().values(source=source, kind=kind, config=cfg, enabled=True,
+        conn.execute(t.insert().values(source=source, kind=kind, config=stored, enabled=True,
                                        updated_at=datetime.utcnow()))
     return _mask(kind, cfg)
+
+
+def reencrypt_all(engine: Engine, new_key: str, old_key: Optional[str] = None) -> int:
+    """Migrate/re-encrypt all integration secrets in the database with new_key."""
+    t = store.integrations
+    updated = 0
+    with engine.connect() as conn:
+        rows = conn.execute(select(t)).all()
+    for r in rows:
+        cfg = dict(r.config)
+        changed = False
+        for s in KINDS.get(r.kind, {}).get("secret", []):
+            if cfg.get(s):
+                decrypted = crypto.decrypt_secret(cfg[s], old_key)
+                encrypted = crypto.encrypt_secret(decrypted, new_key)
+                if encrypted != cfg[s]:
+                    cfg[s] = encrypted
+                    changed = True
+        if changed:
+            with engine.begin() as conn:
+                conn.execute(t.update().where(and_(t.c.source == r.source, t.c.kind == r.kind)).values(
+                    config=cfg, updated_at=datetime.utcnow()))
+            updated += 1
+    return updated
 
 
 def remove(engine: Engine, source: str, kind: str) -> None:
@@ -101,9 +140,10 @@ def slack_send(cfg: dict, text: str) -> None:
 
 
 def notifier(engine: Engine, source: str, public_url: Optional[str] = None,
-             fallback: Optional[Callable[[str, dict], None]] = None) -> Optional[Callable[[str, dict], None]]:
+             fallback: Optional[Callable[[str, dict], None]] = None,
+             secret_key: Optional[str] = None) -> Optional[Callable[[str, dict], None]]:
     """Alerts to the Slack channel set up in the dashboard, and to the server's webhook if configured."""
-    cfg = get(engine, source, "slack", reveal=True)
+    cfg = get(engine, source, "slack", reveal=True, secret_key=secret_key)
     if cfg is None:
         return fallback
     from assay.alerts import webhook_notifier
@@ -134,10 +174,11 @@ def ticket_text(pattern: dict, base_url: Optional[str]) -> tuple:
     return title, "\n".join(lines)
 
 
-def create_ticket(engine: Engine, source: str, pattern: dict, base_url: Optional[str] = None) -> dict:
+def create_ticket(engine: Engine, source: str, pattern: dict, base_url: Optional[str] = None,
+                  secret_key: Optional[str] = None) -> dict:
     """A ticket in whichever tracker is set up (Jira first, then Linear)."""
     title, body = ticket_text(pattern, base_url)
-    jira = get(engine, source, "jira", reveal=True)
+    jira = get(engine, source, "jira", reveal=True, secret_key=secret_key)
     if jira:
         auth = base64.b64encode(f"{jira['email']}:{jira['api_token']}".encode()).decode()
         doc = {"type": "doc", "version": 1, "content": [
@@ -148,7 +189,7 @@ def create_ticket(engine: Engine, source: str, pattern: dict, base_url: Optional
                     {"Authorization": f"Basic {auth}", "Accept": "application/json"})
         key = out.get("key")
         return {"tracker": "jira", "id": key, "url": f"{jira['site'].rstrip('/')}/browse/{key}" if key else None}
-    linear = get(engine, source, "linear", reveal=True)
+    linear = get(engine, source, "linear", reveal=True, secret_key=secret_key)
     if linear:
         q = ("mutation($i: IssueCreateInput!) { issueCreate(input: $i) { success issue { identifier url } } }")
         out = _post("https://api.linear.app/graphql", {"query": q, "variables": {"i": {
@@ -168,8 +209,8 @@ def record_ticket(engine: Engine, source: str, key: str, ticket: dict) -> None:
                      .values(ticket_url=ticket.get("url"), ticket_id=ticket.get("id")))
 
 
-def test(engine: Engine, source: str, kind: str) -> str:
-    cfg = get(engine, source, kind, reveal=True)
+def test(engine: Engine, source: str, kind: str, secret_key: Optional[str] = None) -> str:
+    cfg = get(engine, source, kind, reveal=True, secret_key=secret_key)
     if cfg is None:
         raise ValueError(f"{KINDS[kind]['label']} isn't set up.")
     if kind == "slack":
