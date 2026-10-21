@@ -248,7 +248,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     engine = store.make_engine(settings.store_url)
     scheduler = Scheduler(engine, settings)
     authn = auth.Authenticator(engine, settings.admin_key, settings.auth_mode)
-    limiter = auth.RateLimiter(settings.rate_limit_per_min)
+    limiter = auth.RateLimiter(settings.rate_limit_per_min, redis_url=settings.redis_url)
     from assay import sso
     sso_cfg = sso.from_settings(settings)  # raises on a half-set-up SSO: better at start than at sign-in
     authn.sso = sso_cfg

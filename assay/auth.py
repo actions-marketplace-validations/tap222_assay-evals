@@ -33,6 +33,9 @@ from typing import Dict, FrozenSet, Iterable, Optional, Tuple
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Engine
 
+import logging
+log = logging.getLogger(__name__)
+
 from assay import store
 
 SCOPES = ("ingest", "read", "manage", "admin", "sensitive")
@@ -171,12 +174,19 @@ class Authenticator:
 
 
 class RateLimiter:
-    """Fixed one-minute window per key. In memory, so per instance."""
+    """Fixed one-minute window per key. Supports local memory or shared distributed store (Redis)."""
 
-    def __init__(self, per_minute: int):
+    def __init__(self, per_minute: int, redis_url: Optional[str] = None, redis_client=None):
         self.per_minute = per_minute
         self._counts: Dict[str, Tuple[int, int]] = {}
         self._lock = threading.Lock()
+        self._redis = redis_client
+        if not self._redis and redis_url:
+            try:
+                import redis
+                self._redis = redis.from_url(redis_url, decode_responses=True)
+            except Exception as e:
+                log.warning("Could not connect to Redis at %s (%s); falling back to in-memory rate limiting", redis_url, e)
 
     def check(self, who: str) -> Optional[int]:
         """None if allowed, else seconds until the window resets."""
@@ -184,6 +194,24 @@ class RateLimiter:
             return None
         now = time.time()
         window = int(now // 60)
+
+        # 1. Shared distributed store (Redis)
+        if self._redis:
+            try:
+                key = f"assay:ratelimit:{who}:{window}"
+                pipe = self._redis.pipeline()
+                pipe.incr(key)
+                pipe.expire(key, 70)
+                res = pipe.execute()
+                count = res[0]
+                if count > self.per_minute:
+                    ttl = self._redis.ttl(key)
+                    return max(1, ttl if ttl > 0 else int(60 - now % 60) + 1)
+                return None
+            except Exception as e:
+                log.warning("Redis rate limit check failed (%s); using in-memory limiter", e)
+
+        # 2. In-memory fallback
         with self._lock:
             w, n = self._counts.get(who, (window, 0))
             if w != window:
