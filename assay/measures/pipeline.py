@@ -10,8 +10,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, List
 
-from assay.measures.base import (Measure, MeasureOutput, SliceResult, _key, quantile,
-                                 ratio_by_slice, unmeasured)
+from assay.measures.base import (Measure, MeasureOutput, SliceResult, _key, bootstrap_quantile_stderr,
+                                 quantile, ratio_by_slice, unmeasured)
 from assay.models import Window
 from assay.units import fmt
 
@@ -165,8 +165,11 @@ class TimeToComplete(Measure):
                 return SliceResult(dim, val, None, len(group), 0, len(group),
                                    note="No document in this slice records a completion.")
             p50 = quantile(done, 0.5)
-            return SliceResult(dim, val, quantile(done, 0.9), len(done), len(done), len(group),
-                               note=f"Median {fmt(p50, 'seconds')} · {len(done) / len(group):.1%} record a completion")
+            p90 = quantile(done, 0.9)
+            se = bootstrap_quantile_stderr(done, 0.9) if len(done) >= 2 else None
+            return SliceResult(dim, val, p90, len(done), len(done), len(group),
+                               note=f"Median {fmt(p50, 'seconds')} · {len(done) / len(group):.1%} record a completion",
+                               stderr=se)
 
         results: List[SliceResult] = [one(None, None, docs)]
         for dim in self.dimensions:

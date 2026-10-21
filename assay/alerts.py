@@ -62,13 +62,16 @@ class Band:
 
 def sampling_error(center: float, n: Optional[int], unit: str) -> float:
     """Standard error expected from sample size alone, where there is a formula for it."""
-    if not n:
+    if not n or n <= 0:
         return 0.0
     if unit == "ratio":
         p = min(max(center, 1 / n), 1 - 1 / n)  # a 0% baseline still has uncertainty
         return math.sqrt(p * (1 - p) / n)
     if unit == "count":
         return math.sqrt(max(center, 1.0))  # Poisson
+    if unit in ("seconds", "ms"):
+        # Tail timing quantiles on small slices get an error estimate proportional to 1/sqrt(n)
+        return (0.3 * center / math.sqrt(n)) if n >= 2 else 0.0
     return 0.0
 
 
