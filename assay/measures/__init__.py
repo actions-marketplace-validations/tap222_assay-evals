@@ -6,7 +6,7 @@ from assay.measures.documents import (FieldCellF1, LocationAccuracy, OcrCharacte
 from assay.measures.errors import ErrorsByOrigin, PromptErrorRate, ReportedErrorRate
 from assay.measures.ground_truth import (ConfidenceAurc, ConfidenceCalibration, ConfidentErrors,
                                          CriticalDocumentAccuracy, CriticalFieldAccuracy, DocumentAccuracy,
-                                         EscapeRate, FabricatedValues, FieldAccuracy, FormatErrors, InferredValues,
+                                         EscapeRate, EvalRunAccuracy, FabricatedValues, FieldAccuracy, FormatErrors, InferredValues,
                                          PrefillErrors, SplitStraightThrough, SupersededValues,
                                          ValueStability)
 from assay.measures.operations import (CallErrorRate, CallLatencyP95, DocumentVolume, InputMixDrift,
@@ -27,7 +27,7 @@ REGISTRY = {m.id: m for m in [
     ReportedErrorRate(), ErrorsByOrigin(), PromptErrorRate(),
     # needs ground truth
     SplitStraightThrough(), SplitPanopticQuality(), SplitDragRate(), DocumentAccuracy(), CriticalDocumentAccuracy(),
-    CriticalFieldAccuracy(), FieldAccuracy(), FieldCellF1(), FabricatedValues(), InferredValues(), FormatErrors(),
+    CriticalFieldAccuracy(), FieldAccuracy(), EvalRunAccuracy(), FieldCellF1(), FabricatedValues(), InferredValues(), FormatErrors(),
     SupersededValues(), EscapeRate(), PrefillErrors(), ValueStability(),
     # confidence: whether it can decide what skips review
     ConfidenceAurc(), ConfidentErrors(), ConfidenceCalibration(),
@@ -46,7 +46,7 @@ GROUPS = {
     "Errors": ["reported_error_rate", "errors_by_origin", "prompt_error_rate"],
     "Accuracy (needs ground truth)": ["split_stp", "split_pq", "split_drag_rate", "document_accuracy",
                                       "critical_document_accuracy", "critical_field_accuracy", "field_accuracy",
-                                      "field_cell_f1", "fabricated_value_rate", "inferred_value_rate",
+                                      "eval_run_accuracy", "field_cell_f1", "fabricated_value_rate", "inferred_value_rate",
                                       "format_error_rate", "superseded_value_rate", "escape_rate",
                                       "prefill_error_rate", "value_stability"],
     "Confidence": ["confidence_aurc", "confident_error_rate", "confidence_ece"],

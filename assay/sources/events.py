@@ -183,6 +183,76 @@ class EventsSource:
             f["template_new"] = "yes" if (when - first[tpl]).days < self.TEMPLATE_NEW_DAYS else "no"
         return f
 
+    def eval_scores(self, window: Optional[Window] = None, run_id: Optional[str] = None) -> Optional[List[dict]]:
+        """Evaluation check results across all evaluators, enriched with failure causes and roles."""
+        import json
+        t, d = store.eval_results, store.event_documents
+        from assay.local import BASELINE
+        cond = [t.c.tenant == self.tenant, t.c.status.in_(("pass", "fail")), t.c.run_id != BASELINE]
+        if run_id:
+            cond.append(t.c.run_id == run_id)
+        if window is not None:
+            cond += [t.c.ts >= window.start, t.c.ts < window.end]
+
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(t.c.document_id, t.c.case_id, t.c.field, t.c.evaluator,
+                                       t.c.status, t.c.raw_output, t.c.ts, t.c.run_id,
+                                       d.c.document_type, d.c.segment).select_from(
+                t.outerjoin(d, and_(d.c.tenant == t.c.tenant, d.c.document_id == t.c.document_id))).where(
+                and_(*cond))).all()
+        if not rows:
+            return None
+
+        causes_by_check: Dict[Tuple[str, str, str], str] = {}
+        roles_by_check: Dict[Tuple[str, str, str], str] = {}
+        target_run_id = run_id or (rows[0].run_id if rows else None)
+        if target_run_id:
+            try:
+                from assay import failures
+                ev = failures.evaluation(self.engine, self, self.tenant, target_run_id)
+                if ev and "groups" in ev:
+                    for g in ev["groups"]:
+                        c_name = g.get("name", "Unknown cause")
+                        k = g.get("kind")
+                        role = "accepted" if (g.get("decision") or {}).get("decision") in ("accepted_change", "not_a_problem") else \
+                            {"intended_change": "intended", "evaluator": "evaluator", "infrastructure": "infrastructure"}.get(k, "ai")
+                        for mid in g.get("member_ids", []):
+                            traced = ev.get("failures", [])
+                            if mid < len(traced):
+                                f_item = traced[mid]
+                                check_k = (f_item.get("case_id"), f_item.get("field"), f_item.get("evaluator"))
+                                causes_by_check[check_k] = c_name
+                                roles_by_check[check_k] = role
+            except Exception:
+                pass
+
+        out = []
+        for r in rows:
+            try:
+                raw = json.loads(r.raw_output or "{}")
+            except ValueError:
+                raw = {}
+            chk = (r.case_id or r.document_id, r.field, r.evaluator)
+            cause = causes_by_check.get(chk)
+            role = roles_by_check.get(chk, "ai" if r.status == "fail" else None)
+            is_pass = r.status == "pass"
+            out.append({
+                "document_id": r.document_id or r.case_id,
+                "case_id": r.case_id,
+                "field": r.field or "default",
+                "evaluator": r.evaluator,
+                "document_type": r.document_type or "eval",
+                "segment": r.segment or "eval",
+                "status": r.status,
+                "right": is_pass,
+                "share": 1.0 if is_pass else 0.0,
+                "weight": float(raw.get("weight") or 1.0),
+                "cause": cause,
+                "role": role,
+                "run_id": r.run_id,
+            })
+        return out
+
     def repeated_values(self, window: Window) -> Optional[List[dict]]:
         """Fields extracted more than once in a run (assay test --repeat): {"document_id",
         "document_type", "segment", "field", "attempts", "same", "facets"}, same when every attempt

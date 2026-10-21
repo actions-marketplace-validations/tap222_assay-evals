@@ -60,6 +60,8 @@ class FieldAccuracy(_AwaitingTruth):
 
     def compute(self, source, window: Window) -> MeasureOutput:
         scores = source.field_scores(window) if hasattr(source, "field_scores") else None
+        if scores is None and hasattr(source, "eval_scores"):
+            scores = source.eval_scores(window)
         if scores is None:
             return super().compute(source, window)
         scores = [s for s in scores if not s.get("part_of")]  # a group counts whole, like a table
@@ -344,3 +346,66 @@ class EscapeRate(_AwaitingTruth):
             r["path"] = r["raw"].get("path")
         from assay.measures.documents import _slices
         return _slices(self.id, rows, self.dimensions, lambda g: (sum(not r["passed"] for r in g), len(g)))
+
+
+class EvalRunAccuracy(Measure):
+    """Accuracy computed from evaluation check results, broken down by field, evaluator,
+    and failure causes. Separates AI accuracy from infrastructure and evaluator false alarms."""
+    id = "eval_run_accuracy"
+    tag = "Accuracy"
+    name = "Evaluation run accuracy"
+    question = "What share of evaluation checks passed, and what causes account for failures?"
+    dimensions = ("evaluator", "field", "cause")
+    unit = "ratio"
+    higher_is_better = True
+
+    def compute(self, source, window: Window) -> MeasureOutput:
+        scores = source.eval_scores(window) if hasattr(source, "eval_scores") else None
+        if not scores:
+            return unmeasured(self.id, "No evaluation run results in this window.")
+
+        # Overall and cause attribution
+        failing_causes: Dict[str, int] = defaultdict(int)
+        infra_fails, eval_fails = 0, 0
+        for s in scores:
+            if not s.get("right"):
+                c = s.get("cause") or "Unclassified failure"
+                failing_causes[c] += 1
+                role = s.get("role")
+                if role == "infrastructure":
+                    infra_fails += 1
+                elif role in ("evaluator", "evaluator_input"):
+                    eval_fails += 1
+
+        total = len(scores)
+        passed = sum(1 for s in scores if s.get("right"))
+        overall_rate = passed / total if total else None
+
+        cause_note = ""
+        if failing_causes:
+            top = sorted(failing_causes.items(), key=lambda x: -x[1])[:3]
+            cause_note = " · Top causes: " + ", ".join(f"{k} ({v})" for k, v in top)
+            if infra_fails or eval_fails:
+                ai_denom = total - infra_fails - eval_fails
+                ai_rate = passed / ai_denom if ai_denom > 0 else overall_rate
+                cause_note = f" · AI accuracy {ai_rate:.1%} ({infra_fails} infra, {eval_fails} eval excluded)" + cause_note
+
+        def one(dim, val, group):
+            w = sum(s.get("weight", 1.0) for s in group)
+            right = sum(s.get("weight", 1.0) * s.get("share", 0.0) for s in group)
+            note = None
+            if dim is None:
+                note = f"{passed}/{total} passed" + cause_note
+            return SliceResult(dim, val, right / w if w else None, len(group),
+                               numerator=right, denominator=w, note=note)
+
+        results = [one(None, None, scores)]
+        for dim in self.dimensions:
+            by = defaultdict(list)
+            for s in scores:
+                key = s.get(dim)
+                if key:
+                    by[key].append(s)
+            results += [one(dim, v, g) for v, g in sorted(by.items())]
+
+        return MeasureOutput(self.id, "measured", results)
