@@ -114,7 +114,7 @@ assay init --antigravity      # writes .agent/skills/assay/SKILL.md for Antigrav
 assay init --claude-code      # writes .claude/skills/assay/SKILL.md for Claude Code
 ```
 
-Commit the skill, so everyone on your team gets it. After an edit to your code or prompts, the agent runs `pytest --assay`, reads `assay diff`, and tells you what regressed and why, with a proposed fix. It never accepts a new baseline or loosens a test on its own; that stays your call.
+Commit the skill, so everyone on your team gets it. After an edit to your code or prompts, the agent runs `pytest --assay`, reads `assay diff`, and tells you what regressed and why, with a proposed fix. It never accepts a new baseline or loosens a test on its own; that stays your call. See [examples/antigravity](../examples/antigravity) for a complete working Antigravity project example with preconfigured skills, Gemini model calls, and approval gates.
 
 ## All your repositories in one dashboard (optional)
 
@@ -176,18 +176,18 @@ WantedBy=default.target
 Or with Docker, if you already run it:
 `docker run -d --restart unless-stopped -p 127.0.0.1:8400:8400 -v assay-data:/data --name assay ghcr.io/tap222/assay-server`.
 
-Then send every run there. Set these in your shell profile, or for Claude Code in
-`~/.claude/settings.json` under `"env"`:
+Then send every run there. Set these in your shell profile, or in your agent's environment (for Claude Code in
+`~/.claude/settings.json` under `"env"`, or for Antigravity in your shell profile):
 
 ```bash
 export ASSAY_URL=http://localhost:8400
 export ASSAY_UPLOAD=1
 ```
 
-Every `pytest --assay` run, yours or Claude's, then goes to the dashboard, filed under the
+Every `pytest --assay` run, yours, Antigravity's, or Claude's, then goes to the dashboard, filed under the
 repository's name from its git remote (`ASSAY_PROJECT` overrides it). **All projects** shows
 each repository's latest run against the one before it, with what regressed first. A repository
-needs Assay tests to show up; in one without them, Claude offers to set them up.
+needs Assay tests to show up; in one without them, the coding agent offers to set them up.
 
 Each run also records where it came from: the repository's git remote (with any credentials
 removed) and its folder, with your home folder as `~`. The dashboard shows them under **Latest

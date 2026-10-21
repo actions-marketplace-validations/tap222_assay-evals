@@ -71,7 +71,8 @@ git clone https://github.com/tap222/assay-evals && cd assay-evals/examples/promp
 ```
 
 See [examples/prompt-regression](examples/prompt-regression) for what it shows. The same demo in
-JavaScript: [examples/prompt-regression-js](examples/prompt-regression-js) (`./demo.sh` there).
+JavaScript: [examples/prompt-regression-js](examples/prompt-regression-js) (`./demo.sh` there), and for
+Antigravity: [examples/antigravity](examples/antigravity).
 
 ## Quickstart
 
@@ -288,7 +289,7 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
   Assay reads `gen_ai.*` spans and OpenInference spans (Arize Phoenix and other instrumentors),
   and becomes the regression gate on top of the tracing you already have. See
   [Sending data](docs/api.md#sending-data).
-- **Antigravity and Claude Code.** `assay init --antigravity` adds an Antigravity skill (`.agent/skills/assay/SKILL.md`), and `assay init --claude-code` adds a Claude Code skill: after your coding agent changes a prompt, model, tool or pipeline code, it runs your tests, reads `assay diff`, and tells you what regressed before you commit. It never accepts a new baseline on its own. `--global` installs the skill across all projects (`~/.gemini/antigravity-cli/skills/` or `~/.claude/skills/`), and with `ASSAY_URL` and `ASSAY_UPLOAD=1` set, every run lands in one dashboard, filed by repository, with an **All projects** view. See [Getting started](docs/getting-started.md#let-antigravity-or-claude-code-run-it-for-you-optional).
+- **Antigravity and Claude Code.** `assay init --antigravity` adds an Antigravity skill (`.agent/skills/assay/SKILL.md`), and `assay init --claude-code` adds a Claude Code skill: after your coding agent changes a prompt, model, tool or pipeline code, it runs your tests, reads `assay diff`, and tells you what regressed before you commit. It never accepts a new baseline on its own. `--global` installs the skill across all projects (`~/.gemini/antigravity-cli/skills/` or `~/.claude/skills/`), and with `ASSAY_URL` and `ASSAY_UPLOAD=1` set, every run lands in one dashboard, filed by repository, with an **All projects** view. See [Getting started](docs/getting-started.md#let-antigravity-or-claude-code-run-it-for-you-optional) and the [Antigravity example](examples/antigravity).
 - **Existing apps.** `assay connect` attaches Assay to an app you already have, through its
   database, a few lines of code, or a proposed test per model call. See [Setup](docs/setup.md).
 - **Any model provider.**
