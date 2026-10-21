@@ -113,3 +113,55 @@ by 14 points, within a small suite's interval, and holds the release as a check 
 Measured on simulated unchanged changes (8 attempts per check, per-check pass rates between 60%
 and 100%), 96–100% advance for suites of 5, 10 and 50 checks. The same checks with one task
 collapsed from 8/8 to 0/8 hold every time.
+
+## Unified release decision across both gates
+
+`POST /v1/gates/release-decision` provides a unified release decision table across quality per slice,
+stability runs, and operational limits in a single request.
+
+Instead of running and reconciling quality gates (`/v1/gates/evaluate`) and stability runs
+(`/v1/evals/runs/{run}/stability`) in separate scripts, the unified decision returns a structured
+table with one overall outcome:
+- `advance`: all slice quality rules, stability checks, and operational limits pass.
+- `advance_with_conditions`: non-critical warnings or canary watch conditions apply (e.g. p95 latency increased slightly but remains comfortably below the operational ceiling).
+- `hold`: unmeasured slices, unresolved intended changes, or stability regressions under investigation.
+- `rollback`: any critical slice or ceiling violated beyond noise margins.
+
+```json
+{
+  "lineage": {
+    "prompt": "summarize@v2.1",
+    "model": "gpt-5-turbo",
+    "build": "sha-49e4324",
+    "corpus": "golden-v3"
+  },
+  "rules": [
+    {"measure_id": "accuracy", "tolerance": 0.05, "min_n": 50},
+    {"measure_id": "latency_ms", "higher_is_better": false, "tolerance": 200, "statistic": "p95", "absolute_limit": 1000.0}
+  ],
+  "samples": { ... },
+  "identical_runs": { ... },
+  "stability": { ... },
+  "operations": {
+    "timeouts": {"count": 0, "limit": 5},
+    "fallbacks": {"count": 1, "limit": 10}
+  }
+}
+```
+
+The response includes:
+- `outcome`: the single rollout verdict (`advance`, `advance_with_conditions`, `hold`, `rollback`).
+- `conditions`: actionable watch conditions for deployment canaries.
+- `rows`: tabular breakdown of every quality slice, operational limit, and stability metric.
+
+## Small high-risk slices
+
+Slices with high business severity (e.g. security checks, VIP customers, regulated document types) often
+have small sample counts (`n < min_n`, where default `min_n = 30`). Previously, rules on these slices held
+automatically due to low sample volume.
+
+Setting `severity: "high"` on a rule allows high-risk slices under `min_n` to fall back to per-case
+stability verification:
+- If all cases in the slice passed reliably in identical baseline runs, the slice evaluates each case individually.
+- No reliable case is allowed to fail in the candidate run.
+- Slices passing per-case stability advance with an annotated reason (`"passed stability per-case check (n=20 < min_n=30)"`), preventing low-volume critical cases from artificially blocking releases.

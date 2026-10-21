@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/assay-server/"><img src="https://img.shields.io/pypi/v/assay-server?label=pypi&color=blue" alt="assay-server on PyPI"></a>
+  <a href="https://pypi.org/project/assay-server/"><img src="https://img.shields.io/pypi/v/assay-server?label=pypi&color=blue&v=0.7.0" alt="assay-server on PyPI"></a>
   <a href="https://pypi.org/project/assay-server/"><img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python versions"></a>
   <a href="https://www.npmjs.com/package/assay-evals"><img src="https://img.shields.io/npm/v/assay-evals?label=npm&color=blue" alt="assay-evals on npm"></a>
   <a href="https://pepy.tech/project/assay-server"><img src="https://img.shields.io/pepy/dt/assay-server?label=downloads" alt="Downloads"></a>
@@ -71,7 +71,8 @@ git clone https://github.com/tap222/assay-evals && cd assay-evals/examples/promp
 ```
 
 See [examples/prompt-regression](examples/prompt-regression) for what it shows. The same demo in
-JavaScript: [examples/prompt-regression-js](examples/prompt-regression-js) (`./demo.sh` there).
+JavaScript: [examples/prompt-regression-js](examples/prompt-regression-js) (`./demo.sh` there), and for
+Antigravity: [examples/antigravity](examples/antigravity).
 
 ## Quickstart
 
@@ -169,7 +170,13 @@ worse with a judge that disagrees with itself).
 | **Document extraction** | Field, line-item, table, OCR, splitting and confidence metrics, with per-field gates. See [below](#document-extraction). | [Documents](docs/documents.md) |
 | **Agents and workflows** | Trajectories, path and claim contracts, plan adherence, multi-turn conversations, simulated users, tools that fail or whose state changes mid-run (an approval that's stale by the time the agent acts), a retry that charges twice after a lost reply, and [rewordings](docs/testing.md#rewordings-the-same-request-in-other-words): the same request in other words must get the same behavior. | [Agents](docs/agents.md) |
 | **Judges you can check** | Calibration against labels a person gave, bias probes, drift, whether a judge ranks answers or only recognizes the topic, and a trust label on every judged score. | [Calibration](docs/calibration.md) |
-| **What caused it** | The prompt, model, tools, input and settings that changed next to each regression, or "nothing on your side changed". That includes a tool's definition: a reworded description or a changed argument, from your own tools or an MCP server's `tools/list`. | [Failures](docs/failures.md) |
+| **What caused it** | The prompt, model, tools, input and settings that changed next to each regression, or "nothing on your side changed". That includes a tool's definition: a reworded description or a changed argument, from your own tools or an MCP server's `tools/list`, with LLM-enhanced cause naming. | [Failures](docs/failures.md) |
+| **Unified release decision** | Single decision table combining quality per slice, stability checks, and operational ceilings into one verdict (`advance`, `advance_with_conditions`, `hold`, `rollback`), with per-case stability fallbacks for small high-risk slices. | [Release gates](docs/release-gates.md) |
+| **Runaway loop detection** | Catches looping agents in the first minute of execution: 5+ normalized errors, spend velocity spikes ($/min), and no-op run leak detection. | [Agents](docs/agents.md) |
+| **Secrets & credential redaction** | Pre-recording redaction of API keys (OpenAI, Anthropic, Google, AWS, GitHub, Slack) and JWTs using Gitleaks-style scanners. AES-256-GCM server-side encryption for secrets stored at rest. | [Security](docs/security.md) |
+| **Enterprise SSO & directory sync** | SCIM 2.0 provisioning (`/scim/v2/Users`), SAML 2.0 SP metadata and assertion consumer service alongside OIDC. | [Setup](docs/setup.md), [API](docs/api.md) |
+| **Alert routing & on-call paging** | Per-team alert routing by source, measure or slice, maintenance silencing windows, acknowledgement tracking, and PagerDuty Events API v2 integration. | [Setup](docs/setup.md), [API](docs/api.md) |
+| **Production scale & shared limits** | Metric aggregations pushed into SQL queries for high-volume pipelines, and distributed sliding-window rate limiting backed by Redis. | [Setup](docs/setup.md) |
 | **Production back to tests** | Flagged traces and reviewed conversations become candidate test cases. Before there's traffic, `assay synth` generates queries from dimensions you define, kept apart from production. | [Learning](docs/learning.md), [Synthetic](docs/synthetic.md) |
 
 ## Document extraction
@@ -282,13 +289,7 @@ Inputs, timeouts, rerunning only what failed, and nightly runs: [docs/ci.md](doc
   Assay reads `gen_ai.*` spans and OpenInference spans (Arize Phoenix and other instrumentors),
   and becomes the regression gate on top of the tracing you already have. See
   [Sending data](docs/api.md#sending-data).
-- **Claude Code.** `assay init --claude-code` adds a skill: after Claude changes a prompt or the
-  agent, it runs your tests, reads `assay diff`, and tells you what regressed before you commit.
-  It never accepts a new baseline on its own. `--global` installs it for every project, and with
-  `ASSAY_URL` and `ASSAY_UPLOAD=1` set every run lands in one dashboard, filed by repository,
-  with an **All projects** view. The dashboard is one `assay serve` process with SQLite, no
-  Docker needed, and it shows each case's tool calls and the test's own checks, and which
-  repository and folder each run came from. See [Getting started](docs/getting-started.md#all-your-repositories-in-one-dashboard-optional).
+- **Antigravity and Claude Code.** `assay init --antigravity` adds an Antigravity skill (`.agent/skills/assay/SKILL.md`), and `assay init --claude-code` adds a Claude Code skill: after your coding agent changes a prompt, model, tool or pipeline code, it runs your tests, reads `assay diff`, and tells you what regressed before you commit. It never accepts a new baseline on its own. `--global` installs the skill across all projects (`~/.gemini/antigravity-cli/skills/` or `~/.claude/skills/`), and with `ASSAY_URL` and `ASSAY_UPLOAD=1` set, every run lands in one dashboard, filed by repository, with an **All projects** view. See [Getting started](docs/getting-started.md#let-antigravity-or-claude-code-run-it-for-you-optional) and the [Antigravity example](examples/antigravity).
 - **Existing apps.** `assay connect` attaches Assay to an app you already have, through its
   database, a few lines of code, or a proposed test per model call. See [Setup](docs/setup.md).
 - **Any model provider.**
@@ -328,7 +329,7 @@ at a time) is under **Details**, and loads when you open it.
 
 | Command | What it does |
 |---|---|
-| `assay init` | Set up local testing: `assay.toml` and a runnable example (`--claude-code` adds a Claude Code skill, `--hook` a pre-push hook that checks every push) |
+| `assay init` | Set up local testing: `assay.toml` and a runnable example (`--antigravity` adds an Antigravity skill, `--claude-code` a Claude Code skill, `--hook` a pre-push hook that checks every push) |
 | `assay doctor` | Check the setup and print the fix for each problem: versions, hook, base branch, dependencies, dashboard |
 | `assay test` | Run your tests with recording, check every run, and compare with the baseline (`--repeat N`, `--rerun-unsure`, `--junit`, `--failed`, `--base main` to also check for weakened tests) |
 | `assay diff` | What behavior changed between two runs |

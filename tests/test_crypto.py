@@ -3,6 +3,9 @@ import os
 import sqlite3
 from datetime import datetime
 import pytest
+
+pytest.importorskip("cryptography")
+
 from sqlalchemy import select
 
 from assay import crypto, integrations, store

@@ -33,7 +33,7 @@ jobs:
           test "$TAG" = "$PKG" && test "$PKG" = "$CODE"
       - name: Test
         run: |
-          pip install -e ".[dev]"
+          pip install -e sdk/python -e ".[dev]"
           pytest -q
       - name: Build
         run: |

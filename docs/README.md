@@ -27,10 +27,10 @@
 | [Sensitive data](sensitive.md) | Consented traces, experts with raw access, claim-level reviews, checking redaction and that edited traces still behave |
 | [Synthetic data](synthetic.md) | `assay synth`: dimensions, tuples, queries, runs through the app, kept apart from production and compared with it |
 | [Prompt versions](prompts.md) | The prompt registry, diffs, and results per version |
-| [Release gates](release-gates.md) | Advance, hold or roll back, and flaky checks that rerun instead of block |
+| [Release gates](release-gates.md) | Unified release decisions, slice quality and stability gates, operational ceilings, and small high-risk slice evaluation |
 | [Measures, cost and alerting](measures.md) | What you get, the measures, cost per document, alerts |
-| [Setup](setup.md) | Install, connect your pipeline or push events, go live, deploy |
-| [API and authentication](api.md) | Keys, sending data, alert webhooks |
+| [Setup](setup.md) | Install, connect your pipeline or push events, SCIM 2.0 & SAML 2.0 enterprise SSO, PagerDuty on-call, go live, deploy |
+| [API and authentication](api.md) | Keys, SCIM 2.0 provisioning, SAML 2.0 assertions, release decisions, alert routing & silences, sending data, alert webhooks |
 | [Event schema](event-schema.md) | The v1 events: runs, steps, checks, expectations |
 | [Code layout](layout.md) | Where things are in this repository |
 | [Roadmap](roadmap.md) | Where Assay is going, phase by phase, and what's not built yet |

@@ -125,7 +125,7 @@ As a developer, I want what the coding agent says it did checked against what ac
 As a coding agent, I want the report in a form I can act on after every change, so items are
 fixed before a person reviews.
 
-- JSON output, and an agent skill that runs it (`assay init --claude-code` adds one today).
+- JSON output, and an agent skill that runs it (`assay init --antigravity` or `assay init --claude-code` adds one today).
 - Confirmed rules are in the agent's instructions file.
 
 ### US-12

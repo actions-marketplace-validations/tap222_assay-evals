@@ -258,7 +258,10 @@ User stories: [US-15](user-stories.md#us-15).
 
 - Roll-up across repositories and teams.
 - Roles on top of the existing SSO and audit log; retention and redaction policies.
-- The enterprise items below: SAML and SCIM, alert routing, aggregation in SQL.
+- Enterprise SSO: SAML 2.0 and SCIM 2.0 directory provisioning (shipped).
+- Alert routing by source/slice/team, maintenance silencing, and PagerDuty v2 on-call integration (shipped).
+- High-scale SQL aggregation and distributed Redis rate limiting (shipped).
+- Server-key encryption for secrets at rest (AES-256-GCM) and schema migrations (shipped).
 
 User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 
@@ -569,55 +572,43 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     finishes or escalates instead of leaving a job half done.
   - **Count it in production:** runs that ended after an effect without completing or compensating
     it, per agent, so orphaned work is found before a customer finds it.
-- **Runaway runs, caught in the first minute:** an agent retried a failing tool 31,000 times
-  overnight, and the budget alert fired at month end. In tests this is caught: `faults()` keeps a
-  tool failing, and `handles_failure()`, `max_steps()` and `max_cost()` fail a case that retries past
-  its limit. In production, alerts watch rates over a window, which is too slow for one run gone
-  wrong. Alerts should fire at once, per run, for:
-  - **The same failure again and again:** the same tool returning the same error (its message with
-    ids and numbers taken out) five times in one run, whatever the model changes in its arguments.
-  - **A run far past its usual size:** calls, tokens or cost per run against that agent's normal.
-  - **Spend faster than normal:** spend per hour for a customer or an agent against its usual hour,
-    so a loop shows in minutes, long before a monthly total does.
-  - **The slow leak:** the share of runs that end having done nothing, and the cost per run that
-    did something. A run that finished "successfully" every time while doing no work is a cost with
-    no errors to count.
-  Each alert names the run and its repeated error, grouped so one loop is one page.
-- **One release decision across both gates:** the slice gate (`/v1/gates/evaluate`) and the
-  stability gate (`/v1/evals/runs/{run}/stability`) answer different questions and are called
-  separately. A release should get one decision table: every gate as a row (quality per slice,
-  latency, timeouts, fallbacks, stability), each with its value, limit and verdict, then one
-  call: advance, advance with conditions ("p95 up 8%, under the ceiling: watch it in canary"),
-  hold or roll back. Quality and operations stay separate rows and are never blended into one
-  score.
-- **Small high-risk slices:** a slice under `min_n` (30 by default) always holds, so a
-  20-case high-risk slice can never advance on the slice gate. For those slices the gate should
-  fall back to the stability gate's per-case rules: no case that passed reliably may now fail,
-  and any collapse blocks.
-- **Accuracy from eval runs:** evaluation results are grouped into causes, but the accuracy
-  measures don't read them yet.
-- **Naming causes:** cause names come from templates. An LLM could write better one-line names
-  (only names, never kinds).
-- **SAML and SCIM:** SSO is OpenID Connect, which every major provider offers. There's no SAML,
-  and no SCIM provisioning: people appear when they first sign in, and leave through their groups.
-- **Shared rate limits:** limits are per instance, in memory. Use a shared store (such as
-  Redis) when running several replicas.
-- **Alert routing:** there is no per-team routing, silencing, acknowledgement or on-call
-  paging (PagerDuty).
-- **Scale:** measures compute in Python over fetched rows. That is fine for tens of thousands
-  of calls per window. Push aggregation into SQL before running at production volume.
-- **Timing noise:** p90 completion time on small slices is the noisiest alert. It needs a
-  bootstrap error estimate.
-- **Migrations beyond adding:** on start, Assay adds new tables and columns to an existing
-  database. Renaming or removing columns would need a real migration tool (Alembic).
-- **Secrets in what's recorded:** redaction and `assay redact check` look for personal data (email,
-  card, IBAN, phone), not credentials. An API key, token or private key that passes through a tool's
-  arguments, its result or a model's text is stored, and sent with `--upload`. Known key formats
-  (provider keys, cloud access keys, GitHub and Slack tokens, private key blocks, JWTs) and long
-  random strings in fields named like a secret should be masked before anything is written, with
-  the same pattern list as Gitleaks-style scanners so a team's existing allow-list carries over.
-  `assay redact check` reports any that got through.
-- **Secrets at rest:** Slack, Jira and Linear tokens are masked in the API but stored as
-  plain text in Assay's database. Protect the database, or add encryption with a server key.
+- **Runaway runs, caught in the first minute (Shipped):** an agent retrying a failing tool
+  overnight or caught in an error loop is detected in the first minute of execution via
+  `assay.runaway.RunawayDetector`. Alerts fire at once, per run, for:
+  - **The same failure again and again:** the same tool returning the same error (with IDs,
+    hex addresses, and numbers stripped) five times in one run, whatever the model changes in its arguments.
+  - **Spend velocity cap:** dollar and call velocity per minute against agent baselines.
+  - **The slow leak:** runs that ended having done nothing (no-op burn with high step count or cost).
+- **One release decision across both gates (Shipped):** `POST /v1/gates/release-decision` provides
+  a single decision table: every gate as a row (quality per slice, latency, timeouts, fallbacks,
+  stability), each with its value, limit and verdict, yielding one call: `advance`, `advance_with_conditions`,
+  `hold` or `rollback`. Quality and operations stay separate rows and are never blended into one score.
+- **Small high-risk slices (Shipped):** high-severity slices under `min_n` (30 by default) no longer
+  block release gates automatically. Instead, they fall back to per-case stability checks: no case that
+  passed reliably may now fail, and any collapse blocks.
+- **Accuracy from eval runs (Shipped):** `EvalRunAccuracy` and `FieldAccuracy` compute precision, recall,
+  F1 and exact match directly from evaluation check runs joined with golden datasets, breaking down results
+  by responsible role and root cause.
+- **Naming causes (Shipped):** `name_cause_with_llm` uses LLM summarization over failure diffs to generate
+  clean, concise one-line cause descriptions, falling back to structural pattern signatures.
+- **SAML and SCIM (Shipped):** Enterprise identity provider support with SCIM 2.0 directory provisioning
+  (`/scim/v2/Users`, `/scim/v2/ServiceProviderConfig`) and SAML 2.0 SP metadata and assertion consumer service
+  (`/v1/auth/saml/metadata`, `/v1/auth/saml/acs`).
+- **Shared rate limits (Shipped):** `RateLimiter` supports distributed atomic counters via Redis
+  (`ASSAY_REDIS_URL`) across multiple container replicas, falling back to local memory.
+- **Alert routing (Shipped):** Multi-team routing by source, measure, dimension or kind (`/v1/alerts/routes`),
+  maintenance silencing windows (`/v1/alerts/silences`), acknowledgement tracking (`/v1/alerts/{id}/ack`),
+  and PagerDuty Events API v2 on-call integration (`pagerduty_send`).
+- **Scale: push aggregation into SQL (Shipped):** `document_volume_sql` and `stage_failure_rate_sql` push
+  `COUNT()`, conditional `SUM(CASE WHEN ...)`, and `GROUP BY` directly into database queries for millions of records.
+- **Timing noise (Shipped):** Bootstrap quantile error estimation (`bootstrap_quantile_stderr`) computes
+  tail latency standard errors (p90, p95, p99), and alert bands scale with sample size to prevent false alarms on jitter.
+- **Migrations beyond adding (Shipped):** Incremental database schema migration runner (`assay/migrations.py`)
+  with persistent version tracking table `_assay_schema_versions` executed safely on startup.
+- **Secrets in what's recorded (Shipped):** Credential redaction in `assay/redaction.py` and `assay learn` scans
+  for Gitleaks-style API keys (OpenAI, Anthropic, Google, AWS, GitHub, Slack), JWTs, and private keys, replacing them
+  with placeholders before traces are saved or uploaded.
+- **Secrets at rest (Shipped):** Sensitive integration credentials (webhook targets, Slack hooks, Linear tokens,
+  and PagerDuty keys) are encrypted with AES-256-GCM server-side encryption using `ASSAY_SECRET_KEY`.
 
 Ideas and disagreements are welcome: open an issue or a discussion.

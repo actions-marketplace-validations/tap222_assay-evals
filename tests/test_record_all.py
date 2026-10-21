@@ -91,7 +91,9 @@ def git(root, *args):
 def plain_project(tmp_path, monkeypatch):
     """A repository whose tests don't know about Assay: no assay_case anywhere."""
     for k in ("ASSAY_URL", "ASSAY_TEST_RUN", "ASSAY_PATH", "ASSAY_PYTEST_SESSION", "ASSAY_BASE_REF",
-              "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "GITHUB_ACTIONS"):
+              "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "GITHUB_ACTIONS",
+              "ANTIGRAVITY", "ANTIGRAVITY_AGENT", "AGY", "GEMINI_CLI",
+              "ANTIGRAVITY_SESSION_ID", "AGY_SESSION_ID", "CONVERSATION_ID"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([SDK, REPO]))
     monkeypatch.setenv("NO_COLOR", "1")

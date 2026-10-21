@@ -63,6 +63,16 @@ them, as with any test suite. What Assay adds:
 - **The judge doesn't take personal data out.** Traces are redacted before they're sent to the
   model API (`[judge] redact`, `ASSAY_JUDGE_REDACT`), and the trace is marked as data, so
   instructions inside it don't steer the score.
+- **Secrets and credentials in recorded traces.** Personal data and sensitive credentials are
+  automatically masked before baselines or traces are saved or uploaded (`assay learn`, `assay test --upload`).
+  Pre-recording scanners match Gitleaks patterns for API keys (OpenAI, Anthropic, Google, AWS, GitHub, Slack tokens),
+  JWT tokens, and private key blocks, plus high-entropy secret fields. Discovered credentials are replaced with
+  type-specific placeholders (`<aws_access_key>`, `<jwt>`, `<github_token>`) so credentials never leak into git baselines.
+- **Secrets at rest (AES-256-GCM server-key encryption).** Integration targets, Slack incoming webhook URLs,
+  Linear API keys, and PagerDuty routing keys are encrypted before storage in the database. When `ASSAY_SECRET_KEY`
+  (a 32-byte hexadecimal key) is set, credentials are encrypted using AES-256-GCM with unique 96-bit initialization vectors,
+  and decrypted on-the-fly only when dispatching notifications. Plaintext backward compatibility and key rotation
+  (`assay.crypto.reencrypt_secrets`) are supported out of the box.
 
 What it doesn't catch: a judge whose code the PR changed. A changed judge is noticed when its
 results say which judge they were: the model (read from a `Judge` answer) and `judge_prompt`
