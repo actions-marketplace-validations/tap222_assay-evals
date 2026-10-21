@@ -100,6 +100,21 @@ class GateRequest(BaseModel):
     required_slices: Dict[str, List[str]] = Field(default_factory=dict)
 
 
+class ReleaseDecisionRequest(BaseModel):
+    lineage: Dict[str, str] = Field(..., description="prompt, schema, model, provider, preprocessor, build, corpus versions")
+    rules: List[RuleIn] = Field(default_factory=list)
+    samples: Dict[str, Dict[str, Dict[str, List[float]]]] = Field(default_factory=dict)
+    identical_runs: Dict[str, List[List[float]]] = Field(
+        default_factory=dict, description="Per measure: repeated baseline runs used to measure the noise floor")
+    required_slices: Dict[str, List[str]] = Field(default_factory=dict)
+    source: Optional[str] = Field(None, description="Source to resolve stability or evaluation run from")
+    run_id: Optional[str] = Field(None, description="Evaluation run ID to fetch stability gate decision from")
+    baseline_run_id: Optional[str] = Field(None, description="Baseline run ID for stability gate comparison")
+    stability: Optional[Dict[str, Any]] = Field(None, description="Direct stability gate output from /v1/evals/runs/{run}/stability")
+    operations: Optional[Dict[str, Any]] = Field(
+        None, description='Operational counts or stats: {"timeouts": {"count": 0, "limit": 5}, "fallbacks": {"count": 1, "limit": 10}}')
+
+
 class SLOIn(BaseModel):
     source: Optional[str] = Field(None, description='Defaults to your own source; "*" needs a platform key')
     measure_id: str
@@ -1602,6 +1617,45 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         with engine.begin() as conn:
             gid = conn.execute(store.gate_decisions.insert().values(
                 created_at=datetime.utcnow(), outcome=decision.outcome, tenant=tenant,
+                lineage=req.lineage, detail=body)).inserted_primary_key[0]
+        return {"id": gid, "lineage": req.lineage, **body}
+
+    @app.post("/v1/gates/release-decision", tags=["operate"],
+              summary="Unified release decision table across quality per slice, operations, and stability")
+    def evaluate_release_decision(req: ReleaseDecisionRequest, x_tenant: Optional[str] = Header(None),
+                                  p: Principal = Depends(require("manage"))):
+        tenant = tenant_for(p, x_tenant) if not p.platform or x_tenant else "*"
+        missing = [k for k in REQUIRED_LINEAGE if not req.lineage.get(k)]
+        if missing:
+            raise HTTPException(422, f"Lineage must record: {', '.join(missing)}. "
+                                     "Every promote or rollback has to be traceable.")
+        rules = [gates.GateRule(**{**r.model_dump(exclude={"slices"}),
+                                   "slices": {k: v.model_dump(exclude_none=True) for k, v in r.slices.items()}})
+                 for r in req.rules]
+        floors = {r.key: gates.noise_floor(req.identical_runs.get(r.measure_id, []), r.statistic) for r in rules}
+        slice_decision = gates.evaluate(rules, req.samples, floors, req.required_slices)
+
+        stability_data = req.stability
+        if stability_data is None and req.run_id and req.source:
+            try:
+                out = failures.evaluation(engine, resolve(p, req.source), _tenant(req.source),
+                                          req.run_id, req.baseline_run_id)
+                if out:
+                    stability_data = out.get("stability")
+            except Exception:
+                pass
+
+        rel = gates.build_release_decision(slice_decision.slices, stability_data, req.operations)
+        body = rel.to_dict()
+        warnings = []
+        pid, _, ver = req.lineage["prompt"].partition("@")
+        if ver and tenant != "*" and (pid, ver) not in prompts.registry(engine, tenant):
+            warnings.append(f"Prompt {req.lineage['prompt']} isn't in the registry: register it (POST /v1/prompts) "
+                            "so this decision links to its template and production results.")
+        body["warnings"] = warnings
+        with engine.begin() as conn:
+            gid = conn.execute(store.gate_decisions.insert().values(
+                created_at=datetime.utcnow(), outcome=rel.outcome, tenant=tenant,
                 lineage=req.lineage, detail=body)).inserted_primary_key[0]
         return {"id": gid, "lineage": req.lineage, **body}
 
