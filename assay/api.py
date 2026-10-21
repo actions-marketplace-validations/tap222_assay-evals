@@ -168,6 +168,32 @@ class RejectIn(BaseModel):
     note: Optional[str] = Field(None, max_length=1024)
 
 
+class AlertRouteIn(BaseModel):
+    team: str
+    source: str = "*"
+    measure_id: Optional[str] = None
+    dimension: Optional[str] = None
+    slice_value: Optional[str] = None
+    kind: Optional[str] = None
+    channel_url: Optional[str] = None
+    format: str = "slack"
+    pagerduty_key: Optional[str] = None
+
+
+class AlertSilenceIn(BaseModel):
+    source: str = "*"
+    measure_id: Optional[str] = None
+    dimension: Optional[str] = None
+    slice_value: Optional[str] = None
+    kind: Optional[str] = None
+    hours: float = 24.0
+    reason: str
+
+
+class AlertAckIn(BaseModel):
+    note: Optional[str] = None
+
+
 class PatternStatusIn(BaseModel):
     source: str
     key: str
@@ -550,6 +576,77 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             q = q.where(and_(*cond))
         with engine.connect() as conn:
             return [_alert(r) for r in conn.execute(q)]
+
+    @app.post("/v1/alerts/{alert_id}/ack", tags=["operate"], summary="Acknowledge an open alert")
+    def ack_alert(alert_id: int, body: AlertAckIn, p: Principal = Depends(require("manage"))):
+        actor = getattr(p, "email", None) or p.user_id or p.tenant
+        ok = alerts.acknowledge_alert(engine, alert_id, by=actor, note=body.note)
+        if not ok:
+            raise HTTPException(404, f"No alert with id {alert_id}.")
+        return {"acknowledged": True, "id": alert_id}
+
+    @app.get("/v1/alerts/routes", tags=["operate"], summary="List per-team alert routes")
+    def list_alert_routes(source: Optional[str] = None, p: Principal = Depends(require("manage"))):
+        t = store.alert_routes
+        q = select(t)
+        if source:
+            check_source(p, source)
+            q = q.where(or_(t.c.source == source, t.c.source == "*"))
+        with engine.connect() as conn:
+            return [dict(r._mapping) | {"created_at": r.created_at.isoformat()} for r in conn.execute(q)]
+
+    @app.post("/v1/alerts/routes", tags=["operate"], summary="Add or update a per-team alert route")
+    def create_alert_route(body: AlertRouteIn, p: Principal = Depends(require("manage"))):
+        if body.source != "*":
+            check_source(p, body.source)
+        t = store.alert_routes
+        with engine.begin() as conn:
+            row = dict(source=body.source, team=body.team, measure_id=body.measure_id,
+                       dimension=body.dimension, slice_value=body.slice_value, kind=body.kind,
+                       channel_url=body.channel_url, format=body.format,
+                       pagerduty_key=body.pagerduty_key, created_at=datetime.utcnow())
+            rid = conn.execute(t.insert().values(**row)).inserted_primary_key[0]
+            return {"id": rid, **row, "created_at": row["created_at"].isoformat()}
+
+    @app.delete("/v1/alerts/routes/{route_id}", tags=["operate"])
+    def delete_alert_route(route_id: int, p: Principal = Depends(require("manage"))):
+        t = store.alert_routes
+        with engine.begin() as conn:
+            conn.execute(t.delete().where(t.c.id == route_id))
+        return {"deleted": route_id}
+
+    @app.get("/v1/alerts/silences", tags=["operate"], summary="List alert silencing rules")
+    def list_alert_silences(source: Optional[str] = None, p: Principal = Depends(require("manage"))):
+        t = store.alert_silences
+        q = select(t).where(t.c.until > datetime.utcnow())
+        if source:
+            check_source(p, source)
+            q = q.where(or_(t.c.source == source, t.c.source == "*"))
+        with engine.connect() as conn:
+            return [dict(r._mapping) | {"until": r.until.isoformat(), "created_at": r.created_at.isoformat()}
+                    for r in conn.execute(q)]
+
+    @app.post("/v1/alerts/silences", tags=["operate"], summary="Silence alerts matching a scope")
+    def create_alert_silence(body: AlertSilenceIn, p: Principal = Depends(require("manage"))):
+        if body.source != "*":
+            check_source(p, body.source)
+        t = store.alert_silences
+        now = datetime.utcnow()
+        until = now + timedelta(hours=body.hours)
+        actor = getattr(p, "email", None) or p.user_id or p.tenant
+        with engine.begin() as conn:
+            row = dict(source=body.source, measure_id=body.measure_id, dimension=body.dimension,
+                       slice_value=body.slice_value, kind=body.kind, reason=body.reason,
+                       created_by=actor, until=until, created_at=now)
+            sid = conn.execute(t.insert().values(**row)).inserted_primary_key[0]
+            return {"id": sid, **row, "until": until.isoformat(), "created_at": now.isoformat()}
+
+    @app.delete("/v1/alerts/silences/{silence_id}", tags=["operate"])
+    def delete_alert_silence(silence_id: int, p: Principal = Depends(require("manage"))):
+        t = store.alert_silences
+        with engine.begin() as conn:
+            conn.execute(t.delete().where(t.c.id == silence_id))
+        return {"deleted": silence_id}
 
     @app.get("/v1/documents", tags=["results"], summary="Documents to investigate: slowest, stuck, lost, recent")
     def list_documents(source: str, view: str = "slowest", days: float = 7, segment: Optional[str] = None,
@@ -1760,8 +1857,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
 def _alert(r) -> dict:
     d = dict(r._mapping)
-    for k in ("opened_at", "last_seen_at", "resolved_at"):
-        d[k] = d[k].isoformat() if d[k] else None
+    for k in ("opened_at", "last_seen_at", "resolved_at", "acknowledged_at"):
+        d[k] = d[k].isoformat() if d.get(k) else None
     m = REGISTRY.get(d["measure_id"])
     d["measure_name"], d["unit"] = (m.name, m.unit) if m else (d["measure_id"], "ratio")
     return d

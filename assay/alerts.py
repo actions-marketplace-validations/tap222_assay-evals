@@ -398,3 +398,139 @@ def webhook_notifier(url: str, fmt_kind: str = "slack", public_url: Optional[str
             log.exception("Alert webhook failed for alert %s", alert.get("id"))
 
     return send
+
+
+# ---------- routing, silencing, acknowledgement & on-call paging ----------
+
+def is_silenced(alert: dict, silences: List[dict], now: Optional[datetime] = None) -> Optional[dict]:
+    """Check if an alert matches an active silence rule. Returns the matching silence or None."""
+    curr = now or datetime.utcnow()
+    for s in silences:
+        if s.get("until") and s["until"] <= curr:
+            continue
+        if s.get("source") not in (None, "*", alert.get("source")):
+            continue
+        if s.get("measure_id") and s["measure_id"] != alert.get("measure_id"):
+            continue
+        if s.get("dimension") and s["dimension"] != alert.get("dimension"):
+            continue
+        if s.get("slice_value") and s["slice_value"] != alert.get("slice_value"):
+            continue
+        if s.get("kind") and s["kind"] != alert.get("kind"):
+            continue
+        return s
+    return None
+
+
+def match_routes(alert: dict, routes: List[dict]) -> List[dict]:
+    """Find all team routes that match the alert's source, measure, slice, or kind."""
+    matched = []
+    for r in routes:
+        if r.get("source") not in (None, "*", alert.get("source")):
+            continue
+        if r.get("measure_id") and r["measure_id"] != alert.get("measure_id"):
+            continue
+        if r.get("dimension") and r["dimension"] != alert.get("dimension"):
+            continue
+        if r.get("slice_value") and r["slice_value"] != alert.get("slice_value"):
+            continue
+        if r.get("kind") and r["kind"] != alert.get("kind"):
+            continue
+        matched.append(r)
+    return matched
+
+
+def pagerduty_send(routing_key: str, event_action: str, dedup_key: str,
+                   summary: str, source: str = "assay", severity: str = "error",
+                   custom_details: Optional[dict] = None) -> dict:
+    """Send an event to PagerDuty Events API v2 (trigger, acknowledge, resolve)."""
+    payload = {
+        "routing_key": routing_key,
+        "event_action": event_action,  # trigger | acknowledge | resolve
+        "dedup_key": dedup_key,
+        "payload": {
+            "summary": summary[:1024],
+            "source": source,
+            "severity": severity,
+            "custom_details": custom_details or {},
+        },
+    }
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request("https://events.pagerduty.com/v2/enqueue",
+                                 data=data, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning("PagerDuty send failed: %s", e)
+        return {"status": "error", "message": str(e)}
+
+
+def acknowledge_alert(engine: Engine, alert_id: int, by: str, note: Optional[str] = None) -> bool:
+    """Acknowledge an alert, recording who acknowledged it and preventing unnecessary paging."""
+    t = store.alerts
+    now = datetime.utcnow()
+    with engine.begin() as conn:
+        res = conn.execute(t.update().where(t.c.id == alert_id).values(
+            acknowledged_at=now, acknowledged_by=by, acknowledgement_note=note or ""))
+        return res.rowcount > 0
+
+
+def routed_notifier(engine: Engine, public_url: Optional[str] = None,
+                    default_notifier: Optional[Callable[[str, dict], None]] = None
+                    ) -> Callable[[str, dict], dict]:
+    """Notifier that checks silences, routes alerts to team webhooks, and pages on-call (PagerDuty)."""
+
+    def dispatch(event: str, alert: dict) -> dict:
+        t_sil = store.alert_silences
+        t_rou = store.alert_routes
+        with engine.connect() as conn:
+            silences = [dict(r._mapping) for r in conn.execute(select(t_sil)).all()]
+            routes = [dict(r._mapping) for r in conn.execute(select(t_rou)).all()]
+
+        # 1. Check silencing
+        active_silence = is_silenced(alert, silences)
+        if active_silence:
+            log.info("Alert %s (%s) silenced by rule %s until %s",
+                     alert.get("id"), alert.get("message"), active_silence.get("id"), active_silence.get("until"))
+            return {"silenced": True, "silence": active_silence}
+
+        # 2. Default notification
+        if default_notifier:
+            try:
+                default_notifier(event, alert)
+            except Exception:
+                pass
+
+        # 3. Team routes dispatch
+        matched = match_routes(alert, routes)
+        dispatched_webhooks = []
+        paged_teams = []
+
+        dedup = f"assay:{alert.get('source')}:{alert.get('measure_id')}:{alert.get('dimension')}:{alert.get('slice_value')}"
+        summary = f"Assay alert {event} ({alert.get('kind')}): {alert.get('message')}"
+
+        for r in matched:
+            if r.get("channel_url"):
+                try:
+                    notifier = webhook_notifier(r["channel_url"], fmt_kind=r.get("format", "slack"), public_url=public_url)
+                    notifier(event, alert)
+                    dispatched_webhooks.append(r.get("team"))
+                except Exception:
+                    pass
+            if r.get("pagerduty_key"):
+                pd_action = "resolve" if event == "resolved" else "trigger"
+                pagerduty_send(r["pagerduty_key"], pd_action, dedup, summary,
+                               source=alert.get("source", "assay"),
+                               severity="error" if alert.get("kind") != "contract" else "warning",
+                               custom_details=alert)
+                paged_teams.append(r.get("team"))
+
+        return {
+            "silenced": False,
+            "dispatched_webhooks": dispatched_webhooks,
+            "paged_teams": paged_teams,
+        }
+
+    return dispatch
