@@ -25,6 +25,8 @@ class DocumentVolume(Measure):
     dimensions = ("segment", "document_type", "processing_mode")
 
     def compute(self, source, window: Window) -> MeasureOutput:
+        if hasattr(source, "document_volume_sql"):
+            return source.document_volume_sql(window, self.dimensions)
         docs = source.documents(window)
         if docs is None:
             return unmeasured(self.id, "Source does not provide documents.")
@@ -39,6 +41,8 @@ class StageFailureRate(Measure):
     higher_is_better = False
 
     def compute(self, source, window: Window) -> MeasureOutput:
+        if hasattr(source, "stage_failure_rate_sql"):
+            return source.stage_failure_rate_sql(window, self.dimensions)
         runs = source.stage_runs(window)
         if runs is None:
             return unmeasured(self.id, "Source does not provide stage runs.")
