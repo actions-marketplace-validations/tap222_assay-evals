@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
+import random
 from collections import defaultdict
 from dataclasses import dataclass, field
+from statistics import fmean
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, TypeVar
 
 from assay.models import UNRECORDED, Window
@@ -115,16 +118,41 @@ def count_by_slice(measure_id: str, records: Iterable[T], dimensions: Sequence[s
                          [SliceResult(d, v, float(len(g)), len(g)) for d, v, g in grouped(rows, dimensions)])
 
 
+def bootstrap_quantile_stderr(values: Sequence[float], q: float, iters: int = 100, seed: int = 42) -> Optional[float]:
+    """Estimate the standard error of a sample quantile using bootstrap resampling.
+
+    Small slices in timing measures (e.g. p90 completion time) suffer from high sample
+    variance. Bootstrap error estimates quantify this uncertainty so alerts can widen
+    bands appropriately instead of firing on timing noise.
+    """
+    v = [float(x) for x in values if x is not None]
+    n = len(v)
+    if n < 2:
+        return None
+    rng = random.Random(seed)
+    reps: List[float] = [quantile(rng.choices(v, k=n), q) for _ in range(iters)]
+    m = fmean(reps)
+    var = sum((r - m) ** 2 for r in reps) / (iters - 1)
+    return math.sqrt(var)
+
+
 def quantile_by_slice(measure_id: str, records: Iterable[T], value: Callable[[T], Optional[float]],
                       q: float, dimensions: Sequence[str], unit: str = "") -> MeasureOutput:
     """q-quantile of value(record), overall and per slice, ignoring missing values."""
     rows = [r for r in records if value(r) is not None]
     if not rows:
         return unmeasured(measure_id, "No records with a value in this window.")
-    return MeasureOutput(measure_id, "measured", [
-        SliceResult(d, v, quantile([value(r) for r in g], q), len(g),
-                    note=f"Median {fmt(quantile([value(r) for r in g], 0.5), unit)}")
-        for d, v, g in grouped(rows, dimensions)])
+
+    def make_slice(d, v, g):
+        vals = [value(r) for r in g if value(r) is not None]
+        q_val = quantile(vals, q) if vals else None
+        p50 = quantile(vals, 0.5) if vals else None
+        se = bootstrap_quantile_stderr(vals, q) if vals and len(vals) >= 2 else None
+        return SliceResult(d, v, q_val, len(g),
+                           note=f"Median {fmt(p50, unit)}" if p50 is not None else None,
+                           stderr=se)
+
+    return MeasureOutput(measure_id, "measured", [make_slice(d, v, g) for d, v, g in grouped(rows, dimensions)])
 
 
 def quantile(values: List[float], q: float) -> float:
