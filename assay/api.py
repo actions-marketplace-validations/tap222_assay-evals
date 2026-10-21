@@ -467,6 +467,77 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def audit_log(actor: Optional[str] = None, limit: int = 200, p: Principal = Depends(require("admin"))):
         return sso.read_audit(engine, p.tenant, actor, limit)
 
+    # ---------- SCIM 2.0 Provisioning ----------
+    from assay import scim
+
+    @app.get("/scim/v2/ServiceProviderConfig", tags=["scim"], summary="SCIM ServiceProviderConfig")
+    def scim_sp_config():
+        return scim.service_provider_config()
+
+    @app.get("/scim/v2/Users", tags=["scim"], summary="List users (SCIM 2.0)")
+    def scim_list_users(startIndex: int = 1, count: int = 100, filter: Optional[str] = None,
+                        p: Principal = Depends(require("admin"))):
+        return scim.list_users(engine, p.tenant, start_index=startIndex, count=count, filter_str=filter)
+
+    @app.post("/scim/v2/Users", tags=["scim"], status_code=201, summary="Create user (SCIM 2.0)")
+    async def scim_create_user(request: Request, p: Principal = Depends(require("admin"))):
+        body = await request.json()
+        try:
+            return scim.create_user(engine, p.tenant, body)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/scim/v2/Users/{user_id}", tags=["scim"], summary="Get user (SCIM 2.0)")
+    def scim_get_user(user_id: str, p: Principal = Depends(require("admin"))):
+        u = scim.get_user(engine, p.tenant, user_id)
+        if not u:
+            raise HTTPException(404, "User not found")
+        return u
+
+    @app.put("/scim/v2/Users/{user_id}", tags=["scim"], summary="Update user (SCIM 2.0)")
+    @app.patch("/scim/v2/Users/{user_id}", tags=["scim"], summary="Patch user (SCIM 2.0)")
+    async def scim_update_user(user_id: str, request: Request, p: Principal = Depends(require("admin"))):
+        body = await request.json()
+        u = scim.update_user(engine, p.tenant, user_id, body)
+        if not u:
+            raise HTTPException(404, "User not found")
+        return u
+
+    @app.delete("/scim/v2/Users/{user_id}", tags=["scim"], status_code=204, summary="Deprovision user (SCIM 2.0)")
+    def scim_delete_user(user_id: str, p: Principal = Depends(require("admin"))):
+        if not scim.delete_user(engine, p.tenant, user_id):
+            raise HTTPException(404, "User not found")
+        return Response(status_code=204)
+
+    # ---------- SAML 2.0 ----------
+
+    @app.get("/v1/auth/saml/metadata", tags=["sso"], summary="SAML 2.0 SP Metadata XML")
+    def saml_metadata(request: Request):
+        base = (settings.public_url or str(request.base_url)).rstrip("/")
+        entity_id = f"{base}/saml/sp"
+        acs_url = f"{base}/v1/auth/saml/acs"
+        xml_content = scim.saml_sp_metadata(entity_id, acs_url)
+        return Response(content=xml_content, media_type="application/xml")
+
+    @app.post("/v1/auth/saml/acs", tags=["sso"], summary="SAML 2.0 Assertion Consumer Service")
+    async def saml_acs(request: Request):
+        form = await request.form()
+        saml_resp = form.get("SAMLResponse")
+        if not saml_resp:
+            raise HTTPException(400, "Missing SAMLResponse")
+        try:
+            claims = scim.parse_saml_response(str(saml_resp))
+        except Exception as exc:
+            raise HTTPException(400, f"Invalid SAML assertion: {exc}")
+        tenant = getattr(settings, "oidc_tenant", "default") or "default"
+        user = scim.create_user(engine, tenant, {
+            "userName": claims["email"],
+            "name": {"formatted": claims["name"]},
+            "active": True,
+            "roles": [{"value": "admin" if "admin" in claims["roles"] else "read"}]
+        })
+        return {"authenticated": True, "user": user}
+
     @app.get("/healthz", include_in_schema=False)
     def healthz():
         return {"ok": True}
