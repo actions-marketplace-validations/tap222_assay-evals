@@ -44,6 +44,8 @@ def test_coverage_is_read_from_coverage_py_istanbul_and_lcov(tmp_path):
     got = changes._lcov(tmp_path, lcov)
     assert list(got) == ["lib/send.go"]  # a file outside the repository is left out
     assert (got["lib/send.go"].ran, got["lib/send.go"].functions) == ({4}, [(3, 0, "Send")])
+    assert changes._rel(tmp_path, "../outside.go") is None
+    assert changes._rel(tmp_path, "/elsewhere/x.go") is None
 
 
 def test_go_coverage_profiles_are_read_by_module_path(tmp_path):

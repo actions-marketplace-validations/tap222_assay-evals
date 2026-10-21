@@ -123,11 +123,17 @@ class FileCoverage:
 
 def _rel(root: Path, path: str) -> Optional[str]:
     p = Path(path)
-    if not p.is_absolute():
-        return Path(os.path.normpath(path)).as_posix()
+    if not (p.is_absolute() or os.path.isabs(path) or bool(p.root) or bool(p.drive)):
+        norm = Path(os.path.normpath(path)).as_posix()
+        return None if norm.startswith("..") else norm
     try:
-        return p.resolve().relative_to(root.resolve()).as_posix()
-    except ValueError:
+        resolved_root = root.resolve()
+        if bool(p.root) and not bool(p.drive) and resolved_root.drive:
+            resolved_p = Path(resolved_root.drive + os.path.normpath(path)).resolve()
+        else:
+            resolved_p = p.resolve()
+        return resolved_p.relative_to(resolved_root).as_posix()
+    except (ValueError, OSError):
         return None
 
 
@@ -239,7 +245,7 @@ def _go(root: Path, text: str) -> Dict[str, FileCoverage]:
                 rest = name[len(module):].lstrip("/")
                 rel = f"{d}/{rest}" if d else rest
                 break
-        if rel is None and (Path(name).is_absolute() or (root / name).exists()):
+        if rel is None and (Path(name).is_absolute() or os.path.isabs(name) or bool(Path(name).root) or (root / name).exists()):
             rel = _rel(root, name)
         if not rel:
             continue  # another module's package: a dependency, not this repository
