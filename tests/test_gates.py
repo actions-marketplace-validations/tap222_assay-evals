@@ -218,3 +218,97 @@ def test_a_slice_with_its_own_margin_must_be_measured():
     d = gates.evaluate([rule], {"accuracy": {"routine": {"baseline": base, "candidate": base}}}, {"accuracy": 0.005})
     missing = next(s for s in d.slices if s.slice == "high_value")
     assert d.outcome == HOLD and missing.reason.startswith("Slice is unmeasured") and missing.own_margin
+
+
+# ---------- small high-risk slices ----------
+
+def test_small_high_risk_slice_advances_when_reliable_cases_pass():
+    # 20 cases is below min_n=30, but severity="high": falls back to per-case stability check
+    base = [1.0] * 20
+    cand = list(base)
+    rule = GateRule("compliance_accuracy", tolerance=0.02, min_n=30, severity="high")
+    d = gates.evaluate_slice(rule, "high_risk", base, cand, floor=0.01)
+    assert d.outcome == gates.ADVANCE
+    assert "passed stability per-case check" in d.reason
+
+
+def test_small_high_risk_slice_blocks_when_reliable_case_fails():
+    # Case 20 passed reliably in baseline (1.0), but failed in candidate (0.0) -> rollback
+    base = [1.0] * 20
+    cand = [1.0] * 19 + [0.0]
+    rule = GateRule("compliance_accuracy", tolerance=0.02, min_n=30, severity="high")
+    d = gates.evaluate_slice(rule, "high_risk", base, cand, floor=0.01)
+    assert d.outcome == gates.ROLLBACK
+    assert "failed stability check" in d.reason
+    assert "case 20" in d.reason
+
+
+def test_small_high_risk_slice_blocks_on_collapse():
+    base = [1.0] * 20
+    cand = [0.0] * 20
+    rule = GateRule("compliance_accuracy", tolerance=0.02, min_n=30, severity="high")
+    d = gates.evaluate_slice(rule, "high_risk", base, cand, floor=0.01)
+    assert d.outcome == gates.ROLLBACK
+    assert "collapsed" in d.reason
+
+
+def test_small_high_risk_slice_lower_is_better():
+    # Error rate: lower is better (0.0 = pass, 1.0 = fail)
+    base = [0.0] * 20
+    cand = [0.0] * 19 + [1.0]
+    rule = GateRule("error_rate", higher_is_better=False, tolerance=0.02, min_n=30, severity="high")
+    d = gates.evaluate_slice(rule, "high_risk", base, cand, floor=0.01)
+    assert d.outcome == gates.ROLLBACK
+    assert "failed stability check" in d.reason
+    assert "case 20" in d.reason
+
+
+def test_small_routine_slice_still_holds():
+    # A normal slice under min_n does not fall back; it still holds
+    base = [1.0] * 20
+    cand = list(base)
+    rule = GateRule("routine_accuracy", tolerance=0.02, min_n=30, severity="normal")
+    d = gates.evaluate_slice(rule, "routine", base, cand, floor=0.01)
+    assert d.outcome == gates.HOLD
+    assert "below the minimum" in d.reason
+
+
+# ---------- unified release decision ----------
+
+def test_unified_release_decision_advance_with_conditions():
+    # Quality passes, operational latency grew but stays under ceiling -> advance with conditions
+    q_rule = GateRule("accuracy", tolerance=0.05, min_n=100)
+    base_acc = outcomes(0.95, 200, 1)
+    d_quality = gates.evaluate_slice(q_rule, "overall", base_acc, base_acc, floor=0.01)
+
+    lat_rule = GateRule("latency_ms", higher_is_better=False, tolerance=500, min_n=100, statistic="p95", absolute_limit=2000.0)
+    base_lat = [200.0] * 100
+    cand_lat = [300.0] * 100  # up by 100ms, under ceiling 2000.0
+    d_lat = gates.evaluate_slice(lat_rule, "overall", base_lat, cand_lat, floor=50.0)
+
+    stability = {"outcome": "advance", "pass_rate": 0.99, "tolerance": 0.01,
+                 "reasons": ["All checks within tolerance."]}
+    operations = {"timeouts": {"count": 1, "limit": 5}}
+
+    rel = gates.build_release_decision([d_quality, d_lat], stability=stability, operations=operations)
+    assert rel.outcome == gates.ADVANCE_WITH_CONDITIONS
+    assert len(rel.conditions) >= 1
+    # Check separate rows: quality, operations, stability
+    kinds = [r.kind for r in rel.rows]
+    assert "quality" in kinds and "operation" in kinds and "stability" in kinds
+    # Confirm operations and quality are separate rows
+    q_row = next(r for r in rel.rows if r.kind == "quality")
+    op_row = next(r for r in rel.rows if r.gate == "operation:latency_ms:p95")
+    assert q_row.verdict == gates.ADVANCE
+    assert op_row.verdict == gates.ADVANCE_WITH_CONDITIONS
+    assert "watch it in canary" in op_row.condition
+
+
+def test_unified_release_decision_rollback_on_quality_failure():
+    q_rule = GateRule("accuracy", tolerance=0.01, min_n=50)
+    d_quality = gates.evaluate_slice(q_rule, "overall", [1.0] * 50, [0.5] * 50, floor=0.01)
+
+    stability = {"outcome": "advance", "pass_rate": 0.98}
+    rel = gates.build_release_decision([d_quality], stability=stability)
+    assert rel.outcome == gates.ROLLBACK
+    assert rel.rows[0].verdict == gates.ROLLBACK

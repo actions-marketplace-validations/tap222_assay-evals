@@ -348,3 +348,52 @@ def test_gate_takes_a_margin_per_slice(client):
     assert by["routine"]["outcome"] == "advance" and not by["routine"]["own_margin"]
     body["rules"][0]["slices"] = {"high_value": {"tolerence": 0.01}}
     assert client.post("/v1/gates/evaluate", json=body).status_code == 422
+
+
+def test_gate_release_decision_endpoint(client):
+    base_acc = [1.0] * 100
+    base_lat = [200.0] * 100
+    cand_lat = [280.0] * 100  # latency up slightly, under ceiling 1000.0
+    body = {
+        "lineage": {"prompt": "p1", "model": "m1", "build": "b1", "corpus": "c1"},
+        "rules": [
+            {"measure_id": "accuracy", "tolerance": 0.05, "min_n": 50},
+            {"measure_id": "latency_ms", "higher_is_better": False, "tolerance": 200, "min_n": 50,
+             "statistic": "p95", "absolute_limit": 1000.0},
+        ],
+        "samples": {
+            "accuracy": {"overall": {"baseline": base_acc, "candidate": base_acc}},
+            "latency_ms": {"overall": {"baseline": base_lat, "candidate": cand_lat}},
+        },
+        "identical_runs": {"accuracy": [base_acc, base_acc], "latency_ms": [base_lat, base_lat]},
+        "stability": {"outcome": "advance", "pass_rate": 0.99, "tolerance": 0.01,
+                      "reasons": ["All checks within tolerance."]},
+        "operations": {"timeouts": {"count": 0, "limit": 5}},
+    }
+    res = client.post("/v1/gates/release-decision", json=body)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["outcome"] == "advance_with_conditions"
+    assert len(data["conditions"]) >= 1
+    rows = data["rows"]
+    row_kinds = {r["kind"] for r in rows}
+    assert {"quality", "operation", "stability"} <= row_kinds
+
+    # Recorded in gates table
+    gates_list = client.get("/v1/gates").json()
+    assert any(g["id"] == data["id"] and g["outcome"] == "advance_with_conditions" for g in gates_list)
+
+
+def test_small_high_risk_slice_in_api(client):
+    # 20 cases is under min_n=30; severity="high" allows fallback to per-case stability check
+    base = [1.0] * 20
+    body = {
+        "lineage": {"prompt": "p1", "model": "m1", "build": "b2", "corpus": "c2"},
+        "rules": [{"measure_id": "risk_checks", "tolerance": 0.05, "min_n": 30, "severity": "high"}],
+        "samples": {"risk_checks": {"high_risk": {"baseline": base, "candidate": base}}},
+        "identical_runs": {"risk_checks": [base, base]},
+    }
+    res = client.post("/v1/gates/evaluate", json=body)
+    assert res.status_code == 200
+    assert res.json()["outcome"] == "advance"
+    assert "passed stability per-case check" in res.json()["slices"][0]["reason"]

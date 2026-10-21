@@ -128,4 +128,5 @@ class Scheduler:
 
 def _notifier(engine, source_name, settings):
     from assay import integrations
-    return integrations.notifier(engine, source_name, settings.public_url, settings.notifier())
+    return integrations.notifier(engine, source_name, settings.public_url, settings.notifier(),
+                                 secret_key=settings.secret_key)

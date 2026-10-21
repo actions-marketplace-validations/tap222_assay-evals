@@ -109,6 +109,38 @@ alerts = Table(
     Column("target", Float),
     Column("n", Integer),
     Column("message", String(512), nullable=False),
+    Column("acknowledged_at", DateTime),
+    Column("acknowledged_by", String(64)),
+    Column("acknowledgement_note", String(256)),
+)
+
+alert_routes = Table(
+    "alert_routes", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("source", String(64), nullable=False, default="*"),  # "*" = any source
+    Column("team", String(64), nullable=False),
+    Column("measure_id", String(64)),
+    Column("dimension", String(64)),
+    Column("slice_value", String(256)),
+    Column("kind", String(16)),
+    Column("channel_url", String(512)),
+    Column("format", String(16), default="slack"),
+    Column("pagerduty_key", String(128)),
+    Column("created_at", DateTime, nullable=False),
+)
+
+alert_silences = Table(
+    "alert_silences", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("source", String(64), nullable=False, default="*"),
+    Column("measure_id", String(64)),
+    Column("dimension", String(64)),
+    Column("slice_value", String(256)),
+    Column("kind", String(16)),
+    Column("reason", String(256), nullable=False),
+    Column("created_by", String(64), nullable=False),
+    Column("until", DateTime, nullable=False),
+    Column("created_at", DateTime, nullable=False),
 )
 
 # --- Event ingest, for pipelines that push records instead of exposing a database ---
