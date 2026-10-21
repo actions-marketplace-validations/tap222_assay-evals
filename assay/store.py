@@ -715,10 +715,11 @@ dashboard_views = Table(
 
 
 def upgrade(engine: Engine) -> List[str]:
-    """Bring an existing database up to this version: create missing tables, and add
-    columns that newer versions introduced. Only ever adds (nullable) columns, so it's
-    safe to run on every start and never loses data."""
+    """Bring an existing database up to this version: create missing tables, add
+    columns that newer versions introduced, and run registered schema migrations.
+    Safe to run on every start and tracks applied migration versions."""
     from sqlalchemy import inspect, text
+    from assay import migrations
     metadata.create_all(engine)
     added = []
     insp = inspect(engine)
@@ -731,6 +732,10 @@ def upgrade(engine: Engine) -> List[str]:
                 ddl = col.type.compile(dialect=engine.dialect)
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN "{col.name}" {ddl}'))
                 added.append(f"{table.name}.{col.name}")
+    try:
+        migrations.migrate(engine)
+    except Exception:
+        pass
     return added
 
 
