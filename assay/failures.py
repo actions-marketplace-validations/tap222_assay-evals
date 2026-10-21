@@ -44,6 +44,9 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Engine
 
+import logging
+log = logging.getLogger(__name__)
+
 from assay import flaky, store
 from assay.cost import is_fallback
 from assay.models import FAILED_STATUSES, ErrorReport, Window
@@ -726,7 +729,7 @@ def _results(engine: Engine, tenant: str, run_id: str) -> list:
 
 
 def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optional[str] = None,
-               tolerance: float = 0.01) -> Optional[dict]:
+               tolerance: float = 0.01, client=None) -> Optional[dict]:
     """Group one evaluation run's failing checks into causes, compared with the run before it.
 
     A check is a case, field and evaluator; its attempts give it a pass rate. A check
@@ -851,6 +854,8 @@ def evaluation(engine: Engine, source, tenant: str, run_id: str, baseline: Optio
                                     f"{'it' if len(evs) == 1 else 'them'} on the cases they skipped.")
         if stability["outcome"] == "advance":
             stability["outcome"] = "rerun"
+    if client:
+        name_causes(out["groups"], client=client)
     return out | {"audit": audit.summary(rows, audited), "verdicts": verdict} | {"scope": {"kind": "eval", "run_id": run_id, "baseline": baseline, "changes": {
         k: {"from": a, "to": b} for k, (a, b) in changes.items()}, "results": len(rows), "checks": len(cand),
         "passed": len(passes), "attempts_per_check": round(len(rows) / len(cand), 1)},
@@ -894,3 +899,70 @@ def expectations(analysis: dict, key: str, engine: Engine, tenant: str) -> List[
                             ).all()
     return [{"case_id": r.case_id, "field": r.field, "old_expected": r.expected, "new_expected": r.actual}
             for r in rows if r.result_id in ids]
+
+
+def name_cause_with_llm(group: dict, client=None, model: Optional[str] = None) -> Optional[str]:
+    """Ask an LLM to generate a concise, human-readable 1-line name for this failure cause.
+
+    Strict constraint: Only generates the one-line name. Never alters the classified kind or mechanism.
+    Falls back to template name if LLM is unavailable or call fails.
+    """
+    if not group or group.get("small"):
+        return None
+
+    kind = group.get("kind", "unknown")
+    mech = group.get("mechanism", "unknown")
+    fields = ", ".join(list((group.get("fields") or {}).keys())[:4]) or "fields"
+    evidence = "; ".join(group.get("evidence", [])[:2])
+    examples = group.get("examples", [])[:3]
+    sample_diffs = []
+    for ex in examples:
+        exp, act = ex.get("expected"), ex.get("actual")
+        if exp or act:
+            sample_diffs.append(f"expected '{exp}' but got '{act}'")
+        elif ex.get("reason"):
+            sample_diffs.append(str(ex.get("reason"))[:80])
+
+    prompt = (
+        f"You are naming a cluster of software failures.\n"
+        f"Category: {kind} ({mech})\n"
+        f"Affected fields/stages: {fields}\n"
+        f"Evidence: {evidence}\n"
+        f"Sample errors: {'; '.join(sample_diffs)}\n\n"
+        f"Write a single concise one-line name (maximum 8-10 words, under 80 characters) "
+        f"summarizing what specifically failed. Do not include quotes, periods, or the category prefix."
+    )
+
+    try:
+        if callable(client):
+            out = client(prompt)
+            if isinstance(out, str) and out.strip():
+                clean = out.strip().strip('"\'').rstrip(".")
+                if 3 <= len(clean) <= 100 and "\n" not in clean:
+                    return clean[0].upper() + clean[1:]
+        elif hasattr(client, "messages") and hasattr(client.messages, "create"):
+            m = model or "claude-3-5-sonnet-20241022"
+            resp = client.messages.create(
+                model=m,
+                max_tokens=60,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = resp.content[0].text if resp.content else ""
+            clean = text.strip().strip('"\'').rstrip(".")
+            if 3 <= len(clean) <= 100 and "\n" not in clean:
+                return clean[0].upper() + clean[1:]
+    except Exception as exc:
+        log.debug("LLM cause naming failed, using template name: %s", exc)
+    return None
+
+
+def name_causes(groups: List[dict], client=None, model: Optional[str] = None) -> List[dict]:
+    """Enhance template-based cause names with LLM-generated one-line names."""
+    if not client:
+        return groups
+    for g in groups:
+        llm_name = name_cause_with_llm(g, client=client, model=model)
+        if llm_name:
+            g["template_name"] = g["name"]
+            g["name"] = llm_name
+    return groups
