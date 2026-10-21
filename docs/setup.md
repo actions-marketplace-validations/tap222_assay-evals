@@ -22,8 +22,8 @@ demos only.
 
 **2. Use a real database for anything beyond a trial.** SQLite is fine on one server. For
 production, set `ASSAY_STORE_URL=postgresql+psycopg://user:pass@host:5432/assay`. Tables are
-created automatically, and a newer version adds its columns when it starts, so there are no
-migrations to run.
+created automatically. Forward schema migrations and version tracking (`_assay_schema_versions`)
+execute automatically on start via `assay.migrations`, keeping database state consistent without manual intervention.
 
 **3. Switch on access control before sharing the link.** A new server has no login. Creating
 the first admin key switches login on:
@@ -37,6 +37,8 @@ Save the printed key. It isn't shown again.
 
 **4. Optional settings.** All of them are listed in `.env.example`.
 - `ASSAY_PUBLIC_URL`: the dashboard's address, so alerts and tickets link back to it.
+- `ASSAY_SECRET_KEY`: 32-byte hex key for encrypting integration secrets at rest with AES-256-GCM (e.g. `openssl rand -hex 32`).
+- `ASSAY_REDIS_URL`: Redis connection string (e.g. `redis://redis:6379/0`) for shared distributed rate limiting across API replicas.
 - `ASSAY_SCHEDULE_MINUTES=60` and `ASSAY_SCHEDULE_SOURCES=events:acme`: recompute every hour.
   On Vercel, use the cron setup under [Deploy](#deploy) instead.
 - `ASSAY_ABANDON_MINUTES=30`: an agent run with no events for this long is marked abandoned
@@ -286,6 +288,33 @@ Other ways in:
   days so every slice has a baseline and anything already wrong is flagged on day one. It
   notifies nobody about history, skips days that already have a run, and never disturbs
   current alerts.
+
+## Enterprise setup
+
+### SCIM 2.0 User Provisioning
+
+Assay supports SCIM 2.0 directory synchronization (compatible with Okta, Microsoft Entra ID, OneLogin, and Google Workspace):
+- `GET /scim/v2/ServiceProviderConfig`: standard capability discovery.
+- `GET /scim/v2/Users`: list users with pagination (`startIndex`, `count`) and `userName eq "..."` filtering.
+- `POST /scim/v2/Users`: automated provisioning of new users.
+- `PUT` / `PATCH /scim/v2/Users/{id}`: profile and role updates.
+- `DELETE /scim/v2/Users/{id}`: deprovisioning (soft deactivation).
+
+SCIM requests require an admin bearer token in the `Authorization` header.
+
+### SAML 2.0 Enterprise Single Sign-On
+
+In addition to OpenID Connect (OIDC), Assay supports SAML 2.0 SP-initiated and IdP-initiated single sign-on:
+- `GET /v1/auth/saml/metadata`: download Service Provider SAML XML metadata for upload to your IdP.
+- `POST /v1/auth/saml/acs`: Assertion Consumer Service validating base64-encoded SAML assertions, extracting user claims, and provisioning signed-in sessions.
+
+### Alert routing & PagerDuty v2 on-call paging
+
+Route production alerts to dedicated team channels or on-call responders:
+- `POST /v1/alerts/routes`: register routes by source (`events:acme`), measure (`latency_ms`), dimension slice (`high_risk`), or alert kind.
+- `POST /v1/alerts/silences`: declare maintenance windows (`hours`, `reason`) to suppress alerts during planned deployments.
+- `POST /v1/alerts/{id}/ack`: acknowledge open incidents with investigator notes.
+- PagerDuty integration sends Events API v2 payloads (`trigger`, `acknowledge`, `resolve`) with deduplication keys matching alert sources.
 
 ## Deploy
 

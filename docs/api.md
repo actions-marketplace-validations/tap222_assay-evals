@@ -159,3 +159,20 @@ Check it, and reject stale timestamps, to know a request came from Assay:
 expected = hmac.new(secret, f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
 assert hmac.compare_digest(f"sha256={expected}", signature) and abs(time.time() - int(ts)) < 300
 ```
+
+## Release gating & operations endpoints
+
+| Endpoint | Method | Scope | Use |
+|---|---|---|---|
+| `/v1/gates/release-decision` | POST | `manage` | Unified release decision table across slice quality, operations and stability |
+| `/v1/gates/evaluate` | POST | `manage` | Quality slice evaluation against baseline noise floors |
+| `/v1/alerts/routes` | GET, POST | `manage` | List or create per-team alert routes with channel URLs or PagerDuty keys |
+| `/v1/alerts/routes/{id}` | DELETE | `manage` | Delete a team alert route |
+| `/v1/alerts/silences` | GET, POST | `manage` | List or create active alert silencing windows |
+| `/v1/alerts/silences/{id}` | DELETE | `manage` | Remove an active silence rule |
+| `/v1/alerts/{id}/ack` | POST | `manage` | Acknowledge an alert with investigator notes |
+| `/scim/v2/ServiceProviderConfig` | GET | public | SCIM 2.0 provider configuration |
+| `/scim/v2/Users` | GET, POST | `admin` | List SCIM users with filter, or provision a new user |
+| `/scim/v2/Users/{id}` | GET, PUT, PATCH, DELETE | `admin` | Get, update, patch, or deprovision a SCIM user |
+| `/v1/auth/saml/metadata` | GET | public | SAML 2.0 SP metadata XML |
+| `/v1/auth/saml/acs` | POST | public | SAML 2.0 Assertion Consumer Service |
