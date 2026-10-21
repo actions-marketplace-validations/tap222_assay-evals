@@ -17,6 +17,7 @@ SDK = str(Path(__file__).resolve().parents[1] / "sdk" / "python")
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ASSAY_URL", raising=False)
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
     repo = str(Path(__file__).resolve().parents[1])  # the server package, for in-process checks
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([SDK, repo, os.environ.get("PYTHONPATH", "")]))
     monkeypatch.setenv("NO_COLOR", "1")
