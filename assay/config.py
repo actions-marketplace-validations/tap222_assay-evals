@@ -39,8 +39,10 @@ class Settings:
     session_hours: float = 12.0
     auth_mode: str = "auto"  # auto (on once any key exists) | required | off
     rate_limit_per_min: int = 1200  # per key, per instance; 0 = no limit
+    redis_url: Optional[str] = None  # redis://... for shared rate limits across replicas (ASSAY_REDIS_URL)
     cors_origins: List[str] = field(default_factory=list)
     webhook_secret: Optional[str] = None  # signs alert webhooks (X-Assay-Signature)
+    secret_key: Optional[str] = None  # server key for encryption at rest (ASSAY_SECRET_KEY)
 
     # alerting
     webhook_url: Optional[str] = None
@@ -99,8 +101,10 @@ class Settings:
             session_hours=float(e("ASSAY_SESSION_HOURS", "12")),
             auth_mode=e("ASSAY_AUTH", "auto"),
             rate_limit_per_min=int(e("ASSAY_RATE_LIMIT_PER_MIN", "1200")),
+            redis_url=e("ASSAY_REDIS_URL"),
             cors_origins=_list(e("ASSAY_CORS_ORIGINS")),
             webhook_secret=e("ASSAY_WEBHOOK_SECRET"),
+            secret_key=e("ASSAY_SECRET_KEY"),
             webhook_url=e("ASSAY_WEBHOOK_URL"),
             webhook_format=e("ASSAY_WEBHOOK_FORMAT", "slack"),
             public_url=e("ASSAY_PUBLIC_URL"),
