@@ -331,6 +331,12 @@ phase are marked there too.
   with placeholders before traces are saved or uploaded.
 - **Secrets at rest:** Sensitive integration credentials (webhook targets, Slack hooks, Linear tokens,
   and PagerDuty keys) are encrypted with AES-256-GCM server-side encryption using `ASSAY_SECRET_KEY`.
+- **Long passages the judge reads in full (RAG):** faithfulness used to show the judge the first
+  4,000 characters of each fragment, and keep 2,000 of the fragments passed in, so a claim
+  supported further down a long statute section counted as fabricated. A long fragment is now
+  split into parts and the judge reads them all, up to 120,000 characters. When it couldn't see
+  all of one (a fragment recorded on a run keeps 2,000 characters), a claim it calls fabricated or
+  inferred is reported as "couldn't judge", never as fabricated.
 - **Saying "the sources don't say" (RAG):** `expect(run).must_abstain()` marks a case whose
   documents don't answer its question, and fails an answer that answers it anyway;
   `.must_not_abstain()` fails "I couldn't find it" when the documents do answer. `assay test` and
@@ -709,12 +715,6 @@ phase are marked there too.
   should also read the claims together, against all the passages they rest on: claims that
   contradict each other, and a conclusion (yes, no, allowed, compliant) that the supported claims
   don't lead to, fail.
-- **Long passages the judge never saw in full (Built):** faithfulness used to show the judge the
-  first 4,000 characters of each fragment and keep 2,000 of the fragments passed in, so a claim
-  supported further down a long statute section counted as fabricated. A long fragment is now
-  split into parts and the judge reads them all, up to 120,000 characters. When it couldn't see
-  all of one (a fragment recorded on a run keeps 2,000 characters), a claim it calls fabricated or
-  inferred is reported as "couldn't judge", never as fabricated.
 - **An app's own check-and-retry loop, tested:** some apps check each sentence or answer with a
   second model as they write it, and retry what fails. Assay can record that, but doesn't read it.
   Each rejected draft and retry should be a step, and the report should give, against labelled
