@@ -539,7 +539,9 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   change, and `at_most_once` already catches a payment repeated after a lost reply.
 - **The same request sent twice:** `faults(tool="lost")` and `expect(run).at_most_once()` catch an
   agent that pays again after a lost reply. A client that sends the whole request again (a
-  double click, a webhook delivered twice) isn't simulated yet.
+  double click, a webhook delivered twice) isn't simulated yet. A case should send it again and
+  expect the second delivery to change nothing, still answer success to the sender (a `409` makes
+  the sender retry, and the retries pile up), and be recorded as a duplicate.
 - **Done, proven from outside the agent:** browser and tool agents report success because the
   page changed, while the form was silently rejected or the session had expired. A success check
   today (`success=` in `simulate()`, or `run.state_of()`) reads what the run recorded, which is the
@@ -569,9 +571,32 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     a booking that failed is a finding.
   - **Stop the run after any step and start it again:** `faults()` gets a crash point, and the case
     is rerun from the agent's saved state. The resumed run doesn't repeat what took effect, and
-    finishes or escalates instead of leaving a job half done.
+    finishes or escalates instead of leaving a job half done. The crash points that matter most are
+    just before a call and just after the remote call returns but before the run records it.
+  - **The same idempotency key on the retry:** `at_most_once(tool, key=...)` counts calls per key,
+    so a retry that makes a new key looks like a different call and passes. The key should be made
+    before the call and saved with the intent to call, and a retry after a crash or a lost reply
+    should reuse it. A repeated call with a new key for the same action fails.
   - **Count it in production:** runs that ended after an effect without completing or compensating
     it, per agent, so orphaned work is found before a customer finds it.
+- **A run that's waiting when something changes: a cancel, a deploy, a late approval:** an agent
+  updates a record, calls another system and waits for a person. A good answer and a task done
+  right are separate outcomes, and these cases test the second. It should:
+  - **Cancel during an external call:** the call has already left, so a cancel can't pull it back.
+    The run should record that the cancel arrived mid-call, then check the other system once the
+    call ends. A run that just flips to cancelled, with nobody knowing whether the record changed,
+    fails.
+  - **Deploy while a run waits:** the case pauses at a wait (an approval, a callback), the app's
+    code or prompt changes, and the run resumes on the new version. It should finish or ask again,
+    never carry on with a step that no longer exists in the shape it had.
+  - **An approval bound to what was shown:** `run.approval()` records an action name, so an
+    approval of "step 3" carries over to a different step 3 after a deploy. An approval should
+    cover a hash of the exact arguments and the version of the record they act on. If either
+    changed, it no longer counts and the agent asks again. An approval that arrives after the
+    action was cancelled must not make it run.
+  - **"Unknown" with an owner and a clock:** a call whose outcome isn't known is a state of its own
+    (see "unverified" above), not a log line. In tests, the case checks something resolves it; in
+    production, unknown outcomes older than a set time are counted per agent, so none sits forever.
 - **Runaway runs, caught in the first minute (Shipped):** an agent retrying a failing tool
   overnight or caught in an error loop is detected in the first minute of execution via
   `assay.runaway.RunawayDetector`. Alerts fire at once, per run, for:
