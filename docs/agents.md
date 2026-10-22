@@ -266,6 +266,29 @@ went through, but the reply never arrived). The step records which fault it was.
 the answer doesn't claim success, no tool is retried more than `max_retries` times, and the user is
 told (or the run escalated, or a retry worked).
 
+**A retrieval that failed quietly.** A search that errors or finds nothing, and an answer that
+goes on as if it had the evidence, reads as well as a right one. `faults()` breaks a retriever the
+same way as a tool: one run through `run.search(name, fn, query)`, or a LangChain or LlamaIndex
+retriever by its name (its `.name`, else its class name).
+
+```python
+def rag(run, question):
+    docs = run.search("policies", index.search, question)   # recorded as a retrieval, and returned
+    ...
+
+def test_says_so_when_the_policy_index_is_down(assay_case):
+    with assay.faults(policies="error"):
+        rag(assay_case, "How long do refunds take?")
+    expect(assay_case).handles_failure()
+```
+
+`handles_failure()` counts a retrieval that failed, was broken by `faults()` or came back empty
+like a failed tool: the answer has to say it couldn't find it or that the sources don't say (or a
+later search found it), or it fails with "The policies retrieval found nothing (step 2), but the
+answer goes on as if it had the evidence". `expect(run).must_retrieve("policies")` checks a
+retriever ran and found something, and `must_retrieve(source="refund-policy")` that a fragment came
+from that source, for a case whose evidence is in one place.
+
 **Charged twice for one operation.** A payment that went through, with its reply lost, is the
 retry that charges twice. `lost` makes it happen; `at_most_once` checks the agent didn't do it
 again:

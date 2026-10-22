@@ -39,7 +39,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional
 
-from assay_sdk.faults import call as _fault_call, of as _fault_of
+from assay_sdk.faults import acall as _fault_acall, call as _fault_call, of as _fault_of
 
 log = logging.getLogger("assay_sdk")
 _stage: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar("assay_stage", default=None)
@@ -144,9 +144,7 @@ def tool(name: Any = None, *, server: Optional[str] = None):
                 run = _sdk().current()
                 started = datetime.now(timezone.utc)
                 try:
-                    out, fault = _fault_call(label, fn, args, kwargs)
-                    if inspect.isawaitable(out):
-                        out = await out
+                    out, fault = await _fault_acall(label, fn, args, kwargs)
                 except Exception as exc:
                     if run is not None:
                         record(run, args, kwargs, started, exc=exc)
@@ -336,22 +334,29 @@ RETRIEVERS = [  # (module, class, method): what a retriever returns is what goes
 _retrieving: "contextvars.ContextVar[bool]" = contextvars.ContextVar("assay_retrieving", default=False)
 
 
-def _record_retrieval(owner: Any, args: tuple, kwargs: dict, out: Any, started: datetime) -> None:
+def _record_retrieval(owner: Any, args: tuple, kwargs: dict, out: Any, started: datetime,
+                      error: Optional[BaseException] = None, fault: Optional[str] = None) -> None:
     run = _sdk().current()
     if run is None:
         return
     try:
         q = args[0] if args else kwargs.get("input", kwargs.get("str_or_query_bundle", kwargs.get("query")))
         q = getattr(q, "query_str", q)
-        name = getattr(owner, "name", None) or type(owner).__name__
-        run.retrieve(q, list(out or []), name=str(name), started=started, ended=datetime.now(timezone.utc))
+        why = f"{type(error).__name__}: {error}"[:2000] if error is not None else None
+        run.retrieve(q, list(out or []), name=_retriever_name(owner), started=started,
+                     ended=datetime.now(timezone.utc), error=why, fault=fault or _fault_of(error))
     except Exception:  # recording must never break the retrieval
         log.debug("Assay couldn't record a retrieval", exc_info=True)
 
 
+def _retriever_name(owner: Any) -> str:
+    return str(getattr(owner, "name", None) or type(owner).__name__)
+
+
 def _wrap_retriever(original: Callable) -> Callable:
     """Record a retriever's call: the outermost only, so an ensemble or a compressor around other
-    retrievers is one retrieval, with what it finally returned."""
+    retrievers is one retrieval, with what it finally returned. assay.faults() can break it by
+    its name (its .name, else its class name)."""
     if inspect.iscoroutinefunction(original):
         @functools.wraps(original)
         async def patched(self, *args, **kwargs):
@@ -359,10 +364,13 @@ def _wrap_retriever(original: Callable) -> Callable:
                 return await original(self, *args, **kwargs)
             token, started = _retrieving.set(True), datetime.now(timezone.utc)
             try:
-                out = await original(self, *args, **kwargs)
+                out, fault = await _fault_acall(_retriever_name(self), original, (self, *args), kwargs)
+            except Exception as e:
+                _record_retrieval(self, args, kwargs, None, started, error=e)
+                raise
             finally:
                 _retrieving.reset(token)
-            _record_retrieval(self, args, kwargs, out, started)
+            _record_retrieval(self, args, kwargs, out, started, fault=fault)
             return out
     else:
         @functools.wraps(original)
@@ -371,10 +379,13 @@ def _wrap_retriever(original: Callable) -> Callable:
                 return original(self, *args, **kwargs)
             token, started = _retrieving.set(True), datetime.now(timezone.utc)
             try:
-                out = original(self, *args, **kwargs)
+                out, fault = _fault_call(_retriever_name(self), original, (self, *args), kwargs)
+            except Exception as e:
+                _record_retrieval(self, args, kwargs, None, started, error=e)
+                raise
             finally:
                 _retrieving.reset(token)
-            _record_retrieval(self, args, kwargs, out, started)
+            _record_retrieval(self, args, kwargs, out, started, fault=fault)
             return out
     patched._assay = True
     return patched
