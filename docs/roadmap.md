@@ -611,11 +611,26 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     Each is backed by a passage or stated as missing, and a part with no passage never counts as
     answered. When the missing part is the one the verdict rests on (yes or no, compliant, on
     time), an answer that gives the verdict anyway fails.
+  - **Where each part was lost:** never retrieved, retrieved but left out of the answer, or written
+    and then removed by a later check. Each needs a different fix, and one accuracy score hides
+    which one a team has.
 - **Saying "the sources don't say":** a RAG answer to a question its documents don't answer
   should say so, not fill the gap with something plausible. Faithfulness flags a fabricated
   claim, but nothing marks a case as unanswerable and fails an answer that answers it anyway. A
   case should be able to expect an abstention, and the report should count abstentions apart:
   right to abstain, abstained when the answer was there, answered when it wasn't.
+- **"None", "all of them", and a bigger library (RAG):** the misses that look like answers.
+  - **False reassurance:** "no interaction", "no such clause", "not required", when a source says
+    there is one. A negative claim quotes nothing, so a claim-by-claim check has little to hold it
+    to. A case can expect the caveat, and a "no" answered while the source says yes is counted on
+    its own, ahead of every other failure, since it reads as confident and cited.
+  - **"Which of our documents...":** a list answer is scored by how many of the labelled documents
+    it found, not by whether the ones it names are right. A list that misses some and doesn't say
+    it may be incomplete fails; one that says it's a first pass is counted as partial.
+  - **The same questions on a bigger library:** a passage found among 1,000 documents can be pushed
+    out at 30,000 by near-duplicates (other versions, other strengths, copies of the same text)
+    filling the top results. The cases run against the index at more than one size, and a passage
+    lost as the library grew is reported with what took its place.
 - **Citations the answer gives, checked:** faithfulness checks the judge's evidence against the
   fragments, not the answer's own citations. A citation (a document, a page, a section) should
   be checked against the source it names: that source exists, was retrieved, and says what the
