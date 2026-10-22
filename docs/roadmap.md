@@ -519,6 +519,12 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     counted as wrong drags a better retriever down), the same document labelled two ways for one
     query, and labels on different scales. Each says how many results it affects, so a team fixes
     the labels instead of reading noise.
+  - **Time and quality on the same queries:** `run.retrieve()` records one start and end per
+    retrieval. Each stage should get its own time (embedding the query, each search, fusing,
+    reranking), so a search engine's speed isn't confused with the embedding model's. The
+    comparison shows p50, p95 and p99 next to recall for each configuration, with the filters the
+    app really uses (permissions, metadata) and at the concurrency it's run at, since a fast
+    median on an unfiltered index hides the slow tail.
   - **Keep the evidence:** each finding links the query, both result lists and the labels, so
     someone else can rerun it and get the same numbers.
   - **Where the document dropped out:** a router, a filter or a cluster choice before the search
