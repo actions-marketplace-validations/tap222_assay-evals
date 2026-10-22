@@ -541,6 +541,23 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     out at 30,000 by near-duplicates (other versions, other strengths, copies of the same text)
     filling the top results. The cases run against the index at more than one size, and a passage
     lost as the library grew is reported with what took its place.
+- **Every sentence supported, the answer still wrong:** "No, a Prometheus counter can't go down",
+  then, quoted from the docs, "it can only increase or be reset to zero on restart". Each claim
+  passes on its own and the answer contradicts itself. Faithfulness checks claims one by one. It
+  should also read the claims together, against all the passages they rest on: claims that
+  contradict each other, and a conclusion (yes, no, allowed, compliant) that the supported claims
+  don't lead to, fail.
+- **Long passages the judge never saw in full:** faithfulness shows the judge the first 4,000
+  characters of each fragment and cuts the rest without saying so, so a claim supported further
+  down a long statute section counts as fabricated. A long fragment should be split and each part
+  checked, and a claim that could only be judged against a cut fragment is reported as "couldn't
+  judge", never as fabricated.
+- **An app's own check-and-retry loop, tested:** some apps check each sentence or answer with a
+  second model as they write it, and retry what fails. Assay can record that, but doesn't read it.
+  Each rejected draft and retry should be a step, and the report should give, against labelled
+  cases: wrong sentences the loop let through, right ones it rejected, how often a retry was
+  wrong again, and the time and cost added per error avoided. A loop that adds time and avoids
+  nothing (a strong model with the source already in the prompt) shows as such.
 - **Citations the answer gives, checked:** faithfulness checks the judge's evidence against the
   fragments, not the answer's own citations. A citation (a document, a page, a section) should
   be checked against the source it names: that source exists, was retrieved, and says what the
