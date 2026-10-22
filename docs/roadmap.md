@@ -502,6 +502,16 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   - **The documents changed, not the code:** a re-index or a new version of a document is a
     cause, like a new prompt or model. "These 6 answers changed after policy.pdf v3 was indexed"
     goes next to the regression, and a newer version left out of the index is flagged.
+  - **Which cases a new version affects, passage by passage:** a typo fix or a reformatted table is
+    a new version too, and rerunning or flagging every case that cited the document fills a queue
+    nobody reads. The two versions are compared passage by passage, changes to whitespace and
+    layout are dropped, and only the cases whose answers rested on a passage whose wording changed
+    are rerun. Each says which passage changed, old and new text side by side.
+  - **A rule added somewhere the answer never looked:** an agent decides a late refund needs no
+    approval because the refund policy doesn't say it does; then a separate approvals document
+    adds the rule. Nothing the answer cited changed, so a check on citations misses it. When a
+    document is added or a passage is new, the cases whose questions now retrieve it are rerun
+    too, and an answer that changes is listed with the new passage as its cause.
   Counted per case, the number for a team: answers given from current sources, of all answers
   whose sources have versions.
 - **Retrieval that failed quietly:** a retrieval that errored or came back empty, or a source the
