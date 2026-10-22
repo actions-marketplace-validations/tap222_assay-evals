@@ -101,3 +101,58 @@ with assay.run("support", test="refund", input="How long do refunds take?") as r
     assert "Faithfulness" in out and "1 of 3 claims supported" in out
     assert "Failures by kind\n  1 contradicts source" in out
     assert "couldn't be judged" not in out  # the judge's context is the run's own fragments: the audit agrees
+
+
+def test_a_long_fragment_is_split_and_shown_whole_not_cut():
+    fm = sys.modules["assay_sdk.faithfulness"]
+    filler = "Section 1 sets out definitions that apply throughout this Part. " * 47  # ~3,000 characters
+    statute = filler + "\n\n" + filler + "\n\nA notice must be given at least 28 days before the tenancy ends."
+    ps = fm.parts(statute)
+    assert "".join(ps) == statute and len(ps) == 2 and all(len(p) <= fm.MAX_PART for p in ps)
+    assert ps[0].endswith("\n\n")  # at the paragraph, not mid-sentence
+    answer = "Notice must be given at least 28 days before the tenancy ends."
+    verdict = {"claims": [{"claim": answer.rstrip("."), "verdict": "supported", "fragment": "s21",
+                           "evidence": "A notice must be given at least 28 days before the tenancy ends"}],
+               "fragments": [{"id": "s21", "relevant": True}]}
+    client = Fake(verdict)
+    out = faithfulness(Judge("anthropic", "claude-opus-5", client=client), "How much notice?", answer,
+                       [{"id": "s21", "text": statute}])
+    prompt = json.dumps(client.calls[0]["messages"])
+    assert "28 days before the tenancy ends" in prompt and 'part=\\"2 of 2\\"' in prompt
+    assert (out["faithfulness"].status, out["faithfulness"].score) == ("PASS", 1.0)
+
+
+def test_claims_text_the_judge_never_saw_could_support_are_not_called_fabricated(monkeypatch):
+    fm = sys.modules["assay_sdk.faithfulness"]
+    monkeypatch.setattr(fm, "MAX_CONTEXT", 60)
+    frags = [{"id": "kb-1", "text": "Shipping is free on orders over $50."},
+             {"id": "kb-2", "text": "Refunds take 10 business days from approval. " * 5}]
+    answer = "Shipping is free on orders over $50. Refunds come with a coupon."
+    both = {"claims": [{"claim": "Shipping is free on orders over $50", "verdict": "supported", "fragment": "kb-1",
+                        "evidence": "Shipping is free on orders over $50"},
+                       {"claim": "Refunds come with a coupon", "verdict": "fabricated"}],
+            "fragments": [{"id": "kb-1", "relevant": True}, {"id": "kb-2", "relevant": True}]}
+    f = faithfulness(judge(both), "q", answer, frags)["faithfulness"]
+    assert (f.status, f.score) == ("PASS", 1.0)
+    assert "couldn't judge 1 claim: kb-2 longer than the judge was shown" in f.reason
+    only = {**both, "claims": both["claims"][1:]}
+    out = faithfulness(judge(only), "q", answer, frags)  # one try: asking again shows the judge no more
+    assert (out["faithfulness"].status, out["faithfulness"].attempts) == ("INVALID", 1)
+    assert "couldn't judge" in out["faithfulness"].error and "fabricated" not in out["faithfulness"].error
+    assert out["context_relevance"].status == "PASS"
+
+
+def test_a_fragment_recorded_on_a_run_at_its_2000_character_limit_counts_as_not_seen_in_full():
+    from assay_sdk.retrieval import MAX_TEXT, fragments
+    long = "The landlord must protect the deposit within 30 days. " * 60
+    assert len(fragments([long])[0]["text"]) == MAX_TEXT and fragments([long], max_text=None)[0]["text"] == long
+    recorded = fragments([{"id": "s21", "text": long}])
+    answer = "The deposit must be protected within 30 days. It earns interest."
+    verdict = {"claims": [{"claim": "The deposit must be protected within 30 days", "verdict": "supported",
+                           "fragment": "s21", "evidence": "must protect the deposit within 30 days"},
+                          {"claim": "It earns interest", "verdict": "fabricated"}],
+               "fragments": [{"id": "s21", "relevant": True}]}
+    f = faithfulness(judge(verdict), "q", answer, recorded)["faithfulness"]
+    assert (f.status, f.score) == ("PASS", 1.0) and "couldn't judge 1 claim: s21" in f.reason
+    f = faithfulness(judge(verdict), "q", answer, [{"id": "s21", "text": long}])["faithfulness"]
+    assert (f.status, f.score) == ("FAIL", 0.5)  # passed in whole: the judge saw it all, so fabricated stands

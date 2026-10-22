@@ -325,8 +325,8 @@ whole conversation against a simulated user
 ([Simulated users](../../docs/agents.md#simulated-users-the-whole-conversation-not-one-message)).
 
 `faithfulness(judge, question, answer, fragments)` checks the answer claim by claim against
-them, with the judge's quotes checked
-([Faithfulness](../../docs/agents.md#faithfulness-is-the-answer-backed-by-what-was-retrieved)).
+them, with the judge's quotes checked. Long fragments are split, not cut, so the judge reads
+them whole ([Faithfulness](../../docs/agents.md#faithfulness-is-the-answer-backed-by-what-was-retrieved)).
 Fragments and retrieved tokens per query are compared with the baseline, the whole run's
 totals are too, and `[behavior] max_fragments` and `max_retrieved_tokens` are limits
 ([Retrieved context](../../docs/agents.md#retrieved-context-what-rag-puts-in-the-prompt-and-what-it-costs)).

@@ -708,11 +708,12 @@ phase are marked there too.
   should also read the claims together, against all the passages they rest on: claims that
   contradict each other, and a conclusion (yes, no, allowed, compliant) that the supported claims
   don't lead to, fail.
-- **Long passages the judge never saw in full:** faithfulness shows the judge the first 4,000
-  characters of each fragment and cuts the rest without saying so, so a claim supported further
-  down a long statute section counts as fabricated. A long fragment should be split and each part
-  checked, and a claim that could only be judged against a cut fragment is reported as "couldn't
-  judge", never as fabricated.
+- **Long passages the judge never saw in full (Built):** faithfulness used to show the judge the
+  first 4,000 characters of each fragment and keep 2,000 of the fragments passed in, so a claim
+  supported further down a long statute section counted as fabricated. A long fragment is now
+  split into parts and the judge reads them all, up to 120,000 characters. When it couldn't see
+  all of one (a fragment recorded on a run keeps 2,000 characters), a claim it calls fabricated or
+  inferred is reported as "couldn't judge", never as fabricated.
 - **An app's own check-and-retry loop, tested:** some apps check each sentence or answer with a
   second model as they write it, and retry what fails. Assay can record that, but doesn't read it.
   Each rejected draft and retry should be a step, and the report should give, against labelled
