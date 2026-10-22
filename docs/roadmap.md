@@ -446,6 +446,18 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   run's outcome and the case's checks: better, worse or unclear. A divergence on a tool that writes
   or spends weighs more than one on a read. Runs whose tool definitions changed since they were
   recorded are set apart, since their recorded results may no longer hold.
+- **The same model, served differently (self-hosted and open-weight models):** a team keeps the
+  model and changes how it runs: int8 or 4-bit instead of 16-bit weights, a new vLLM or llama.cpp
+  version, another GPU, a bigger batch. The weights' name is the same, so nothing in the run says
+  the model changed, yet outputs can, even at temperature 0. `settings` records temperature and
+  similar, not how the model was served. It should:
+  - **Record the serving setup with each call:** the quantization, the inference engine and its
+    version, the hardware, so a change to any of them shows as a cause like a new prompt or model.
+  - **Run the same cases on both setups:** the usual diff, case by case, with the cost and latency
+    of each next to it, so "4-bit saves 60% and changes these 3 cases" is one report. Cases that
+    gave the same answer every time on the old setup and now differ are listed first.
+  - **Point to the first step that differs:** in an agent run, the first call whose output changed
+    between the two setups, rather than every step after it.
 - **Evidence diffs: the same answer, from different evidence.** Two runs can both say "approved"
   while the new one read an older policy, or the wrong customer's record. Each retrieved fragment
   is recorded (id, source, score, whether it went into the prompt) and each tool call with its
