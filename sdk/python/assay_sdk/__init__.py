@@ -394,18 +394,36 @@ class Run:
 
     def retrieve(self, query: Any, fragments: Any, used: Any = None, name: str = "retrieve",
                  server: Optional[str] = None, error: Optional[str] = None,
-                 started: Optional[datetime] = None, ended: Optional[datetime] = None) -> None:
+                 started: Optional[datetime] = None, ended: Optional[datetime] = None,
+                 fault: Optional[str] = None) -> None:
         """What a retrieval found and put into the prompt, e.g. retrieve(question, docs, used=4) for
         the top 4 after re-ranking. fragments: text, dicts (text, id, tokens, score, source),
         LangChain Documents or LlamaIndex nodes. used: which went into the prompt (None: all; an
         int: the first n; a list: ids or positions). Fragments per query, their tokens and their
-        share of the prompt are compared with the baseline, and [behavior] limits apply to them."""
+        share of the prompt are compared with the baseline, and [behavior] limits apply to them.
+        fault: the fault assay.faults() injected in its place (empty, error, timeout, return)."""
         from assay_sdk.retrieval import fragments as _fragments
         frags = [{**f, "text": self._c.clean(f["text"])} if f.get("text") else f
                  for f in _fragments(fragments, used)]
         self._step("retrieval", started, name=name[:128], query=self._c.clean(query if isinstance(query, str) else
                                                                           str(query))[:32768] if query is not None else None,
-                   fragments=frags, server=server, ended_at=_ts(ended), status="error" if error else "ok", error=error)
+                   fragments=frags, server=server, ended_at=_ts(ended), status="error" if error else "ok", error=error,
+                   fault=fault)
+
+    def search(self, name: str, fn: Callable, query: Any, *positional, used: Any = None, **args):
+        """Call fn(query, *positional, **args), record what it returned as a retrieval named `name`
+        (or its error), and return it. assay.faults(name="empty") breaks it like a tool."""
+        from assay_sdk.faults import call as fault_call, of as fault_of
+        started = datetime.now(timezone.utc)
+        try:
+            out, fault = fault_call(name, fn, (query, *positional), args)
+        except Exception as e:
+            self.retrieve(query, [], name=name, error=f"{type(e).__name__}: {e}"[:2000], started=started,
+                          ended=datetime.now(timezone.utc), fault=fault_of(e))
+            raise
+        self.retrieve(query, list(out or []), used=used, name=name, started=started,
+                      ended=datetime.now(timezone.utc), fault=fault)
+        return out
 
     def plan(self, steps: List[Any], text: Optional[str] = None) -> None:
         """What the agent means to do, before doing it: the tools it will call, in order, each a name

@@ -154,6 +154,15 @@ the call go through and loses its reply, and `expect(run).at_most_once("charge",
 fails a retry that charged twice;
 `expect(run).handles_failure()`, `.no_false_success()`, `.well_formed_arguments()` and
 `.checkpoint(name, ...)` check what the agent did about it (see [agents](../../docs/agents.md)).
+`run.search("policies", index.search, question)` records a retrieval and returns what it found;
+`faults(policies="empty")` breaks it like a tool, and LangChain and LlamaIndex retrievers by their
+name. `handles_failure()` then checks the answer said it couldn't find it, and
+`expect(run).must_retrieve("policies", source="refund-policy")` that the search ran and found it.
+
+`expect(run).must_abstain()` marks a case whose sources don't answer its question: the answer has
+to say so ("the documents don't say") rather than fill the gap. `.must_not_abstain()` is the other
+half, for a question they do answer. `assay test` counts the two apart (see
+[faithfulness](../../docs/agents.md#faithfulness-is-the-answer-backed-by-what-was-retrieved)).
 
 `assay.claim_review(run_id, claim, verdict, evidence=..., correction=..., by=...)` records an
 expert's decision on one claim (supported, wrong, a conflict between sources resolved), made while
@@ -325,8 +334,8 @@ whole conversation against a simulated user
 ([Simulated users](../../docs/agents.md#simulated-users-the-whole-conversation-not-one-message)).
 
 `faithfulness(judge, question, answer, fragments)` checks the answer claim by claim against
-them, with the judge's quotes checked
-([Faithfulness](../../docs/agents.md#faithfulness-is-the-answer-backed-by-what-was-retrieved)).
+them, with the judge's quotes checked. Long fragments are split, not cut, so the judge reads
+them whole ([Faithfulness](../../docs/agents.md#faithfulness-is-the-answer-backed-by-what-was-retrieved)).
 Fragments and retrieved tokens per query are compared with the baseline, the whole run's
 totals are too, and `[behavior] max_fragments` and `max_retrieved_tokens` are limits
 ([Retrieved context](../../docs/agents.md#retrieved-context-what-rag-puts-in-the-prompt-and-what-it-costs)).

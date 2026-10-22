@@ -94,8 +94,8 @@ class Step(_E):
     tool_schemas: Optional[Dict[str, Dict[str, Any]]] = Field(
         None, description="llm: the input schema of each tool offered, sent once per run: tool calls are checked "
                           "against it")
-    fault: Optional[Literal["empty", "error", "timeout", "return"]] = Field(
-        None, description="tool: a fault assay.faults() injected in place of the call")
+    fault: Optional[Literal["empty", "error", "timeout", "lost", "return"]] = Field(
+        None, description="tool or retrieval: a fault assay.faults() injected in place of the call")
     finish_reason: Optional[str] = Field(None, max_length=24, description="llm: stop, length, tool_call, refusal, "
                                                                           "content_filter or error")
     tool_calls: Optional[List[Dict[str, Any]]] = Field(None, max_length=200, description="llm: the tool calls the "

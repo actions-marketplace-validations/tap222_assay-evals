@@ -4,7 +4,8 @@
         reply = my_agent("Cancel O-17", run=assay_case)
     expect(assay_case).handles_failure()
 
-For each named tool (recorded with @assay.tool or run.call), the fault replaces the call:
+For each named tool (recorded with @assay.tool or run.call) or retriever (run.search, or a
+LangChain or LlamaIndex retriever by its name), the fault replaces the call:
   "empty"      returns an empty result ([]), without calling the tool
   "error"      raises ToolFault, recorded as the tool's error
   "timeout"    raises TimeoutError
@@ -20,6 +21,12 @@ The invoice stays approved, and the supplier goes on hold between the agent read
     with assay.faults(get_supplier={"returns": [assay.REAL, {"status": "on_hold"}]}):
         my_agent("Pay invoice 17", run=assay_case)
     assert_not_called(assay_case, "pay")   # it read the supplier again before paying, and stopped
+
+A retriever that fails or finds nothing, and an answer that goes on as if it had the evidence:
+
+    with assay.faults(policies="empty"):
+        reply = rag(question, run=assay_case)        # run.search("policies", index.search, question)
+    expect(assay_case).handles_failure()             # the answer says it couldn't find the policy
 
 Recorded steps say which fault they were (fault="error"; "return" for a value put in place of the
 tool's), so evaluation knows it was injected.
@@ -86,6 +93,21 @@ def call(name: str, fn: Callable, args: tuple, kwargs: dict) -> Tuple[Any, Optio
     if spec == "error" or (spec.startswith("error:") and n <= int(spec[6:])):
         raise _tag(ToolFault(f"{name} failed (injected by assay.faults)"), "error")
     return fn(*args, **kwargs), None
+
+
+async def acall(name: str, fn: Callable, args: tuple, kwargs: dict) -> Tuple[Any, Optional[str]]:
+    """call() for a coroutine function: the fault is decided the same way, and the real call awaited."""
+    real = []
+
+    def mark(*a, **k):
+        real.append(True)
+    try:
+        out, fault = call(name, mark, args, kwargs)
+    except BaseException as e:
+        if real and of(e) == "lost":
+            await fn(*args, **kwargs)
+        raise
+    return (await fn(*args, **kwargs), None) if real else (out, fault)
 
 
 def _tag(exc: BaseException, kind: str) -> BaseException:

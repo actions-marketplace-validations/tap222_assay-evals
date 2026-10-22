@@ -266,6 +266,29 @@ went through, but the reply never arrived). The step records which fault it was.
 the answer doesn't claim success, no tool is retried more than `max_retries` times, and the user is
 told (or the run escalated, or a retry worked).
 
+**A retrieval that failed quietly.** A search that errors or finds nothing, and an answer that
+goes on as if it had the evidence, reads as well as a right one. `faults()` breaks a retriever the
+same way as a tool: one run through `run.search(name, fn, query)`, or a LangChain or LlamaIndex
+retriever by its name (its `.name`, else its class name).
+
+```python
+def rag(run, question):
+    docs = run.search("policies", index.search, question)   # recorded as a retrieval, and returned
+    ...
+
+def test_says_so_when_the_policy_index_is_down(assay_case):
+    with assay.faults(policies="error"):
+        rag(assay_case, "How long do refunds take?")
+    expect(assay_case).handles_failure()
+```
+
+`handles_failure()` counts a retrieval that failed, was broken by `faults()` or came back empty
+like a failed tool: the answer has to say it couldn't find it or that the sources don't say (or a
+later search found it), or it fails with "The policies retrieval found nothing (step 2), but the
+answer goes on as if it had the evidence". `expect(run).must_retrieve("policies")` checks a
+retriever ran and found something, and `must_retrieve(source="refund-policy")` that a fragment came
+from that source, for a case whose evidence is in one place.
+
 **Charged twice for one operation.** A payment that went through, with its reply lost, is the
 retry that charges twice. `lost` makes it happen; `at_most_once` checks the agent didn't do it
 again:
@@ -505,6 +528,14 @@ counted, and the reason says how many. When most of it doesn't check out, the re
 `INVALID`, never a score. The fragments are the judge's recorded context, so the judge-input
 audit checks them against what the run retrieved.
 
+A long fragment, such as a whole statute section, is split into parts at a paragraph or a
+sentence, and the judge reads every part, up to 120,000 characters of fragments in all. A run
+records the first 2,000 characters of each fragment, so under `assay test --judge` a fragment that
+long may be longer than what was kept. Either way, when the judge didn't see all of a fragment, a
+claim it calls fabricated or inferred may be supported by the rest, so it isn't counted: the
+reason says "couldn't judge" and names the fragment. Pass the fragments to `faithfulness()`
+yourself to have them read whole.
+
 Outside `assay test`, on your own pipeline:
 
 ```python
@@ -512,6 +543,30 @@ from assay_sdk import Judge, faithfulness
 
 out = faithfulness(Judge("anthropic", "claude-opus-5"), question, answer, fragments, run=case)
 out["faithfulness"].score, out["context_relevance"].score, out["claims"]
+```
+
+A question the documents don't answer has one right answer: saying so. Faithfulness fails an
+answer that invents a fact, but an answer that fills the gap with a claim it can half quote, or
+that hedges, can still pass. Mark the case instead:
+
+```python
+def test_warranty_not_in_the_docs(assay_case):
+    expect(assay_case).must_abstain()        # the sources don't say: the answer should
+    rag(assay_case, "How long is the warranty on refurbished units?")
+
+def test_refund_window(assay_case):
+    expect(assay_case).must_not_abstain()    # the sources do say: "I couldn't find it" fails
+    rag(assay_case, "How long do refunds take?")
+```
+
+An answer abstains when a sentence says the sources don't answer the question: "the documents
+don't say", "I couldn't find anything about", "not covered in the sources". "The policy doesn't
+cover water damage" is an answer, not an abstention. The two expectations are counted apart from
+the other checks, so a system that refuses everything shows up as clearly as one that never does:
+
+```
+Unanswerable questions
+  4/5 rightly said the sources don't answer · 1 answered anyway · 2/30 said so when the sources do answer
 ```
 
 ### Retrieved context: what RAG puts in the prompt, and what it costs

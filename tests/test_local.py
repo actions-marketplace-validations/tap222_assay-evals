@@ -834,6 +834,8 @@ def test_init_adds_the_antigravity_skill_when_asked(project, capsys):
 
 
 def test_ran_by_detects_antigravity(project, monkeypatch):
+    for k in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID"):  # the suite may itself run inside Claude Code
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("ANTIGRAVITY_AGENT", "1")
     monkeypatch.setenv("CONVERSATION_ID", "conv-999")
     info = local.ran_by(project)

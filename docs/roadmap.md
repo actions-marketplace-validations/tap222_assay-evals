@@ -166,7 +166,8 @@ and deploy and dependency changes no CI job checked. Then come behavior changed 
 and rewritten expected values. Flaky tests are a count. It's the top of the PR comment with the
 Action's `changes: true`, and JSON for a coding agent ([docs](changes.md)).
 
-Changed lines no test ran come from the coverage a run leaves (coverage.py, istanbul or lcov), are
+Changed lines no test ran come from the coverage a run leaves (coverage.py, istanbul, lcov or Go's
+coverage profile), are
 grouped by function, and are ranked by risk. Replayed over this repository's history, the deploy rule
 lists all four such bugs, but since pull requests began it lists 7 changes, only 2 of them bugs:
 it still needs fewer false alarms. One change seen in many cases is one item. Any item other than a
@@ -265,6 +266,88 @@ User stories: [US-15](user-stories.md#us-15).
 
 User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 
+## Built recently
+
+Built in October 2026, beyond what the phases above say. Each has its docs; items that change a
+phase are marked there too.
+
+- **Coding agents run the tests themselves:** `assay init --claude-code` and `assay init
+  --antigravity` add a skill, so Claude Code or Antigravity runs the tests after it changes a
+  prompt or the agent, and never accepts a new baseline on its own. `--global` installs it for
+  every project. Each run records which agent ran it.
+- **Flaky LLM tests, settled with more attempts only where needed:** `assay test --rerun-unsure`
+  reruns only the cases that could be worse, a batch at a time, until each is clearly chance or
+  clearly worse (sequential testing); an unclear case stays inconclusive, never passes.
+- **LLM-as-a-judge, checked:** `assay rejudge` asks a judge about a saved run's answers again,
+  with no calls to the AI: agreement with the saved verdicts (Cohen's kappa), flips, and
+  `--min-agreement` for CI. The report gives code checks and judged checks a line each, and counts
+  cases that went pass to fail and fail to pass with an exact McNemar test.
+- **A payment or booking repeated after a lost reply:** `assay.faults(tool="lost")` runs a tool
+  for real and then times out, and `expect(run).at_most_once(tool, key=...)` fails an agent that
+  does it again.
+- **Where agent runs broke:** one line per place runs broke ("gen_sql worked, then exec_sql went
+  wrong"), what got worse against the baseline first, and every run behind a count (`assay matrix`).
+- **Release gates:** a percentile, not only the mean; an absolute limit the candidate must keep
+  whatever the baseline did; and a margin per slice.
+- **The change report reads Go:** untested changed lines come from Go's own coverage profile
+  (`go test -coverprofile`) too, next to coverage.py, istanbul and lcov.
+- **A call with no answer isn't $0:** a call that timed out or lost its connection is reported as
+  not priced, since the provider may have billed it.
+- **Runaway runs, caught in the first minute:** an agent retrying a failing tool
+  overnight or caught in an error loop is detected in the first minute of execution via
+  `assay.runaway.RunawayDetector`. Alerts fire at once, per run, for:
+  - **The same failure again and again:** the same tool returning the same error (with IDs,
+    hex addresses, and numbers stripped) five times in one run, whatever the model changes in its arguments.
+  - **Spend velocity cap:** dollar and call velocity per minute against agent baselines.
+  - **The slow leak:** runs that ended having done nothing (no-op burn with high step count or cost).
+- **One release decision across both gates:** `POST /v1/gates/release-decision` provides
+  a single decision table: every gate as a row (quality per slice, latency, timeouts, fallbacks,
+  stability), each with its value, limit and verdict, yielding one call: `advance`, `advance_with_conditions`,
+  `hold` or `rollback`. Quality and operations stay separate rows and are never blended into one score.
+- **Small high-risk slices:** high-severity slices under `min_n` (30 by default) no longer
+  block release gates automatically. Instead, they fall back to per-case stability checks: no case that
+  passed reliably may now fail, and any collapse blocks.
+- **Accuracy from eval runs:** `EvalRunAccuracy` and `FieldAccuracy` compute precision, recall,
+  F1 and exact match directly from evaluation check runs joined with golden datasets, breaking down results
+  by responsible role and root cause.
+- **Naming causes:** `name_cause_with_llm` uses LLM summarization over failure diffs to generate
+  clean, concise one-line cause descriptions, falling back to structural pattern signatures.
+- **SAML and SCIM:** Enterprise identity provider support with SCIM 2.0 directory provisioning
+  (`/scim/v2/Users`, `/scim/v2/ServiceProviderConfig`) and SAML 2.0 SP metadata and assertion consumer service
+  (`/v1/auth/saml/metadata`, `/v1/auth/saml/acs`).
+- **Shared rate limits:** `RateLimiter` supports distributed atomic counters via Redis
+  (`ASSAY_REDIS_URL`) across multiple container replicas, falling back to local memory.
+- **Alert routing:** Multi-team routing by source, measure, dimension or kind (`/v1/alerts/routes`),
+  maintenance silencing windows (`/v1/alerts/silences`), acknowledgement tracking (`/v1/alerts/{id}/ack`),
+  and PagerDuty Events API v2 on-call integration (`pagerduty_send`).
+- **Scale: push aggregation into SQL:** `document_volume_sql` and `stage_failure_rate_sql` push
+  `COUNT()`, conditional `SUM(CASE WHEN ...)`, and `GROUP BY` directly into database queries for millions of records.
+- **Timing noise:** Bootstrap quantile error estimation (`bootstrap_quantile_stderr`) computes
+  tail latency standard errors (p90, p95, p99), and alert bands scale with sample size to prevent false alarms on jitter.
+- **Migrations beyond adding:** Incremental database schema migration runner (`assay/migrations.py`)
+  with persistent version tracking table `_assay_schema_versions` executed safely on startup.
+- **Secrets in what's recorded:** Credential redaction in `assay/redaction.py` and `assay learn` scans
+  for Gitleaks-style API keys (OpenAI, Anthropic, Google, AWS, GitHub, Slack), JWTs, and private keys, replacing them
+  with placeholders before traces are saved or uploaded.
+- **Secrets at rest:** Sensitive integration credentials (webhook targets, Slack hooks, Linear tokens,
+  and PagerDuty keys) are encrypted with AES-256-GCM server-side encryption using `ASSAY_SECRET_KEY`.
+- **Long passages the judge reads in full (RAG):** faithfulness used to show the judge the first
+  4,000 characters of each fragment, and keep 2,000 of the fragments passed in, so a claim
+  supported further down a long statute section counted as fabricated. A long fragment is now
+  split into parts and the judge reads them all, up to 120,000 characters. When it couldn't see
+  all of one (a fragment recorded on a run keeps 2,000 characters), a claim it calls fabricated or
+  inferred is reported as "couldn't judge", never as fabricated.
+- **Saying "the sources don't say" (RAG):** `expect(run).must_abstain()` marks a case whose
+  documents don't answer its question, and fails an answer that answers it anyway;
+  `.must_not_abstain()` fails "I couldn't find it" when the documents do answer. `assay test` and
+  the pull request summary count them apart: right to abstain, answered anyway, abstained when the
+  answer was there.
+- **Retrieval that failed quietly (RAG):** `faults()` breaks a retriever like a tool
+  (`run.search(name, fn, query)`, or a LangChain or LlamaIndex retriever by its name), and
+  `handles_failure()` fails an answer that goes on as if a failed or empty search had found the
+  evidence. `expect(run).must_retrieve(name, source=...)` fails a case that never searched where its
+  evidence is.
+
 ## Not planned
 
 - **An AI code-review bot.** Several good ones exist.
@@ -283,6 +366,45 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 - **SDKs for other languages:** there are SDKs for Python and for TypeScript and JavaScript.
   Other languages write the events `assay test` reads ([any language](any-language.md)), send
   them to `POST /v1/ingest` directly, or use OpenTelemetry.
+- **The files that decide how tests run, guarded like the tests:** a coding agent told to make the
+  tests pass can leave every test file alone and change what runs them: a new `conftest.py` at the
+  root, `pytest.ini`, `[tool.pytest]` in `pyproject.toml`, a Jest or Vitest config or setup file,
+  the `test` script in `package.json`, the test command in CI. Today a test the base branch runs
+  that didn't run now fails the pull request, and assertions are compared with the base branch. Not
+  covered is a test that still runs but stops checking: a hook that rewrites a failure as a pass, a
+  fixture that swallows the error, an `assert` turned off. It should:
+  - **List a change to any of those files** in the guard, next to weakened assertions, with the
+    lines that changed, for a person to confirm.
+  - **Check results outside the test process:** the number of assertions that ran per test,
+    against the base branch, so a test that passes with none run is caught. A run whose results
+    Assay can't read from the tests themselves ends inconclusive, never passed on the exit code.
+  - **Count which flags get marked intended:** `assay.intended.toml` already keeps the reasons. Per
+    kind of flag, the share marked intended shows which ones people have learned to ignore, so they
+    get fixed or dropped before the rest stop being read.
+- **Errors a test logged and still passed:** an exception caught and logged, a fallback taken, a
+  warning about a missing field. The test passes, and the log line that says something broke goes
+  unread. Assay records what each test called and wrote, not what it logged. It should record the
+  errors and warnings logged during each test (Python `logging` and `warnings`, `console.error` and
+  `console.warn`), turned into templates so "user 1234 not found" and "user 5678 not found" are one,
+  with ids, numbers and personal data taken out. Compared with the base branch:
+  - **A template no test logged before** is listed with the tests that logged it and the changed
+    function it came from.
+  - **A familiar one, many times more often:** an error that was there before and now shows up in
+    many more tests counts too, since a new error and a rise in an old one are both regressions.
+  Templates logged on the base branch as well, at the same rate, are left out, so a noisy suite
+  isn't the report.
+- **Tests that reached something real:** tests fake tools one at a time, and the one nobody faked
+  runs for real. A coding agent's test copies files to the real backup server with `scp`, because
+  only `ssh` was faked, or a run of the new tests against the old code (to show they fail) calls
+  what the old code called. Assay records each test's outbound HTTP calls, not the rest. It should:
+  - **Record what else a test touched:** commands it started (`scp`, `rsync`, `psql`), connections
+    to hosts that aren't local, at the socket and not only HTTP, and files written outside the
+    repository and the test's temporary folders. Anything the base branch's tests didn't touch is
+    listed in the change report.
+  - **An opt-in offline mode** for the whole test process: connections are refused unless the
+    host is allowed, and writes outside the temporary folders fail. A fake someone forgot then
+    fails loudly instead of reaching the real system. It applies to every run Assay starts,
+    including a run against the base branch's code.
 - **Agent security: scope tests and security alerts.** An agent given credentials and a task can
   still reach what it wasn't meant to, and the organizations it happened to often didn't notice.
   Today a `never` contract, `must_not_call`, `must_get_approval_before`, the injection check and
@@ -304,9 +426,9 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     `send_email`, to the attacker's address. Each argument should carry where its value came from
     (the user, a trusted tool, or text the agent read), and a value that came only from untrusted
     text and goes to an outside destination (an address, a URL, an account, an amount) is flagged.
-    The check is also easy to slip past: one zero-width space or full-width letter inside "ignore all
-    previous instructions" hides it. Text should be normalized first (Unicode compatibility forms,
-    zero-width and control characters removed, look-alike letters folded). And an answer that embeds
+    One zero-width space or full-width letter inside "ignore all previous instructions" used to hide
+    it; text is now normalized first (built: Unicode compatibility forms, zero-width and invisible
+    characters removed, look-alike Cyrillic and Greek letters made Latin). An answer that embeds
     a markdown image or link whose address carries data (`![x](https://host/?q=...)`) leaks it the
     moment a chat window renders it, so that's flagged as data leaving.
   - **Testing the gate itself:** teams put a policy gate in front of tool calls (allow, block, needs
@@ -412,13 +534,11 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   Each failed call is a case that can be run again, and the diff says what changed between
   versions: "stopped reading the time back", "now answers during hold".
 - **The same tool name on two MCP servers:** with many MCP servers behind one agent or gateway,
-  two of them can both offer `search`, and the client picks one without saying so. Assay records the
-  server of each tool call, but the flow and the diff name a call by its tool alone, so a `search`
-  that moved from the database server to the GitHub server shows as the same step before and after.
-  A wrong tool can return a perfectly valid answer, so nothing else fails either. A tool should be
-  named by its server and name together in the flow, the diff and the contracts (`db.search`). A
-  name offered by two servers in one model call is flagged as a collision, and a call that moved
-  to another server is a change of its own.
+  two of them can both offer `search`, and the client picks one without saying so. A wrong tool can
+  return a perfectly valid answer, so nothing else fails. Built: the flow and `assay diff` name a
+  tool by its server and name (`db.search`), so a call that moved to another server is a change of
+  its own. Not yet: contracts that name a tool by server, and a name offered by two servers in one
+  model call flagged as a collision.
 - **Handoffs between agents: advice or a transfer:** one agent asks another either for a second
   opinion or to take over the next task. These are different promises, and a run records only
   that a sub-agent ran (`parent_run_id`), not which was asked or what it was allowed to do. A
@@ -446,6 +566,18 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   run's outcome and the case's checks: better, worse or unclear. A divergence on a tool that writes
   or spends weighs more than one on a read. Runs whose tool definitions changed since they were
   recorded are set apart, since their recorded results may no longer hold.
+- **The same model, served differently (self-hosted and open-weight models):** a team keeps the
+  model and changes how it runs: int8 or 4-bit instead of 16-bit weights, a new vLLM or llama.cpp
+  version, another GPU, a bigger batch. The weights' name is the same, so nothing in the run says
+  the model changed, yet outputs can, even at temperature 0. `settings` records temperature and
+  similar, not how the model was served. It should:
+  - **Record the serving setup with each call:** the quantization, the inference engine and its
+    version, the hardware, so a change to any of them shows as a cause like a new prompt or model.
+  - **Run the same cases on both setups:** the usual diff, case by case, with the cost and latency
+    of each next to it, so "4-bit saves 60% and changes these 3 cases" is one report. Cases that
+    gave the same answer every time on the old setup and now differ are listed first.
+  - **Point to the first step that differs:** in an agent run, the first call whose output changed
+    between the two setups, rather than every step after it.
 - **Evidence diffs: the same answer, from different evidence.** Two runs can both say "approved"
   while the new one read an older policy, or the wrong customer's record. Each retrieved fragment
   is recorded (id, source, score, whether it went into the prompt) and each tool call with its
@@ -468,14 +600,49 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     counted as wrong drags a better retriever down), the same document labelled two ways for one
     query, and labels on different scales. Each says how many results it affects, so a team fixes
     the labels instead of reading noise.
+  - **Time and quality on the same queries:** `run.retrieve()` records one start and end per
+    retrieval. Each stage should get its own time (embedding the query, each search, fusing,
+    reranking), so a search engine's speed isn't confused with the embedding model's. The
+    comparison shows p50, p95 and p99 next to recall for each configuration, with the filters the
+    app really uses (permissions, metadata) and at the concurrency it's run at, since a fast
+    median on an unfiltered index hides the slow tail.
   - **Keep the evidence:** each finding links the query, both result lists and the labels, so
     someone else can rerun it and get the same numbers.
+  - **Where the document dropped out:** a router, a filter or a cluster choice before the search
+    loses a document that nothing after it can bring back. Each stage's candidates are recorded,
+    and a missed document is reported at the stage that dropped it: routed to the wrong cluster,
+    filtered out, never in the candidates, or ranked too low.
+  - **All the evidence, not some:** a question that needs two passages, say the general rule and
+    an exception filed somewhere else, passes only when both are retrieved. Recall@k averages
+    over documents and hides it, so these cases are reported on their own.
   - **Make the losses into tests:** each regression becomes a case with its success criterion
     ("kb-12 in the top 5"), so the next change is held to it.
   - **A handoff page:** the comparison, label problems and open regressions as one page for a
     client, or a reviewer who approves the change. Rerun after a fix, it shows what moved.
   It works from saved results, so a team can compare runs it already has without sharing its
   index or rerunning anything.
+- **Embedding changes treated as data migrations (RAG):** if ingestion and queries quietly move to
+  different embedding models, retrieval still returns neighbors, and the scores look like ordinary
+  similarity. Assay records each fragment's id, source and score, but not what made its vector. It
+  should:
+  - **Record an embedding config id:** the model and everything before it (preprocessing,
+    chunking, tokenizer), with each fragment and with each query. A run whose query config doesn't
+    match the config of the fragments it got back fails, and so does an index holding more than one.
+    Index settings (k, `ef_search`, hybrid weights) go in the same config, so a change to them shows
+    as a cause like a new prompt or model.
+  - **Check candidates before the reranked list:** for the known query-document pairs, first that
+    the document reaches the candidate set, then where the reranker puts it. A reranker can't
+    rescue a document the new embedding never retrieved, and comparing only the final lists credits
+    it for one it was never given.
+  - **A rebuild, tested before the cutover:** a case starts from a recorded snapshot of the
+    sources, then edits, deletes and adds documents while the new index is built. Before queries
+    switch, it checks those come back under the new config id, the pre-edit chunk doesn't, and the
+    rebuild didn't write an older version over a newer edit. The old and new index are compared
+    against the same source state, so a newer document in one isn't mistaken for a model regression.
+  - **Drift with no deploy:** a model alias that now points at new weights, a replaced checkpoint,
+    a dependency bump that changed the tokenizer. A small set of known pairs runs on a schedule
+    against the live index, and the distribution of their similarity scores is tracked over time,
+    not just pass or fail, so a shift alerts before a pair fails.
 - **Agent memory across sessions:** agents that remember users (Mem0, Zep, a vector store, a graph)
   fail where a single conversation can't show it. A user moves house in one session, and the next
   still ships to the old address. A user asks to be forgotten, and the fact comes back a week later.
@@ -502,12 +669,18 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   - **The documents changed, not the code:** a re-index or a new version of a document is a
     cause, like a new prompt or model. "These 6 answers changed after policy.pdf v3 was indexed"
     goes next to the regression, and a newer version left out of the index is flagged.
+  - **Which cases a new version affects, passage by passage:** a typo fix or a reformatted table is
+    a new version too, and rerunning or flagging every case that cited the document fills a queue
+    nobody reads. The two versions are compared passage by passage, changes to whitespace and
+    layout are dropped, and only the cases whose answers rested on a passage whose wording changed
+    are rerun. Each says which passage changed, old and new text side by side.
+  - **A rule added somewhere the answer never looked:** an agent decides a late refund needs no
+    approval because the refund policy doesn't say it does; then a separate approvals document
+    adds the rule. Nothing the answer cited changed, so a check on citations misses it. When a
+    document is added or a passage is new, the cases whose questions now retrieve it are rerun
+    too, and an answer that changes is listed with the new passage as its cause.
   Counted per case, the number for a team: answers given from current sources, of all answers
   whose sources have versions.
-- **Retrieval that failed quietly:** a retrieval that errored or came back empty, or a source the
-  case expects that wasn't searched, and an answer that went on as if it had the evidence.
-  `handles_failure()` covers tools; retrieval needs the same, and `faults()` should be able to
-  break a retriever too.
 - **Conditions dropped, and questions half answered (RAG):** faithfulness counts a claim as
   supported when its quote is in a fragment word for word. "Deployments are permitted" quotes the
   source exactly, though the source says "only after approval", or says it in the next sentence. And
@@ -521,16 +694,43 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     Each is backed by a passage or stated as missing, and a part with no passage never counts as
     answered. When the missing part is the one the verdict rests on (yes or no, compliant, on
     time), an answer that gives the verdict anyway fails.
-- **Saying "the sources don't say":** a RAG answer to a question its documents don't answer
-  should say so, not fill the gap with something plausible. Faithfulness flags a fabricated
-  claim, but nothing marks a case as unanswerable and fails an answer that answers it anyway. A
-  case should be able to expect an abstention, and the report should count abstentions apart:
-  right to abstain, abstained when the answer was there, answered when it wasn't.
+  - **Where each part was lost:** never retrieved, retrieved but left out of the answer, or written
+    and then removed by a later check. Each needs a different fix, and one accuracy score hides
+    which one a team has.
+- **"None", "all of them", and a bigger library (RAG):** the misses that look like answers.
+  - **False reassurance:** "no interaction", "no such clause", "not required", when a source says
+    there is one. A negative claim quotes nothing, so a claim-by-claim check has little to hold it
+    to. A case can expect the caveat, and a "no" answered while the source says yes is counted on
+    its own, ahead of every other failure, since it reads as confident and cited.
+  - **"Which of our documents...":** a list answer is scored by how many of the labelled documents
+    it found, not by whether the ones it names are right. A list that misses some and doesn't say
+    it may be incomplete fails; one that says it's a first pass is counted as partial.
+  - **The same questions on a bigger library:** a passage found among 1,000 documents can be pushed
+    out at 30,000 by near-duplicates (other versions, other strengths, copies of the same text)
+    filling the top results. The cases run against the index at more than one size, and a passage
+    lost as the library grew is reported with what took its place.
+- **Every sentence supported, the answer still wrong:** "No, a Prometheus counter can't go down",
+  then, quoted from the docs, "it can only increase or be reset to zero on restart". Each claim
+  passes on its own and the answer contradicts itself. Faithfulness checks claims one by one. It
+  should also read the claims together, against all the passages they rest on: claims that
+  contradict each other, and a conclusion (yes, no, allowed, compliant) that the supported claims
+  don't lead to, fail.
+- **An app's own check-and-retry loop, tested:** some apps check each sentence or answer with a
+  second model as they write it, and retry what fails. Assay can record that, but doesn't read it.
+  Each rejected draft and retry should be a step, and the report should give, against labelled
+  cases: wrong sentences the loop let through, right ones it rejected, how often a retry was
+  wrong again, and the time and cost added per error avoided. A loop that adds time and avoids
+  nothing (a strong model with the source already in the prompt) shows as such.
 - **Citations the answer gives, checked:** faithfulness checks the judge's evidence against the
   fragments, not the answer's own citations. A citation (a document, a page, a section) should
   be checked against the source it names: that source exists, was retrieved, and says what the
   sentence citing it says. A right claim with the wrong page fails as a wrong citation, not as
   a wrong answer.
+- **A judge tested by taking the evidence away:** a judge given the question, a reference answer
+  and the answer, but not what was retrieved, scores agreement with the reference and calls it
+  faithfulness. Each judge-based check should be run once on a copy of a passing case with the
+  only passage supporting one claim removed. A judge whose verdict doesn't change isn't reading
+  the evidence, and is flagged like a weakened test, as success checks will be.
 - **Paid tool calls (x402):** an agent that pays for an API gets a `402` challenge, pays, and
   retries. A check should read the challenge (price, network, the payment flow it declares) and
   compare it with what the test expects, then check the paid response against its schema and
@@ -539,7 +739,9 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   change, and `at_most_once` already catches a payment repeated after a lost reply.
 - **The same request sent twice:** `faults(tool="lost")` and `expect(run).at_most_once()` catch an
   agent that pays again after a lost reply. A client that sends the whole request again (a
-  double click, a webhook delivered twice) isn't simulated yet.
+  double click, a webhook delivered twice) isn't simulated yet. A case should send it again and
+  expect the second delivery to change nothing, still answer success to the sender (a `409` makes
+  the sender retry, and the retries pile up), and be recorded as a duplicate.
 - **Done, proven from outside the agent:** browser and tool agents report success because the
   page changed, while the form was silently rejected or the session had expired. A success check
   today (`success=` in `simulate()`, or `run.state_of()`) reads what the run recorded, which is the
@@ -569,46 +771,30 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     a booking that failed is a finding.
   - **Stop the run after any step and start it again:** `faults()` gets a crash point, and the case
     is rerun from the agent's saved state. The resumed run doesn't repeat what took effect, and
-    finishes or escalates instead of leaving a job half done.
+    finishes or escalates instead of leaving a job half done. The crash points that matter most are
+    just before a call and just after the remote call returns but before the run records it.
+  - **The same idempotency key on the retry:** `at_most_once(tool, key=...)` counts calls per key,
+    so a retry that makes a new key looks like a different call and passes. The key should be made
+    before the call and saved with the intent to call, and a retry after a crash or a lost reply
+    should reuse it. A repeated call with a new key for the same action fails.
   - **Count it in production:** runs that ended after an effect without completing or compensating
     it, per agent, so orphaned work is found before a customer finds it.
-- **Runaway runs, caught in the first minute (Shipped):** an agent retrying a failing tool
-  overnight or caught in an error loop is detected in the first minute of execution via
-  `assay.runaway.RunawayDetector`. Alerts fire at once, per run, for:
-  - **The same failure again and again:** the same tool returning the same error (with IDs,
-    hex addresses, and numbers stripped) five times in one run, whatever the model changes in its arguments.
-  - **Spend velocity cap:** dollar and call velocity per minute against agent baselines.
-  - **The slow leak:** runs that ended having done nothing (no-op burn with high step count or cost).
-- **One release decision across both gates (Shipped):** `POST /v1/gates/release-decision` provides
-  a single decision table: every gate as a row (quality per slice, latency, timeouts, fallbacks,
-  stability), each with its value, limit and verdict, yielding one call: `advance`, `advance_with_conditions`,
-  `hold` or `rollback`. Quality and operations stay separate rows and are never blended into one score.
-- **Small high-risk slices (Shipped):** high-severity slices under `min_n` (30 by default) no longer
-  block release gates automatically. Instead, they fall back to per-case stability checks: no case that
-  passed reliably may now fail, and any collapse blocks.
-- **Accuracy from eval runs (Shipped):** `EvalRunAccuracy` and `FieldAccuracy` compute precision, recall,
-  F1 and exact match directly from evaluation check runs joined with golden datasets, breaking down results
-  by responsible role and root cause.
-- **Naming causes (Shipped):** `name_cause_with_llm` uses LLM summarization over failure diffs to generate
-  clean, concise one-line cause descriptions, falling back to structural pattern signatures.
-- **SAML and SCIM (Shipped):** Enterprise identity provider support with SCIM 2.0 directory provisioning
-  (`/scim/v2/Users`, `/scim/v2/ServiceProviderConfig`) and SAML 2.0 SP metadata and assertion consumer service
-  (`/v1/auth/saml/metadata`, `/v1/auth/saml/acs`).
-- **Shared rate limits (Shipped):** `RateLimiter` supports distributed atomic counters via Redis
-  (`ASSAY_REDIS_URL`) across multiple container replicas, falling back to local memory.
-- **Alert routing (Shipped):** Multi-team routing by source, measure, dimension or kind (`/v1/alerts/routes`),
-  maintenance silencing windows (`/v1/alerts/silences`), acknowledgement tracking (`/v1/alerts/{id}/ack`),
-  and PagerDuty Events API v2 on-call integration (`pagerduty_send`).
-- **Scale: push aggregation into SQL (Shipped):** `document_volume_sql` and `stage_failure_rate_sql` push
-  `COUNT()`, conditional `SUM(CASE WHEN ...)`, and `GROUP BY` directly into database queries for millions of records.
-- **Timing noise (Shipped):** Bootstrap quantile error estimation (`bootstrap_quantile_stderr`) computes
-  tail latency standard errors (p90, p95, p99), and alert bands scale with sample size to prevent false alarms on jitter.
-- **Migrations beyond adding (Shipped):** Incremental database schema migration runner (`assay/migrations.py`)
-  with persistent version tracking table `_assay_schema_versions` executed safely on startup.
-- **Secrets in what's recorded (Shipped):** Credential redaction in `assay/redaction.py` and `assay learn` scans
-  for Gitleaks-style API keys (OpenAI, Anthropic, Google, AWS, GitHub, Slack), JWTs, and private keys, replacing them
-  with placeholders before traces are saved or uploaded.
-- **Secrets at rest (Shipped):** Sensitive integration credentials (webhook targets, Slack hooks, Linear tokens,
-  and PagerDuty keys) are encrypted with AES-256-GCM server-side encryption using `ASSAY_SECRET_KEY`.
-
+- **A run that's waiting when something changes: a cancel, a deploy, a late approval:** an agent
+  updates a record, calls another system and waits for a person. A good answer and a task done
+  right are separate outcomes, and these cases test the second. It should:
+  - **Cancel during an external call:** the call has already left, so a cancel can't pull it back.
+    The run should record that the cancel arrived mid-call, then check the other system once the
+    call ends. A run that just flips to cancelled, with nobody knowing whether the record changed,
+    fails.
+  - **Deploy while a run waits:** the case pauses at a wait (an approval, a callback), the app's
+    code or prompt changes, and the run resumes on the new version. It should finish or ask again,
+    never carry on with a step that no longer exists in the shape it had.
+  - **An approval bound to what was shown:** `run.approval()` records an action name, so an
+    approval of "step 3" carries over to a different step 3 after a deploy. An approval should
+    cover a hash of the exact arguments and the version of the record they act on. If either
+    changed, it no longer counts and the agent asks again. An approval that arrives after the
+    action was cancelled must not make it run.
+  - **"Unknown" with an owner and a clock:** a call whose outcome isn't known is a state of its own
+    (see "unverified" above), not a log line. In tests, the case checks something resolves it; in
+    production, unknown outcomes older than a set time are counted per agent, so none sits forever.
 Ideas and disagreements are welcome: open an issue or a discussion.
