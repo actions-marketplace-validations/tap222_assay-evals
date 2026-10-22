@@ -166,7 +166,8 @@ and deploy and dependency changes no CI job checked. Then come behavior changed 
 and rewritten expected values. Flaky tests are a count. It's the top of the PR comment with the
 Action's `changes: true`, and JSON for a coding agent ([docs](changes.md)).
 
-Changed lines no test ran come from the coverage a run leaves (coverage.py, istanbul or lcov), are
+Changed lines no test ran come from the coverage a run leaves (coverage.py, istanbul, lcov or Go's
+coverage profile), are
 grouped by function, and are ranked by risk. Replayed over this repository's history, the deploy rule
 lists all four such bugs, but since pull requests began it lists 7 changes, only 2 of them bugs:
 it still needs fewer false alarms. One change seen in many cases is one item. Any item other than a
@@ -265,6 +266,72 @@ User stories: [US-15](user-stories.md#us-15).
 
 User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 
+## Built recently
+
+Built in October 2026, beyond what the phases above say. Each has its docs; items that change a
+phase are marked there too.
+
+- **Coding agents run the tests themselves:** `assay init --claude-code` and `assay init
+  --antigravity` add a skill, so Claude Code or Antigravity runs the tests after it changes a
+  prompt or the agent, and never accepts a new baseline on its own. `--global` installs it for
+  every project. Each run records which agent ran it.
+- **Flaky LLM tests, settled with more attempts only where needed:** `assay test --rerun-unsure`
+  reruns only the cases that could be worse, a batch at a time, until each is clearly chance or
+  clearly worse (sequential testing); an unclear case stays inconclusive, never passes.
+- **LLM-as-a-judge, checked:** `assay rejudge` asks a judge about a saved run's answers again,
+  with no calls to the AI: agreement with the saved verdicts (Cohen's kappa), flips, and
+  `--min-agreement` for CI. The report gives code checks and judged checks a line each, and counts
+  cases that went pass to fail and fail to pass with an exact McNemar test.
+- **A payment or booking repeated after a lost reply:** `assay.faults(tool="lost")` runs a tool
+  for real and then times out, and `expect(run).at_most_once(tool, key=...)` fails an agent that
+  does it again.
+- **Where agent runs broke:** one line per place runs broke ("gen_sql worked, then exec_sql went
+  wrong"), what got worse against the baseline first, and every run behind a count (`assay matrix`).
+- **Release gates:** a percentile, not only the mean; an absolute limit the candidate must keep
+  whatever the baseline did; and a margin per slice.
+- **The change report reads Go:** untested changed lines come from Go's own coverage profile
+  (`go test -coverprofile`) too, next to coverage.py, istanbul and lcov.
+- **A call with no answer isn't $0:** a call that timed out or lost its connection is reported as
+  not priced, since the provider may have billed it.
+- **Runaway runs, caught in the first minute:** an agent retrying a failing tool
+  overnight or caught in an error loop is detected in the first minute of execution via
+  `assay.runaway.RunawayDetector`. Alerts fire at once, per run, for:
+  - **The same failure again and again:** the same tool returning the same error (with IDs,
+    hex addresses, and numbers stripped) five times in one run, whatever the model changes in its arguments.
+  - **Spend velocity cap:** dollar and call velocity per minute against agent baselines.
+  - **The slow leak:** runs that ended having done nothing (no-op burn with high step count or cost).
+- **One release decision across both gates:** `POST /v1/gates/release-decision` provides
+  a single decision table: every gate as a row (quality per slice, latency, timeouts, fallbacks,
+  stability), each with its value, limit and verdict, yielding one call: `advance`, `advance_with_conditions`,
+  `hold` or `rollback`. Quality and operations stay separate rows and are never blended into one score.
+- **Small high-risk slices:** high-severity slices under `min_n` (30 by default) no longer
+  block release gates automatically. Instead, they fall back to per-case stability checks: no case that
+  passed reliably may now fail, and any collapse blocks.
+- **Accuracy from eval runs:** `EvalRunAccuracy` and `FieldAccuracy` compute precision, recall,
+  F1 and exact match directly from evaluation check runs joined with golden datasets, breaking down results
+  by responsible role and root cause.
+- **Naming causes:** `name_cause_with_llm` uses LLM summarization over failure diffs to generate
+  clean, concise one-line cause descriptions, falling back to structural pattern signatures.
+- **SAML and SCIM:** Enterprise identity provider support with SCIM 2.0 directory provisioning
+  (`/scim/v2/Users`, `/scim/v2/ServiceProviderConfig`) and SAML 2.0 SP metadata and assertion consumer service
+  (`/v1/auth/saml/metadata`, `/v1/auth/saml/acs`).
+- **Shared rate limits:** `RateLimiter` supports distributed atomic counters via Redis
+  (`ASSAY_REDIS_URL`) across multiple container replicas, falling back to local memory.
+- **Alert routing:** Multi-team routing by source, measure, dimension or kind (`/v1/alerts/routes`),
+  maintenance silencing windows (`/v1/alerts/silences`), acknowledgement tracking (`/v1/alerts/{id}/ack`),
+  and PagerDuty Events API v2 on-call integration (`pagerduty_send`).
+- **Scale: push aggregation into SQL:** `document_volume_sql` and `stage_failure_rate_sql` push
+  `COUNT()`, conditional `SUM(CASE WHEN ...)`, and `GROUP BY` directly into database queries for millions of records.
+- **Timing noise:** Bootstrap quantile error estimation (`bootstrap_quantile_stderr`) computes
+  tail latency standard errors (p90, p95, p99), and alert bands scale with sample size to prevent false alarms on jitter.
+- **Migrations beyond adding:** Incremental database schema migration runner (`assay/migrations.py`)
+  with persistent version tracking table `_assay_schema_versions` executed safely on startup.
+- **Secrets in what's recorded:** Credential redaction in `assay/redaction.py` and `assay learn` scans
+  for Gitleaks-style API keys (OpenAI, Anthropic, Google, AWS, GitHub, Slack), JWTs, and private keys, replacing them
+  with placeholders before traces are saved or uploaded.
+- **Secrets at rest:** Sensitive integration credentials (webhook targets, Slack hooks, Linear tokens,
+  and PagerDuty keys) are encrypted with AES-256-GCM server-side encryption using `ASSAY_SECRET_KEY`.
+
 ## Not planned
 
 - **An AI code-review bot.** Several good ones exist.
@@ -343,9 +410,9 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     `send_email`, to the attacker's address. Each argument should carry where its value came from
     (the user, a trusted tool, or text the agent read), and a value that came only from untrusted
     text and goes to an outside destination (an address, a URL, an account, an amount) is flagged.
-    The check is also easy to slip past: one zero-width space or full-width letter inside "ignore all
-    previous instructions" hides it. Text should be normalized first (Unicode compatibility forms,
-    zero-width and control characters removed, look-alike letters folded). And an answer that embeds
+    One zero-width space or full-width letter inside "ignore all previous instructions" used to hide
+    it; text is now normalized first (built: Unicode compatibility forms, zero-width and invisible
+    characters removed, look-alike Cyrillic and Greek letters made Latin). An answer that embeds
     a markdown image or link whose address carries data (`![x](https://host/?q=...)`) leaks it the
     moment a chat window renders it, so that's flagged as data leaving.
   - **Testing the gate itself:** teams put a policy gate in front of tool calls (allow, block, needs
@@ -451,13 +518,11 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   Each failed call is a case that can be run again, and the diff says what changed between
   versions: "stopped reading the time back", "now answers during hold".
 - **The same tool name on two MCP servers:** with many MCP servers behind one agent or gateway,
-  two of them can both offer `search`, and the client picks one without saying so. Assay records the
-  server of each tool call, but the flow and the diff name a call by its tool alone, so a `search`
-  that moved from the database server to the GitHub server shows as the same step before and after.
-  A wrong tool can return a perfectly valid answer, so nothing else fails either. A tool should be
-  named by its server and name together in the flow, the diff and the contracts (`db.search`). A
-  name offered by two servers in one model call is flagged as a collision, and a call that moved
-  to another server is a change of its own.
+  two of them can both offer `search`, and the client picks one without saying so. A wrong tool can
+  return a perfectly valid answer, so nothing else fails. Built: the flow and `assay diff` name a
+  tool by its server and name (`db.search`), so a call that moved to another server is a change of
+  its own. Not yet: contracts that name a tool by server, and a name offered by two servers in one
+  model call flagged as a collision.
 - **Handoffs between agents: advice or a transfer:** one agent asks another either for a second
   opinion or to take over the next task. These are different promises, and a run records only
   that a sub-agent ran (`parent_run_id`), not which was asked or what it was allowed to do. A
@@ -730,43 +795,4 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   - **"Unknown" with an owner and a clock:** a call whose outcome isn't known is a state of its own
     (see "unverified" above), not a log line. In tests, the case checks something resolves it; in
     production, unknown outcomes older than a set time are counted per agent, so none sits forever.
-- **Runaway runs, caught in the first minute (Shipped):** an agent retrying a failing tool
-  overnight or caught in an error loop is detected in the first minute of execution via
-  `assay.runaway.RunawayDetector`. Alerts fire at once, per run, for:
-  - **The same failure again and again:** the same tool returning the same error (with IDs,
-    hex addresses, and numbers stripped) five times in one run, whatever the model changes in its arguments.
-  - **Spend velocity cap:** dollar and call velocity per minute against agent baselines.
-  - **The slow leak:** runs that ended having done nothing (no-op burn with high step count or cost).
-- **One release decision across both gates (Shipped):** `POST /v1/gates/release-decision` provides
-  a single decision table: every gate as a row (quality per slice, latency, timeouts, fallbacks,
-  stability), each with its value, limit and verdict, yielding one call: `advance`, `advance_with_conditions`,
-  `hold` or `rollback`. Quality and operations stay separate rows and are never blended into one score.
-- **Small high-risk slices (Shipped):** high-severity slices under `min_n` (30 by default) no longer
-  block release gates automatically. Instead, they fall back to per-case stability checks: no case that
-  passed reliably may now fail, and any collapse blocks.
-- **Accuracy from eval runs (Shipped):** `EvalRunAccuracy` and `FieldAccuracy` compute precision, recall,
-  F1 and exact match directly from evaluation check runs joined with golden datasets, breaking down results
-  by responsible role and root cause.
-- **Naming causes (Shipped):** `name_cause_with_llm` uses LLM summarization over failure diffs to generate
-  clean, concise one-line cause descriptions, falling back to structural pattern signatures.
-- **SAML and SCIM (Shipped):** Enterprise identity provider support with SCIM 2.0 directory provisioning
-  (`/scim/v2/Users`, `/scim/v2/ServiceProviderConfig`) and SAML 2.0 SP metadata and assertion consumer service
-  (`/v1/auth/saml/metadata`, `/v1/auth/saml/acs`).
-- **Shared rate limits (Shipped):** `RateLimiter` supports distributed atomic counters via Redis
-  (`ASSAY_REDIS_URL`) across multiple container replicas, falling back to local memory.
-- **Alert routing (Shipped):** Multi-team routing by source, measure, dimension or kind (`/v1/alerts/routes`),
-  maintenance silencing windows (`/v1/alerts/silences`), acknowledgement tracking (`/v1/alerts/{id}/ack`),
-  and PagerDuty Events API v2 on-call integration (`pagerduty_send`).
-- **Scale: push aggregation into SQL (Shipped):** `document_volume_sql` and `stage_failure_rate_sql` push
-  `COUNT()`, conditional `SUM(CASE WHEN ...)`, and `GROUP BY` directly into database queries for millions of records.
-- **Timing noise (Shipped):** Bootstrap quantile error estimation (`bootstrap_quantile_stderr`) computes
-  tail latency standard errors (p90, p95, p99), and alert bands scale with sample size to prevent false alarms on jitter.
-- **Migrations beyond adding (Shipped):** Incremental database schema migration runner (`assay/migrations.py`)
-  with persistent version tracking table `_assay_schema_versions` executed safely on startup.
-- **Secrets in what's recorded (Shipped):** Credential redaction in `assay/redaction.py` and `assay learn` scans
-  for Gitleaks-style API keys (OpenAI, Anthropic, Google, AWS, GitHub, Slack), JWTs, and private keys, replacing them
-  with placeholders before traces are saved or uploaded.
-- **Secrets at rest (Shipped):** Sensitive integration credentials (webhook targets, Slack hooks, Linear tokens,
-  and PagerDuty keys) are encrypted with AES-256-GCM server-side encryption using `ASSAY_SECRET_KEY`.
-
 Ideas and disagreements are welcome: open an issue or a discussion.
