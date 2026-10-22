@@ -470,6 +470,13 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     the labels instead of reading noise.
   - **Keep the evidence:** each finding links the query, both result lists and the labels, so
     someone else can rerun it and get the same numbers.
+  - **Where the document dropped out:** a router, a filter or a cluster choice before the search
+    loses a document that nothing after it can bring back. Each stage's candidates are recorded,
+    and a missed document is reported at the stage that dropped it: routed to the wrong cluster,
+    filtered out, never in the candidates, or ranked too low.
+  - **All the evidence, not some:** a question that needs two passages, say the general rule and
+    an exception filed somewhere else, passes only when both are retrieved. Recall@k averages
+    over documents and hides it, so these cases are reported on their own.
   - **Make the losses into tests:** each regression becomes a case with its success criterion
     ("kb-12 in the top 5"), so the next change is held to it.
   - **A handoff page:** the comparison, label problems and open regressions as one page for a
@@ -531,6 +538,11 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   be checked against the source it names: that source exists, was retrieved, and says what the
   sentence citing it says. A right claim with the wrong page fails as a wrong citation, not as
   a wrong answer.
+- **A judge tested by taking the evidence away:** a judge given the question, a reference answer
+  and the answer, but not what was retrieved, scores agreement with the reference and calls it
+  faithfulness. Each judge-based check should be run once on a copy of a passing case with the
+  only passage supporting one claim removed. A judge whose verdict doesn't change isn't reading
+  the evidence, and is flagged like a weakened test, as success checks will be.
 - **Paid tool calls (x402):** an agent that pays for an API gets a `402` challenge, pays, and
   retries. A check should read the challenge (price, network, the payment flow it declares) and
   compare it with what the test expects, then check the paid response against its schema and
