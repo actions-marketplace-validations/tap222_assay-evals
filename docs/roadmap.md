@@ -310,6 +310,18 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     many more tests counts too, since a new error and a rise in an old one are both regressions.
   Templates logged on the base branch as well, at the same rate, are left out, so a noisy suite
   isn't the report.
+- **Tests that reached something real:** tests fake tools one at a time, and the one nobody faked
+  runs for real. A coding agent's test copies files to the real backup server with `scp`, because
+  only `ssh` was faked, or a run of the new tests against the old code (to show they fail) calls
+  what the old code called. Assay records each test's outbound HTTP calls, not the rest. It should:
+  - **Record what else a test touched:** commands it started (`scp`, `rsync`, `psql`), connections
+    to hosts that aren't local, at the socket and not only HTTP, and files written outside the
+    repository and the test's temporary folders. Anything the base branch's tests didn't touch is
+    listed in the change report.
+  - **An opt-in offline mode** for the whole test process: connections are refused unless the
+    host is allowed, and writes outside the temporary folders fail. A fake someone forgot then
+    fails loudly instead of reaching the real system. It applies to every run Assay starts,
+    including a run against the base branch's code.
 - **Agent security: scope tests and security alerts.** An agent given credentials and a task can
   still reach what it wasn't meant to, and the organizations it happened to often didn't notice.
   Today a `never` contract, `must_not_call`, `must_get_approval_before`, the injection check and
