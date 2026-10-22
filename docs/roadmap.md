@@ -298,6 +298,18 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
   - **Count which flags get marked intended:** `assay.intended.toml` already keeps the reasons. Per
     kind of flag, the share marked intended shows which ones people have learned to ignore, so they
     get fixed or dropped before the rest stop being read.
+- **Errors a test logged and still passed:** an exception caught and logged, a fallback taken, a
+  warning about a missing field. The test passes, and the log line that says something broke goes
+  unread. Assay records what each test called and wrote, not what it logged. It should record the
+  errors and warnings logged during each test (Python `logging` and `warnings`, `console.error` and
+  `console.warn`), turned into templates so "user 1234 not found" and "user 5678 not found" are one,
+  with ids, numbers and personal data taken out. Compared with the base branch:
+  - **A template no test logged before** is listed with the tests that logged it and the changed
+    function it came from.
+  - **A familiar one, many times more often:** an error that was there before and now shows up in
+    many more tests counts too, since a new error and a rise in an old one are both regressions.
+  Templates logged on the base branch as well, at the same rate, are left out, so a noisy suite
+  isn't the report.
 - **Agent security: scope tests and security alerts.** An agent given credentials and a task can
   still reach what it wasn't meant to, and the organizations it happened to often didn't notice.
   Today a `never` contract, `must_not_call`, `must_get_approval_before`, the injection check and
