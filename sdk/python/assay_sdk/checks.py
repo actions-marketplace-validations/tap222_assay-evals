@@ -5,6 +5,8 @@
                     fields the schema doesn't have
   claims_success    whether an answer says an action was done ("Your order has been cancelled")
   says_it_failed    whether an answer tells the user something didn't work
+  abstains          whether an answer says its sources don't answer the question ("the documents
+                    don't say"), instead of giving an answer
 """
 from __future__ import annotations
 
@@ -105,3 +107,27 @@ def claims_success(answer: Optional[str]) -> Optional[str]:
 
 def says_it_failed(answer: Optional[str]) -> bool:
     return bool(_FAILED.search(answer or ""))
+
+
+_SOURCES = (r"(?:documents?|sources?|context|passages?|materials?|records?|knowledge base|excerpts?|"
+            r"search results|information (?:provided|available|given|I have|I was given))")
+_ABSTAIN = re.compile(
+    r"\b" + _SOURCES + r"\b[^.!?]{0,40}?\b(?:do(?:es)?n't|do(?:es)? not|did(?:n't| not))\s+(?:\w+\s+)?"
+    r"(?:say|mention|cover|contain|include|specify|state|address|provide|discuss|answer|give|list)\b|"
+    r"\b(?:isn't|is not|aren't|are not|wasn't|was not|not)\s+(?:\w+\s+)?(?:mentioned|covered|specified|stated|"
+    r"addressed|included|found|given|listed)\s+in\s+(?:the|these|your|any|my)\b|"
+    r"\bI(?:'m| am)?\s*(?:don't|do not|couldn't|could not|can't|cannot|wasn't able to|was unable to|am unable to|"
+    r"'m unable to|not able to)\s+(?:find|see|locate|determine|answer|tell|confirm)\b|"
+    r"\bI (?:don't|do not) (?:have|know)\b(?! (?:any )?(?:access|permission))|"
+    r"\b(?:no|not enough|insufficient) (?:information|mention|details?|data|record|evidence)\b[^.!?]{0,40}?"
+    r"\b(?:about|on|regarding|of|for|to answer|in)\b|"
+    r"\b(?:unable|not able) to (?:answer|find|determine|confirm)\b|\b(?:can't|cannot) answer\b", re.I)
+
+
+def abstains(answer: Optional[str]) -> Optional[str]:
+    """The sentence where the answer says its sources don't answer the question ("The documents
+    don't say", "I couldn't find anything about"), or None when it answers."""
+    for s in _sentences((answer or "").replace("\u2019", "'")):
+        if _ABSTAIN.search(s):
+            return s.strip()[:200]
+    return None

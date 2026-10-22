@@ -265,6 +265,31 @@ class Expectations:
         successfully), or when no tool ran at all."""
         return self._add("no_false_success()", lambda: _false_success(self.run))
 
+    def must_abstain(self) -> "Expectations":
+        """The case's sources don't answer its question, so the answer should say so ("the documents
+        don't say") instead of filling the gap with something plausible. An answer that says it and
+        then answers anyway still passes; faithfulness checks what it then claims."""
+        def rule():
+            from assay_sdk.checks import abstains
+            answer = self.run.answer_text
+            if answer is None:
+                return "The run gave no answer; it should say the sources don't answer the question."
+            if abstains(answer):
+                return None
+            return f"The sources don't answer this, but the answer doesn't say so: {answer[:160]!r}."
+        return self._add("must_abstain()", rule)
+
+    def must_not_abstain(self) -> "Expectations":
+        """The case's sources do answer its question: an answer that says they don't fails. The other
+        half of must_abstain(), so a system that refuses everything doesn't pass both."""
+        def rule():
+            from assay_sdk.checks import abstains
+            if self.run.answer_text is None:
+                return "The run gave no answer."
+            said = abstains(self.run.answer_text)
+            return f"The answer says the sources don't answer this (“{said}”), but they do." if said else None
+        return self._add("must_not_abstain()", rule)
+
     def handles_failure(self, max_retries: int = 2) -> "Expectations":
         """After a tool failed or came back empty (assay.faults() makes it happen): the answer doesn't
         claim success, no tool is retried more than max_retries times, and the user is told (or the run
