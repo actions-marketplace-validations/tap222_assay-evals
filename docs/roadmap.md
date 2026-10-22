@@ -283,6 +283,21 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
 - **SDKs for other languages:** there are SDKs for Python and for TypeScript and JavaScript.
   Other languages write the events `assay test` reads ([any language](any-language.md)), send
   them to `POST /v1/ingest` directly, or use OpenTelemetry.
+- **The files that decide how tests run, guarded like the tests:** a coding agent told to make the
+  tests pass can leave every test file alone and change what runs them: a new `conftest.py` at the
+  root, `pytest.ini`, `[tool.pytest]` in `pyproject.toml`, a Jest or Vitest config or setup file,
+  the `test` script in `package.json`, the test command in CI. Today a test the base branch runs
+  that didn't run now fails the pull request, and assertions are compared with the base branch. Not
+  covered is a test that still runs but stops checking: a hook that rewrites a failure as a pass, a
+  fixture that swallows the error, an `assert` turned off. It should:
+  - **List a change to any of those files** in the guard, next to weakened assertions, with the
+    lines that changed, for a person to confirm.
+  - **Check results outside the test process:** the number of assertions that ran per test,
+    against the base branch, so a test that passes with none run is caught. A run whose results
+    Assay can't read from the tests themselves ends inconclusive, never passed on the exit code.
+  - **Count which flags get marked intended:** `assay.intended.toml` already keeps the reasons. Per
+    kind of flag, the share marked intended shows which ones people have learned to ignore, so they
+    get fixed or dropped before the rest stop being read.
 - **Agent security: scope tests and security alerts.** An agent given credentials and a task can
   still reach what it wasn't meant to, and the organizations it happened to often didn't notice.
   Today a `never` contract, `must_not_call`, `must_get_approval_before`, the injection check and
