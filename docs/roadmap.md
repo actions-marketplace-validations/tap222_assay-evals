@@ -476,6 +476,28 @@ User stories: [US-16](user-stories.md#us-16), [US-17](user-stories.md#us-17).
     client, or a reviewer who approves the change. Rerun after a fix, it shows what moved.
   It works from saved results, so a team can compare runs it already has without sharing its
   index or rerunning anything.
+- **Embedding changes treated as data migrations (RAG):** if ingestion and queries quietly move to
+  different embedding models, retrieval still returns neighbors, and the scores look like ordinary
+  similarity. Assay records each fragment's id, source and score, but not what made its vector. It
+  should:
+  - **Record an embedding config id:** the model and everything before it (preprocessing,
+    chunking, tokenizer), with each fragment and with each query. A run whose query config doesn't
+    match the config of the fragments it got back fails, and so does an index holding more than one.
+    Index settings (k, `ef_search`, hybrid weights) go in the same config, so a change to them shows
+    as a cause like a new prompt or model.
+  - **Check candidates before the reranked list:** for the known query-document pairs, first that
+    the document reaches the candidate set, then where the reranker puts it. A reranker can't
+    rescue a document the new embedding never retrieved, and comparing only the final lists credits
+    it for one it was never given.
+  - **A rebuild, tested before the cutover:** a case starts from a recorded snapshot of the
+    sources, then edits, deletes and adds documents while the new index is built. Before queries
+    switch, it checks those come back under the new config id, the pre-edit chunk doesn't, and the
+    rebuild didn't write an older version over a newer edit. The old and new index are compared
+    against the same source state, so a newer document in one isn't mistaken for a model regression.
+  - **Drift with no deploy:** a model alias that now points at new weights, a replaced checkpoint,
+    a dependency bump that changed the tokenizer. A small set of known pairs runs on a schedule
+    against the live index, and the distribution of their similarity scores is tracked over time,
+    not just pass or fail, so a shift alerts before a pair fails.
 - **Agent memory across sessions:** agents that remember users (Mem0, Zep, a vector store, a graph)
   fail where a single conversation can't show it. A user moves house in one session, and the next
   still ships to the old address. A user asks to be forgotten, and the fact comes back a week later.
