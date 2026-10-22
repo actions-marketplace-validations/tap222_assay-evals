@@ -144,6 +144,15 @@ def _max(run, key: str) -> int:
                 for s in run.steps if s["kind"] == "llm"), default=0)
 
 
+def _retrievals(run) -> List[dict]:
+    return [s for s in run.steps if s["kind"] == "retrieval"]
+
+
+def _found_nothing(s: dict) -> bool:
+    """A retrieval that failed, was broken by assay.faults(), or came back empty."""
+    return bool(s.get("error") or s.get("fault") or not s.get("fragments"))
+
+
 def _false_success(run) -> Optional[str]:
     from assay_sdk.checks import claims_success
     claim = claims_success(run.answer_text or "")
@@ -291,30 +300,66 @@ class Expectations:
         return self._add("must_not_abstain()", rule)
 
     def handles_failure(self, max_retries: int = 2) -> "Expectations":
-        """After a tool failed or came back empty (assay.faults() makes it happen): the answer doesn't
-        claim success, no tool is retried more than max_retries times, and the user is told (or the run
-        is escalated, or a retry worked)."""
+        """After a tool or a retrieval failed or came back empty (assay.faults() makes it happen): the
+        answer doesn't claim success, nothing is retried more than max_retries times, and the user is
+        told, or told the sources don't say (or the run is escalated, or a retry worked)."""
         def rule():
-            calls = tool_calls(self.run)
+            calls, rets = tool_calls(self.run), _retrievals(self.run)
             hit = [c for c in calls if c.get("error") or c.get("fault")]
-            if not hit:
-                return "No tool failed or came back empty: inject one with assay.faults(tool=\"error\")."
-            why = _false_success(self.run)
+            missed = [s for s in rets if _found_nothing(s)]
+            if not hit and not missed:
+                return ("No tool or retrieval failed or came back empty: inject one with "
+                        "assay.faults(tool=\"error\").")
+            why = _false_success(self.run) if hit else None
             if why:
                 return why
             for name in {c["name"] for c in hit}:
                 n = sum(1 for c in calls if c["name"] == name)
                 if n > max_retries + 1:
                     return f"{name} was called {n} times after it failed; at most {max_retries} retries expected."
-            from assay_sdk.checks import says_it_failed
+            for name in {s.get("name") for s in missed}:
+                n = sum(1 for s in rets if s.get("name") == name)
+                if n > max_retries + 1:
+                    return f"The {name} retrieval ran {n} times after it failed; at most {max_retries} retries expected."
+            from assay_sdk.checks import abstains, says_it_failed
             recovered = all(any(d["name"] == c["name"] and not d.get("error") and not d.get("fault")
-                                for d in calls[calls.index(c) + 1:]) for c in hit)
-            told = says_it_failed(self.run.answer_text) or self.run.outcome_value in ("unresolved", "escalated")
+                                for d in calls[i + 1:]) for i, c in enumerate(calls) if c in hit) and \
+                all(any(d.get("name") == s.get("name") and not _found_nothing(d) for d in rets[i + 1:])
+                    for i, s in enumerate(rets) if _found_nothing(s))
+            answer = self.run.answer_text
+            told = says_it_failed(answer) or abstains(answer) or self.run.outcome_value in ("unresolved", "escalated")
             if not (recovered or told):
+                if missed and not hit:
+                    s = missed[0]
+                    what = "failed" if s.get("error") else "found nothing"
+                    return (f"The {s.get('name')} retrieval {what} (step {s['seq']}), but the answer goes on as if "
+                            f"it had the evidence: {(answer or '(no answer)')[:160]!r}.")
                 return ("The answer doesn't tell the user anything went wrong: "
-                        f"{(self.run.answer_text or '(no answer)')[:160]!r}.")
+                        f"{(answer or '(no answer)')[:160]!r}.")
             return None
         return self._add(f"handles_failure({max_retries})", rule)
+
+    def must_retrieve(self, name: Optional[str] = None, source: Optional[str] = None) -> "Expectations":
+        """A retrieval ran and found something: from the retriever `name` (run.search's name, or a
+        LangChain or LlamaIndex retriever's), with a fragment from `source` (part of its source, e.g.
+        "refund-policy"), or both. An answer that never searched where its evidence is fails."""
+        def rule():
+            rets = _retrievals(self.run)
+            mine = [s for s in rets if name is None or s.get("name") == name]
+            if not mine:
+                ran = ", ".join(dict.fromkeys(str(s.get("name")) for s in rets)) or "none"
+                return f"No retrieval from {name or 'any retriever'} ran (retrievals: {ran})."
+            found = [s for s in mine if not _found_nothing(s)]
+            if not found:
+                return f"{name or 'Retrieval'} ran, but failed or found nothing every time."
+            if source is not None and not any(source in str(f.get("source") or f.get("id") or "")
+                                              for s in found for f in s.get("fragments") or []):
+                seen = sorted({str(f.get("source") or f.get("id")) for s in found for f in s.get("fragments") or []})
+                return (f"Nothing from {source!r} was retrieved; it found: {', '.join(seen[:8])}"
+                        + (", …" if len(seen) > 8 else "") + ".")
+            return None
+        label = ", ".join(x for x in (name, f"source={source!r}" if source else None) if x)
+        return self._add(f"must_retrieve({label})", rule)
 
     def at_most_once(self, tool: str, key: Optional[str] = None) -> "Expectations":
         """`tool` went through at most once per value of its `key` argument (once in all without one):

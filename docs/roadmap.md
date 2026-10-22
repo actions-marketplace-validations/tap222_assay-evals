@@ -336,6 +336,11 @@ phase are marked there too.
   `.must_not_abstain()` fails "I couldn't find it" when the documents do answer. `assay test` and
   the pull request summary count them apart: right to abstain, answered anyway, abstained when the
   answer was there.
+- **Retrieval that failed quietly (RAG):** `faults()` breaks a retriever like a tool
+  (`run.search(name, fn, query)`, or a LangChain or LlamaIndex retriever by its name), and
+  `handles_failure()` fails an answer that goes on as if a failed or empty search had found the
+  evidence. `expect(run).must_retrieve(name, source=...)` fails a case that never searched where its
+  evidence is.
 
 ## Not planned
 
@@ -670,10 +675,6 @@ phase are marked there too.
     too, and an answer that changes is listed with the new passage as its cause.
   Counted per case, the number for a team: answers given from current sources, of all answers
   whose sources have versions.
-- **Retrieval that failed quietly:** a retrieval that errored or came back empty, or a source the
-  case expects that wasn't searched, and an answer that went on as if it had the evidence.
-  `handles_failure()` covers tools; retrieval needs the same, and `faults()` should be able to
-  break a retriever too.
 - **Conditions dropped, and questions half answered (RAG):** faithfulness counts a claim as
   supported when its quote is in a fragment word for word. "Deployments are permitted" quotes the
   source exactly, though the source says "only after approval", or says it in the next sentence. And
