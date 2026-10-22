@@ -505,6 +505,14 @@ counted, and the reason says how many. When most of it doesn't check out, the re
 `INVALID`, never a score. The fragments are the judge's recorded context, so the judge-input
 audit checks them against what the run retrieved.
 
+A long fragment, such as a whole statute section, is split into parts at a paragraph or a
+sentence, and the judge reads every part, up to 120,000 characters of fragments in all. A run
+records the first 2,000 characters of each fragment, so under `assay test --judge` a fragment that
+long may be longer than what was kept. Either way, when the judge didn't see all of a fragment, a
+claim it calls fabricated or inferred may be supported by the rest, so it isn't counted: the
+reason says "couldn't judge" and names the fragment. Pass the fragments to `faithfulness()`
+yourself to have them read whole.
+
 Outside `assay test`, on your own pipeline:
 
 ```python

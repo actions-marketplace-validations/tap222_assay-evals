@@ -29,7 +29,7 @@ def _get(x: Any, *names: str):
     return None
 
 
-def _one(x: Any, i: int) -> dict:
+def _one(x: Any, i: int, max_text: Optional[int] = MAX_TEXT) -> dict:
     score = None
     if isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], (int, float)):  # (document, score)
         x, score = x
@@ -66,13 +66,15 @@ def _one(x: Any, i: int) -> dict:
     if source:
         out["source"] = str(source)[:512]
     if text:
-        out["text"] = text[:MAX_TEXT]
+        out["text"] = text if max_text is None else text[:max_text]
     return out
 
 
-def fragments(items: Optional[Iterable[Any]], used: Union[None, int, List[Any]] = None) -> List[dict]:
-    """The fragments, each {"id", "position", "tokens", "used", "score"?, "source"?, "text"?}."""
-    out = [_one(x, i) for i, x in enumerate(list(items or [])[:MAX_FRAGMENTS])]
+def fragments(items: Optional[Iterable[Any]], used: Union[None, int, List[Any]] = None,
+              max_text: Optional[int] = MAX_TEXT) -> List[dict]:
+    """The fragments, each {"id", "position", "tokens", "used", "score"?, "source"?, "text"?}. Each
+    text is kept to max_text characters, as recorded; None keeps it whole (a judge reading it)."""
+    out = [_one(x, i, max_text) for i, x in enumerate(list(items or [])[:MAX_FRAGMENTS])]
     if used is None:
         chosen = None
     elif isinstance(used, bool):
