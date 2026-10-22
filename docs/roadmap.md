@@ -331,6 +331,11 @@ phase are marked there too.
   with placeholders before traces are saved or uploaded.
 - **Secrets at rest:** Sensitive integration credentials (webhook targets, Slack hooks, Linear tokens,
   and PagerDuty keys) are encrypted with AES-256-GCM server-side encryption using `ASSAY_SECRET_KEY`.
+- **Saying "the sources don't say" (RAG):** `expect(run).must_abstain()` marks a case whose
+  documents don't answer its question, and fails an answer that answers it anyway;
+  `.must_not_abstain()` fails "I couldn't find it" when the documents do answer. `assay test` and
+  the pull request summary count them apart: right to abstain, answered anyway, abstained when the
+  answer was there.
 
 ## Not planned
 
@@ -685,11 +690,6 @@ phase are marked there too.
   - **Where each part was lost:** never retrieved, retrieved but left out of the answer, or written
     and then removed by a later check. Each needs a different fix, and one accuracy score hides
     which one a team has.
-- **Saying "the sources don't say":** a RAG answer to a question its documents don't answer
-  should say so, not fill the gap with something plausible. Faithfulness flags a fabricated
-  claim, but nothing marks a case as unanswerable and fails an answer that answers it anyway. A
-  case should be able to expect an abstention, and the report should count abstentions apart:
-  right to abstain, abstained when the answer was there, answered when it wasn't.
 - **"None", "all of them", and a bigger library (RAG):** the misses that look like answers.
   - **False reassurance:** "no interaction", "no such clause", "not required", when a source says
     there is one. A negative claim quotes nothing, so a claim-by-claim check has little to hold it

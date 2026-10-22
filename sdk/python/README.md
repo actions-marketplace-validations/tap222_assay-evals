@@ -155,6 +155,11 @@ fails a retry that charged twice;
 `expect(run).handles_failure()`, `.no_false_success()`, `.well_formed_arguments()` and
 `.checkpoint(name, ...)` check what the agent did about it (see [agents](../../docs/agents.md)).
 
+`expect(run).must_abstain()` marks a case whose sources don't answer its question: the answer has
+to say so ("the documents don't say") rather than fill the gap. `.must_not_abstain()` is the other
+half, for a question they do answer. `assay test` counts the two apart (see
+[faithfulness](../../docs/agents.md#faithfulness-is-the-answer-backed-by-what-was-retrieved)).
+
 `assay.claim_review(run_id, claim, verdict, evidence=..., correction=..., by=...)` records an
 expert's decision on one claim (supported, wrong, a conflict between sources resolved), made while
 they use the product. A run tagged `consent="shared"` is one its user agreed to share. See

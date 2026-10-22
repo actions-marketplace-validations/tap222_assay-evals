@@ -54,7 +54,9 @@ CHECK_NAMES = {"plan_quality": "Plan quality", "consistency": "Consistency", "co
                "max_fixed_context_tokens": "Fixed context per call", "tool_choice": "Tool choice",
                "tool_args": "Tool arguments", "tool_results": "Tool results", "arguments": "Well-formed arguments",
                "claimed_success": "Claimed success", "context_retention": "Context retention",
-               "rewording": "Same behavior reworded", "document": "All fields correct"}
+               "rewording": "Same behavior reworded", "document": "All fields correct",
+               "expect.must_abstain()": "Says the sources don't answer",
+               "expect.must_not_abstain()": "Answers when the sources do"}
 PII_EVALUATOR = "assay.pii@1"
 
 CLAUDE_SKILL = ".claude/skills/assay/SKILL.md"
@@ -1510,6 +1512,28 @@ def failure_kinds(rows: list, base_rows: list) -> dict:
     return {"now": now, "before": count(base_rows), "compared": bool(base_rows)} if now else {}
 
 
+ABSTAIN, ANSWER = "expect.must_abstain()", "expect.must_not_abstain()"
+
+
+def abstention_text(fields: List[dict]) -> Optional[str]:
+    """Saying "the sources don't say", counted apart from the other checks: right to abstain,
+    answered when the sources don't say, abstained when they do."""
+    by = {f["field"]: f for f in fields}
+    a, b = by.get(ABSTAIN), by.get(ANSWER)
+    if not a and not b:
+        return None
+    out = []
+    if a:
+        out += [f"{a['passed']}/{a['total']} rightly said the sources don't answer"]
+        if a["total"] > a["passed"]:
+            out += [f"{a['total'] - a['passed']} answered anyway"]
+    if b and b["total"] > b["passed"]:
+        out += [f"{b['total'] - b['passed']}/{b['total']} said so when the sources do answer"]
+    elif b:
+        out += [f"{b['total']}/{b['total']} answered when the sources do"]
+    return " · ".join(out)
+
+
 def kinds_text(k: dict) -> str:
     before = k.get("before") or {}
     return " · ".join(f"{n} {kind.replace('_', ' ')}" + (f" ({before.get(kind, 0)} before)" if k.get("compared") else "")
@@ -2371,6 +2395,9 @@ def summary_markdown(run_id: str, result: dict, code: int, against: Optional[str
     pc = result.get("_paired")
     if pc and (pc["lost"] or pc["gained"]):
         out += [f"Paired cases: {paired_text(pc)}", ""]
+    ab = abstention_text(result["fields"])
+    if ab:
+        out += [f"Unanswerable questions: {ab}", ""]
     if policy and policy["changes"]:
         title = ('Policy changes (not applied: add the `assay-policy-change` label to accept them)' if policy['weakened']
                  else 'Policy changes (accepted)' if policy['accepted']
@@ -2505,6 +2532,9 @@ def report(run_id: str, baseline: Optional[str], result: dict, repeat: int, code
     out += trust_block
     if result.get("fixed_context"):
         out += [_paint("Fixed context per call", "bold"), f"  {fixed_context_text(result['fixed_context'])}", ""]
+    ab = abstention_text(fields)
+    if ab:
+        out += [_paint("Unanswerable questions", "bold"), f"  {ab}", ""]
     if result.get("kinds"):
         out += [_paint("Failures by kind", "bold"), f"  {kinds_text(result['kinds'])}", ""]
     problems = c["problems"]

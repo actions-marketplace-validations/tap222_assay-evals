@@ -522,6 +522,30 @@ out = faithfulness(Judge("anthropic", "claude-opus-5"), question, answer, fragme
 out["faithfulness"].score, out["context_relevance"].score, out["claims"]
 ```
 
+A question the documents don't answer has one right answer: saying so. Faithfulness fails an
+answer that invents a fact, but an answer that fills the gap with a claim it can half quote, or
+that hedges, can still pass. Mark the case instead:
+
+```python
+def test_warranty_not_in_the_docs(assay_case):
+    expect(assay_case).must_abstain()        # the sources don't say: the answer should
+    rag(assay_case, "How long is the warranty on refurbished units?")
+
+def test_refund_window(assay_case):
+    expect(assay_case).must_not_abstain()    # the sources do say: "I couldn't find it" fails
+    rag(assay_case, "How long do refunds take?")
+```
+
+An answer abstains when a sentence says the sources don't answer the question: "the documents
+don't say", "I couldn't find anything about", "not covered in the sources". "The policy doesn't
+cover water damage" is an answer, not an abstention. The two expectations are counted apart from
+the other checks, so a system that refuses everything shows up as clearly as one that never does:
+
+```
+Unanswerable questions
+  4/5 rightly said the sources don't answer · 1 answered anyway · 2/30 said so when the sources do answer
+```
+
 ### Retrieved context: what RAG puts in the prompt, and what it costs
 
 Adding retrieval to an app often multiplies its bill. Every fragment retrieved is added to the
